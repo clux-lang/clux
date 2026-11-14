@@ -326,7 +326,8 @@ static bool subtypes_segment_equal(const clux_struct_subtype_t *self,
 
 static bool decls_segment_equal(const clux_struct_meta_t *self,
                                 const clux_struct_decl_t *decl) {
-  if (self->attr_count != decl->attr_count ||
+  if (self->count != decl->field_count ||
+      self->attr_count != decl->attr_count ||
       self->method_count != decl->method_count ||
       self->subtype_count != decl->subtype_count ||
       !fields_segment_equal(self->fields, decl->fields, decl->field_count)) {
@@ -369,11 +370,35 @@ static bool struct_type_equal(clux_type_t *self, clux_type_t *other) {
   return decls_segment_equal(self_meta, &other_decl);
 }
 
+/* 向下兼容（struct 指针隐式转换的白皮书依据）：base 的字段表是 self
+   字段表的前缀（按声明序名+类型一致）即 self extends base——额外字段
+   与 attribute/method/subtype 均不参与（只看字段兼容）。指针协变递归
+   由此接通：*Derived extends *Base。 */
+static bool struct_type_extends(clux_type_t *self, clux_type_t *base) {
+  if (!struct_kind(clux_type_get_kind(base))) {
+    return false;
+  }
+  clux_struct_meta_t *self_meta = struct_meta(self);
+  clux_struct_meta_t *base_meta = struct_meta(base);
+  if (!self_meta || !base_meta || base_meta->count > self_meta->count) {
+    return false;
+  }
+  for (size_t idx = 0; idx < base_meta->count; idx++) {
+    if (strcmp(self_meta->fields[idx].name, base_meta->fields[idx].name) != 0 ||
+        !clux_type_equal(self_meta->fields[idx].type,
+                         base_meta->fields[idx].type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static clux_vtable_t g_struct_vtable = {
     .eq = struct_eq,
     .ne = struct_ne,
     .field = struct_field,
     .type_equal = struct_type_equal,
+    .type_extends = struct_type_extends,
 };
 
 clux_vtable_t *get_clux_struct_vtable(void) { return &g_struct_vtable; }

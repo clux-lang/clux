@@ -1907,7 +1907,7 @@ TEST(EngineTest, PtrTypeIsInternedByBase) {
   EXPECT_NE(vt->deref, nullptr);
   EXPECT_EQ(vt->index, nullptr);
   EXPECT_EQ(vt->add, nullptr);
-  EXPECT_EQ(vt->safe_cast, nullptr);
+  EXPECT_NE(vt->safe_cast, nullptr);
   EXPECT_EQ(vt->cast, nullptr);
 
   clux_type_t *ptr_f64 =
@@ -2123,7 +2123,7 @@ TEST(EngineTest, PtrUnsupportedOps) {
       clux_context_safe_cast(ctx, p, clux_context_get_i32_type(ctx), NULL);
   ASSERT_NE(safe_cast, nullptr);
   EXPECT_STREQ(error_message_of(safe_cast),
-               "type '*i32' cannot be safely cast to 'i32'");
+               "cannot safely cast '*i32' to 'i32'");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -4191,6 +4191,135 @@ TEST(EngineTest, StructAttributesMethodsSubtypes) {
   EXPECT_EQ(
       clux_context_create_struct_type(ctx, "DupSubtype", &dup_subtype_decl),
       nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StructPointerCovariantImplicitCast) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *f32_type = clux_context_get_f32_type(ctx);
+
+  /* Base{a,b} ← Derived{a,b,c} 字段前缀兼容；Unrelated 横跨不兼容 */
+  clux_struct_field_t base_fields[] = {
+      {"a", i32_type},
+      {"b", i64_type},
+  };
+  clux_struct_decl_t base_decl = {base_fields, 2, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *base_type =
+      clux_context_create_struct_type(ctx, "Base", &base_decl);
+  ASSERT_NE(base_type, nullptr);
+  clux_struct_field_t derived_fields[] = {
+      {"a", i32_type},
+      {"b", i64_type},
+      {"c", f32_type},
+  };
+  clux_struct_decl_t derived_decl = {
+      derived_fields, 3, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *derived_type =
+      clux_context_create_struct_type(ctx, "Derived", &derived_decl);
+  ASSERT_NE(derived_type, nullptr);
+  clux_struct_field_t unrelated_fields[] = {
+      {"x", i32_type},
+  };
+  clux_struct_decl_t unrelated_decl = {
+      unrelated_fields, 1, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *unrelated_type =
+      clux_context_create_struct_type(ctx, "Unrelated", &unrelated_decl);
+  ASSERT_NE(unrelated_type, nullptr);
+
+  /* 类型级 extends：字段前缀兼容是单向的（向下兼容），自反成立 */
+  EXPECT_TRUE(clux_type_extends(derived_type, base_type));
+  EXPECT_FALSE(clux_type_extends(base_type, derived_type));
+  EXPECT_TRUE(clux_type_extends(base_type, base_type));
+  EXPECT_FALSE(clux_type_extends(base_type, unrelated_type));
+  EXPECT_FALSE(clux_type_extends(derived_type, unrelated_type));
+  /* attribute 不参与 extends（只看字段） */
+  clux_value_t *tag = clux_context_create_i32(ctx, 1, "tag", NULL);
+  ASSERT_NE(tag, nullptr);
+  clux_struct_attr_t tagged_attrs[] = {{"tag", tag}};
+  clux_struct_decl_t tagged_decl = {
+      derived_fields, 3, tagged_attrs, 1, NULL, 0, NULL, 0};
+  clux_type_t *tagged_type =
+      clux_context_create_struct_type(ctx, "Tagged", &tagged_decl);
+  ASSERT_NE(tagged_type, nullptr);
+  EXPECT_TRUE(clux_type_extends(tagged_type, base_type));
+
+  /* 指针协变接通：*Derived extends *Base，双重指针递归成立，反向拒绝 */
+  clux_type_t *base_ptr_type = clux_context_get_ptr_type(ctx, base_type);
+  clux_type_t *derived_ptr_type = clux_context_get_ptr_type(ctx, derived_type);
+  clux_type_t *unrelated_ptr_type =
+      clux_context_get_ptr_type(ctx, unrelated_type);
+  EXPECT_STREQ(clux_type_get_name(base_ptr_type), "*Base");
+  EXPECT_TRUE(clux_type_extends(derived_ptr_type, base_ptr_type));
+  EXPECT_FALSE(clux_type_extends(base_ptr_type, derived_ptr_type));
+  EXPECT_FALSE(clux_type_extends(derived_ptr_type, unrelated_ptr_type));
+  EXPECT_TRUE(
+      clux_type_extends(clux_context_get_ptr_type(ctx, derived_ptr_type),
+                        clux_context_get_ptr_type(ctx, base_ptr_type)));
+
+  /* 隐式转换：assign 异类型走 safe_cast，*Derived 值可写入 *Base 变量 */
+  clux_value_t *d = clux_context_create_struct(ctx, derived_type, "d", NULL);
+  ASSERT_NE(d, nullptr);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  clux_value_t *field_a = clux_context_field(ctx, d, "a", NULL);
+  ASSERT_NE(field_a, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, field_a, five, NULL), field_a);
+  clux_value_t *d_ptr = clux_context_ref(ctx, d, NULL);
+  ASSERT_NE(d_ptr, nullptr);
+  clux_value_t *base_slot =
+      clux_context_create_ptr(ctx, base_ptr_type, 0, "base_slot", NULL);
+  ASSERT_NE(base_slot, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, base_slot, d_ptr, NULL), base_slot);
+  /* 转换后经 Base 视图读到同一实例 */
+  EXPECT_EQ(read_i32(clux_context_field(
+                ctx, clux_context_deref(ctx, base_slot, NULL), "a", NULL)),
+            5);
+
+  /* 显式 safe_cast：成功产出目标类型；shadow 产出目标类型 shadow */
+  clux_value_t *up = clux_context_safe_cast(ctx, d_ptr, base_ptr_type, NULL);
+  ASSERT_NE(up, nullptr);
+  EXPECT_EQ(clux_value_get_type(up), base_ptr_type);
+  EXPECT_EQ(read_i32(clux_context_field(
+                ctx, clux_context_deref(ctx, up, NULL), "a", NULL)),
+            5);
+  clux_value_t *shadow_ptr =
+      clux_context_create_shadow_value(ctx, derived_ptr_type);
+  ASSERT_NE(shadow_ptr, nullptr);
+  clux_value_t *shadow_up =
+      clux_context_safe_cast(ctx, shadow_ptr, base_ptr_type, NULL);
+  ASSERT_NE(shadow_up, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_up));
+  EXPECT_EQ(clux_value_get_type(shadow_up), base_ptr_type);
+
+  /* 反向与横跨拒绝：向下兼容是单向的 */
+  clux_value_t *b = clux_context_create_struct(ctx, base_type, "b", NULL);
+  ASSERT_NE(b, nullptr);
+  clux_value_t *b_ptr = clux_context_ref(ctx, b, NULL);
+  ASSERT_NE(b_ptr, nullptr);
+  clux_value_t *down =
+      clux_context_safe_cast(ctx, b_ptr, derived_ptr_type, NULL);
+  ASSERT_NE(down, nullptr);
+  EXPECT_STREQ(error_message_of(down),
+               "cannot safely cast '*Base' to '*Derived'");
+  clux_value_t *cross =
+      clux_context_safe_cast(ctx, d_ptr, unrelated_ptr_type, NULL);
+  ASSERT_NE(cross, nullptr);
+  EXPECT_STREQ(error_message_of(cross),
+               "cannot safely cast '*Derived' to '*Unrelated'");
+  /* 隐式路径同样拒绝：*Base 值写入 *Derived 变量 */
+  clux_value_t *derived_slot =
+      clux_context_create_ptr(ctx, derived_ptr_type, 0, "derived_slot", NULL);
+  ASSERT_NE(derived_slot, nullptr);
+  clux_value_t *rev = clux_context_assign(ctx, derived_slot, b_ptr, NULL);
+  ASSERT_NE(rev, nullptr);
+  EXPECT_STREQ(error_message_of(rev),
+               "cannot safely cast '*Base' to '*Derived'");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

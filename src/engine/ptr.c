@@ -2,6 +2,7 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdbool.h>
@@ -147,9 +148,49 @@ static bool ptr_type_extends(clux_type_t *self, clux_type_t *base) {
   return clux_type_extends(self_meta->base, base_meta->base);
 }
 
+/* 安全转换（隐式转换点，assign 异类型时走此处）：目标是指针且协变
+   extends 成立（*Derived → *Base，字段前缀兼容）即放行——指针位图
+   不变，产出目标类型的新值；不成立时返回语义化 error（反向与横跨
+   均拒绝，向下兼容是单向的）。 */
+static clux_value_t *
+ptr_safe_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
+  clux_type_t *source = clux_value_get_type(value);
+  if (clux_type_get_kind(source) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  const char *source_name = clux_type_get_name(source);
+  const char *target_name = clux_type_get_name(target);
+  if (clux_type_kind_unwrap(target) != CLUX_TYPE_PTR ||
+      !clux_type_extends(source, target)) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "cannot safely cast '%s' to '%s'",
+        source_name ? source_name : "<unknown>",
+        target_name ? target_name : "<unknown>");
+  }
+  if (clux_type_equal(source, target)) {
+    return value;
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(ctx, target);
+  }
+  ptr_handle_t handle = 0;
+  if (!ptr_read(value, &handle)) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "cannot safely cast '%s' to '%s'",
+        source_name ? source_name : "<unknown>",
+        target_name ? target_name : "<unknown>");
+  }
+  return clux_context_create_ptr(ctx, target, handle, NULL, NULL);
+}
+
 static clux_vtable_t g_ptr_vtable = {
     .eq = ptr_eq,
     .ne = ptr_ne,
+    .safe_cast = ptr_safe_cast,
     .deref = ptr_deref,
     .type_equal = ptr_type_equal,
     .type_extends = ptr_type_extends,
