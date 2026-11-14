@@ -279,13 +279,13 @@ TEST_F(NodeSemanticTest, TernaryMissingBranches) {
 TEST_F(NodeSemanticTest, Assign) {
   node_t *n = create_assign_node(a);
   EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPR_ASSIGN);
-  node_t *id = make_leaf(a);
+  node_t *left = make_leaf(a);
   node_t *symbol = make_leaf(a);
   node_t *value = make_leaf(a);
-  assign_node_set_id(n, id);
+  assign_node_set_left(n, left);
   assign_node_set_symbol(n, symbol);
   assign_node_set_value(n, value);
-  EXPECT_EQ(assign_node_get_id(n), id);
+  EXPECT_EQ(assign_node_get_left(n), left);
   EXPECT_EQ(assign_node_get_symbol(n), symbol);
   EXPECT_EQ(assign_node_get_value(n), value);
   delete_node(&n);
@@ -293,11 +293,12 @@ TEST_F(NodeSemanticTest, Assign) {
 
 TEST_F(NodeSemanticTest, AssignMissingValue) {
   node_t *n = create_assign_node(a);
-  node_t *id = make_leaf(a);
+  node_t *left = make_leaf(a);
   node_t *symbol = make_leaf(a);
-  assign_node_set_id(n, id);
+  assign_node_set_left(n, left);
   assign_node_set_symbol(n, symbol);
   assign_node_set_value(n, nullptr);
+  EXPECT_EQ(assign_node_get_left(n), left);
   EXPECT_EQ(assign_node_get_value(n), nullptr);
   delete_node(&n);
 }

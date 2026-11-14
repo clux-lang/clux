@@ -1250,59 +1250,79 @@ node_t *parser_read_expr_ternary(allocator_t *allocator, parser_t *parser) {
       expr, node_get_location(condition), node_get_location(else_));
   return expr;
 }
-node_t *parser_read_expr_assign(allocator_t *allocator, parser_t *parser) {
-  size_t position = parser_get_position(parser);
+/* 赋值运算符表（白皮书 §5.3 最低优先级，右结合）。 */
+static const char *assign_operators[] = {"=",
+                                         "+=",
+                                         "-=",
+                                         "*=",
+                                         "/=",
+                                         "%=",
+                                         "&=",
+                                         "|=",
+                                         "~=",
+                                         "^=",
+                                         "&&=",
+                                         "||=",
+                                         ">>=",
+                                         "<<=",
+                                         NULL};
+
+static const char *peek_assign_operator(parser_t *parser) {
   token_t *token = parser_peek_token(parser);
-  if (!token || token_get_kind(token) != CLUX_TOKEN_IDENTIFIER) {
-    goto next;
+  if (!token || token_get_kind(token) != CLUX_TOKEN_SYMBOL) {
+    return NULL;
   }
-  parser_next(parser);
+  for (size_t idx = 0; assign_operators[idx] != NULL; idx++) {
+    if (token_is(token, CLUX_TOKEN_SYMBOL, assign_operators[idx])) {
+      return assign_operators[idx];
+    }
+  }
+  return NULL;
+}
+
+/* 赋值是右结合的最低优先级层：<expr> = <expr>。
+   左子树是任意无赋值表达式（ternary 层，含下标/成员访问/解引用/括号），
+   语法层不区分可赋值目标，左子树是否可赋值由 sema 检查；
+   右子树递归本层形成右结合链（a = b = c 解析为 a = (b = c)）。 */
+node_t *parser_read_expr_assign(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_ternary(allocator, parser);
+  if (!left) {
+    return NULL;
+  }
+  size_t after_left = parser_get_position(parser);
   parser_skip_trivia(parser);
-  token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_SYMBOL, "=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "+=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "-=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "*=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "/=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "%=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "&=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "|=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "~=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "^=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "&&=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "||=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, ">>=") &&
-      !token_is(token, CLUX_TOKEN_SYMBOL, "<<=")) {
-    parser_set_position(parser, position);
-    goto next;
+  const char *op = peek_assign_operator(parser);
+  if (!op) {
+    /* 不是赋值：回退游标到左操作数之后，不吞掉后续 trivia。 */
+    parser_set_position(parser, after_left);
+    return left;
   }
-  parser_set_position(parser, position);
   node_t *expr = create_assign_node(allocator);
-  node_t *id = parser_read_literal_identifier(allocator, parser);
-  assign_node_set_id(expr, id);
-  parser_skip_trivia(parser);
+  assign_node_set_left(expr, left);
   node_t *symbol = parser_read_symbol(allocator, parser);
   assign_node_set_symbol(expr, symbol);
+  node_set_location_span(
+      expr, node_get_location(left), node_get_location(symbol));
+  size_t after_symbol = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *value = parser_read_expr_ternary(allocator, parser);
+  /* 右操作数递归本层：右结合。 */
+  node_t *value = parser_read_expr_assign(allocator, parser);
   if (!value) {
     /* 容错：缺右值仍返回不完整的节点（VALUE 子节点为 NULL），
        同时记录错误，由调用方决定是否中止。 */
-    node_set_location_span(
-        expr, node_get_location(id), node_get_location(symbol));
+    /* 错误位置先取：此时游标仍停在坏 token 上（若已到流末尾则退化）。 */
     location_t loc =
         expression_error_location(parser, node_get_location(symbol));
+    parser_set_position(parser, after_symbol);
     parser_push_error(
         parser,
         create_error(allocator, &loc, "expected expression after assignment"));
   } else {
     assign_node_set_value(expr, value);
     node_set_location_span(
-        expr, node_get_location(id), node_get_location(value));
+        expr, node_get_location(left), node_get_location(value));
   }
   return expr;
-next:
-  return parser_read_expr_ternary(allocator, parser);
 }
 node_t *parser_read_expr(allocator_t *allocator, parser_t *parser) {
   return parser_read_expr_assign(allocator, parser);

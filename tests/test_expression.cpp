@@ -22,7 +22,7 @@ static node_t *parse_expr(allocator_t *a, parser_t **p, const char *src) {
 
 /* 断言 assign 节点的三个子节点形状。 */
 static void expect_assign(node_t *expr,
-                          const char *id_src,
+                          const char *left_src,
                           const char *symbol_src,
                           node_kind_t value_kind) {
   ASSERT_NE(expr, nullptr);
@@ -30,12 +30,12 @@ static void expect_assign(node_t *expr,
   EXPECT_EQ(vec_get_size(node_get_children(expr)),
             (size_t)CLUX_EXPR_ASSIGN_CHILDREN_SIZE);
 
-  node_t *id = node_get_child(expr, CLUX_EXPR_ASSIGN_ID);
-  ASSERT_NE(id, nullptr);
-  EXPECT_EQ(node_get_kind(id), CLUX_NODE_LITERAL_IDENTIFIER);
-  EXPECT_EQ(node_get_location(id)->end.offset -
-                node_get_location(id)->begin.offset,
-            (ptrdiff_t)strlen(id_src));
+  node_t *left = node_get_child(expr, CLUX_EXPR_ASSIGN_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_kind(left), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_location(left)->end.offset -
+                node_get_location(left)->begin.offset,
+            (ptrdiff_t)strlen(left_src));
 
   node_t *symbol = node_get_child(expr, CLUX_EXPR_ASSIGN_SYMBOL);
   ASSERT_NE(symbol, nullptr);
@@ -287,7 +287,7 @@ TEST(ExpressionAssignTest, MissingValueReturnsPartialNodeAndError) {
   node_t *expr = parse_expr(a, &p, "x =");
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ASSIGN);
-  EXPECT_NE(node_get_child(expr, CLUX_EXPR_ASSIGN_ID), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_ASSIGN_LEFT), nullptr);
   EXPECT_NE(node_get_child(expr, CLUX_EXPR_ASSIGN_SYMBOL), nullptr);
   EXPECT_EQ(node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE), nullptr);
 
@@ -341,6 +341,75 @@ TEST(ExpressionAssignTest, AssignAtEndOfStream) {
   delete_allocator(&a);
 }
 
+/* ---- 左子树为任意表达式（可赋值性留待 sema 检查） ---- */
+
+/* 下标目标：arr[0] = 1。 */
+TEST(ExpressionAssignTest, SubscriptTarget) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "arr[0] = 1");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ASSIGN);
+  node_t *left = node_get_child(expr, CLUX_EXPR_ASSIGN_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_kind(left), CLUX_NODE_EXPR_SUBSCRIPT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 成员访问目标：obj.field = 1（postfix 层复用 binary 节点）。 */
+TEST(ExpressionAssignTest, MemberAccessTarget) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "obj.field = 1");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ASSIGN);
+  node_t *left = node_get_child(expr, CLUX_EXPR_ASSIGN_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_kind(left), CLUX_NODE_EXPR_BINARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 右结合赋值链：a = b = c 解析为 a = (b = c)。 */
+TEST(ExpressionAssignTest, RightAssociativeChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "a = b = c");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ASSIGN);
+  node_t *outer_value = node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE);
+  ASSERT_NE(outer_value, nullptr);
+  EXPECT_EQ(node_get_kind(outer_value), CLUX_NODE_EXPR_ASSIGN);
+  node_t *inner_left = node_get_child(outer_value, CLUX_EXPR_ASSIGN_LEFT);
+  ASSERT_NE(inner_left, nullptr);
+  EXPECT_EQ(node_get_kind(inner_left), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 字面量左侧语法层接受（1 = 2），可赋值性由 sema 阶段检查。 */
+TEST(ExpressionAssignTest, NonAssignableLeftAcceptedSyntactically) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "1 = 2");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ASSIGN);
+  node_t *left = node_get_child(expr, CLUX_EXPR_ASSIGN_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_kind(left), CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ---- 子节点 parent 未自动挂载（设计如此，见 node 手工维护约定） ---- */
 
 TEST(ExpressionAssignTest, ChildrenParentIsAutoSet) {
@@ -348,7 +417,7 @@ TEST(ExpressionAssignTest, ChildrenParentIsAutoSet) {
   parser_t *p;
   node_t *expr = parse_expr(a, &p, "x = 1");
   ASSERT_NE(expr, nullptr);
-  node_t *id = node_get_child(expr, CLUX_EXPR_ASSIGN_ID);
+  node_t *id = node_get_child(expr, CLUX_EXPR_ASSIGN_LEFT);
   ASSERT_NE(id, nullptr);
   EXPECT_EQ(node_get_parent(id), expr);
   delete_node(&expr);
