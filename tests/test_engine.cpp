@@ -4325,6 +4325,114 @@ TEST(EngineTest, StructPointerCovariantImplicitCast) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, StructDuckTypeImplicitCast) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *f32_type = clux_context_get_f32_type(ctx);
+
+  /* P 与 Q 字段表一致但 attribute 声明不同：不去重折叠为同一类型，
+     鸭子判据（只看字段名+顺序+类型）双向成立 */
+  clux_struct_field_t fields[] = {
+      {"x", i32_type},
+      {"y", i64_type},
+  };
+  clux_value_t *tag = clux_context_create_i32(ctx, 1, NULL, NULL);
+  ASSERT_NE(tag, nullptr);
+  clux_struct_attr_t attrs[] = {{"tag", tag}};
+  clux_struct_decl_t p_decl = {fields, 2, attrs, 1, NULL, 0, NULL, 0};
+  clux_type_t *p_type = clux_context_create_struct_type(ctx, "P", &p_decl);
+  ASSERT_NE(p_type, nullptr);
+  clux_struct_decl_t q_decl = {fields, 2, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *q_type = clux_context_create_struct_type(ctx, "Q", &q_decl);
+  ASSERT_NE(q_type, nullptr);
+  EXPECT_NE(p_type, q_type);
+  EXPECT_FALSE(clux_type_equal(p_type, q_type));
+
+  /* 隐式互赋：P 值写入 Q 变量，数据穿透可读；反向同理（相互赋值） */
+  clux_value_t *p = clux_context_create_struct(ctx, p_type, "p", NULL);
+  ASSERT_NE(p, nullptr);
+  clux_value_t *seven = clux_context_create_i32(ctx, 7, NULL, NULL);
+  ASSERT_NE(seven, nullptr);
+  clux_value_t *field_x = clux_context_field(ctx, p, "x", NULL);
+  ASSERT_NE(field_x, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, field_x, seven, NULL), field_x);
+  clux_value_t *q = clux_context_create_struct(ctx, q_type, "q", NULL);
+  ASSERT_NE(q, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, q, p, NULL), q);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, q, "x", NULL)), 7);
+  clux_value_t *p2 = clux_context_create_struct(ctx, p_type, "p2", NULL);
+  ASSERT_NE(p2, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, p2, q, NULL), p2);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, p2, "x", NULL)), 7);
+
+  /* 显式 safe_cast 产出目标类型；shadow 产出目标类型 shadow */
+  clux_value_t *as_q = clux_context_safe_cast(ctx, p, q_type, NULL);
+  ASSERT_NE(as_q, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_q), q_type);
+  clux_value_t *shadow_p = clux_context_create_shadow_value(ctx, p_type);
+  ASSERT_NE(shadow_p, nullptr);
+  clux_value_t *shadow_q = clux_context_safe_cast(ctx, shadow_p, q_type, NULL);
+  ASSERT_NE(shadow_q, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_q));
+  EXPECT_EQ(clux_value_get_type(shadow_q), q_type);
+
+  /* 拒绝：字段名不同、顺序不同、类型不同、字段数不同（前缀 extends
+     成立但值语义要求字段表完全一致）、非 struct 目标 */
+  clux_struct_field_t renamed[] = {
+      {"z", i32_type},
+      {"y", i64_type},
+  };
+  clux_struct_decl_t r_decl = {renamed, 2, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *r_type = clux_context_create_struct_type(ctx, "R", &r_decl);
+  ASSERT_NE(r_type, nullptr);
+  clux_value_t *bad_name = clux_context_safe_cast(ctx, p, r_type, NULL);
+  ASSERT_NE(bad_name, nullptr);
+  EXPECT_STREQ(error_message_of(bad_name), "cannot safely cast 'P' to 'R'");
+  clux_struct_field_t reordered[] = {
+      {"y", i64_type},
+      {"x", i32_type},
+  };
+  clux_struct_decl_t s_decl = {reordered, 2, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *s_type = clux_context_create_struct_type(ctx, "S", &s_decl);
+  ASSERT_NE(s_type, nullptr);
+  clux_value_t *bad_order = clux_context_safe_cast(ctx, p, s_type, NULL);
+  ASSERT_NE(bad_order, nullptr);
+  EXPECT_STREQ(error_message_of(bad_order), "cannot safely cast 'P' to 'S'");
+  clux_struct_field_t retyped[] = {
+      {"x", f32_type},
+      {"y", i64_type},
+  };
+  clux_struct_decl_t t_decl = {retyped, 2, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *t_type = clux_context_create_struct_type(ctx, "T", &t_decl);
+  ASSERT_NE(t_type, nullptr);
+  clux_value_t *bad_type = clux_context_safe_cast(ctx, p, t_type, NULL);
+  ASSERT_NE(bad_type, nullptr);
+  EXPECT_STREQ(error_message_of(bad_type), "cannot safely cast 'P' to 'T'");
+  clux_struct_field_t shorter[] = {
+      {"x", i32_type},
+  };
+  clux_struct_decl_t u_decl = {shorter, 1, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *u_type = clux_context_create_struct_type(ctx, "U", &u_decl);
+  ASSERT_NE(u_type, nullptr);
+  /* P extends U（字段前缀）成立，但值互赋仍拒：U → P 方向 memcpy 按
+     P 平铺会越界读 U 的内存——值语义要求字段表完全一致 */
+  EXPECT_TRUE(clux_type_extends(p_type, u_type));
+  clux_value_t *u = clux_context_create_struct(ctx, u_type, "u", NULL);
+  ASSERT_NE(u, nullptr);
+  clux_value_t *bad_count = clux_context_safe_cast(ctx, u, p_type, NULL);
+  ASSERT_NE(bad_count, nullptr);
+  EXPECT_STREQ(error_message_of(bad_count), "cannot safely cast 'U' to 'P'");
+  clux_value_t *bad_kind = clux_context_safe_cast(ctx, p, i32_type, NULL);
+  ASSERT_NE(bad_kind, nullptr);
+  EXPECT_STREQ(error_message_of(bad_kind), "cannot safely cast 'P' to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;

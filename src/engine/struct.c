@@ -2,6 +2,7 @@
 #include "core/allocator.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdbool.h>
@@ -393,10 +394,57 @@ static bool struct_type_extends(clux_type_t *self, clux_type_t *base) {
   return true;
 }
 
+/* 鸭子类型互赋（值的隐式转换点）：两边字段表逐项一致（名+类型按声明序，
+   即内存布局一致）即互相可赋值——类型名与 attribute/method/subtype 均
+   不参与（不看声明身份，只看结构）。字段表必须完全一致而非前缀：值语义
+   memcpy 按 target 平铺，target 多出的字段会越界读 source。 */
+static clux_value_t *struct_safe_cast(clux_context_t *ctx,
+                                      clux_value_t *value,
+                                      clux_type_t *target) {
+  clux_type_t *source = clux_value_get_type(value);
+  if (clux_type_get_kind(source) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  const char *source_name = clux_type_get_name(source);
+  const char *target_name = clux_type_get_name(target);
+  clux_struct_meta_t *source_meta = struct_meta(source);
+  clux_struct_meta_t *target_meta =
+      struct_kind(clux_type_kind_unwrap(target)) ? struct_meta(target) : NULL;
+  bool duck =
+      source_meta && target_meta && source_meta->count == target_meta->count;
+  if (duck) {
+    for (size_t idx = 0; idx < target_meta->count; idx++) {
+      if (strcmp(source_meta->fields[idx].name,
+                 target_meta->fields[idx].name) != 0 ||
+          !clux_type_equal(source_meta->fields[idx].type,
+                           target_meta->fields[idx].type)) {
+        duck = false;
+        break;
+      }
+    }
+  }
+  if (!duck) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "cannot safely cast '%s' to '%s'",
+        source_name ? source_name : "<unknown>",
+        target_name ? target_name : "<unknown>");
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(ctx, target);
+  }
+  /* 布局一致：共享源 data 建 target 类型的 view，assign 随后按 target
+     size memcpy 穿透写入左值。 */
+  return clux_context_create_value(
+      ctx, target, clux_value_get_data(value), NULL, NULL);
+}
+
 static clux_vtable_t g_struct_vtable = {
     .eq = struct_eq,
     .ne = struct_ne,
     .field = struct_field,
+    .safe_cast = struct_safe_cast,
     .type_equal = struct_type_equal,
     .type_extends = struct_type_extends,
 };
