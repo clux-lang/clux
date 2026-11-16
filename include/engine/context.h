@@ -15,6 +15,7 @@ extern "C" {
 #endif
 clux_context_t *create_clux_context(allocator_t *allocator);
 void delete_clux_context(clux_context_t **self);
+allocator_t *clux_context_get_allocator(clux_context_t *self);
 safe_allocator_t *clux_context_get_safe_allocator(clux_context_t *self);
 clux_value_t *clux_context_create_value(clux_context_t *self,
                                         clux_type_t *type,
@@ -34,6 +35,9 @@ clux_value_t *clux_context_declare_value(clux_context_t *self,
                                          clux_value_t *value,
                                          const char *name,
                                          location_t *loc);
+clux_value_t *clux_context_lookup(clux_context_t *self,
+                                  const char *name,
+                                  const location_t *loc);
 clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error);
 clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
@@ -332,7 +336,7 @@ clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             const char *name,
                                             location_t *loc);
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
-                                                location_t *loc,
+                                                const location_t *loc,
                                                 const char *fmt,
                                                 ...);
 clux_value_t *clux_context_safe_cast(clux_context_t *self,

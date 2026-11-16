@@ -226,6 +226,8 @@ enum _node_kind_t {
   /* 接口语句 <decorator>* [export]? <interface_decl>（白皮书 §3.10）。
      INTERFACE_DECL 槽存接口声明；EXPORT 可缺失；其后为装饰器。 */
   CLUX_NODE_STMT_INTERFACE,
+
+  CLUX_NODE_KIND_MAX,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

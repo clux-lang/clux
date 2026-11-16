@@ -185,12 +185,8 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                        sizeof(void *),
                        alignof(void *),
                        get_clux_func_template_vtable());
-  ctx->builtin_types.type_void = create_clux_type(allocator,
-                                                  CLUX_TYPE_VOID,
-                                                  "void",
-                                                  0,
-                                                  1,
-                                                  get_clux_void_vtable());
+  ctx->builtin_types.type_void = create_clux_type(
+      allocator, CLUX_TYPE_VOID, "void", 0, 1, get_clux_void_vtable());
   return ctx;
 }
 static void strs_dispose(uintptr_t key, char *str, allocator_t *allocator) {
@@ -239,6 +235,10 @@ void delete_clux_context(clux_context_t **self) {
   delete_rbtree(&ctx->strs);
   delete_safe_allocator(&ctx->safe_allocator);
   allocator_free(ctx->allocator, (void **)self);
+}
+
+allocator_t *clux_context_get_allocator(clux_context_t *self) {
+  return self->allocator;
 }
 safe_allocator_t *clux_context_get_safe_allocator(clux_context_t *self) {
   return self->safe_allocator;
@@ -1414,8 +1414,20 @@ clux_value_t *clux_context_declare_value(clux_context_t *self,
   memcpy(ptr_to_raw(data, 0), ptr_to_raw(clux_value_get_data(value), 0), size);
   return clux_context_create_value(self, type, data, name, loc);
 }
+
+clux_value_t *clux_context_lookup(clux_context_t *self,
+                                  const char *name,
+                                  const location_t *loc) {
+  clux_scope_t *scope = self->current_scope;
+  clux_value_t *val = clux_scope_get(scope, name);
+  if (val) {
+    return val;
+  }
+  return clux_context_create_error_message(
+      self, loc, "use of undeclared identifier '%s'", name);
+}
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
-                                                location_t *loc,
+                                                const location_t *loc,
                                                 const char *fmt,
                                                 ...) {
   va_list args;
