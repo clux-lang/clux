@@ -370,22 +370,13 @@ clux_value_t *clux_context_assign(clux_context_t *self,
    shadow 克隆为同类型 shadow，error 自传播。 */
 clux_value_t *
 clux_context_clone(clux_context_t *self, clux_value_t *value, location_t *loc);
-clux_type_t *clux_context_get_i8_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_i16_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_i32_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_i64_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_u8_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_u16_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_u32_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_u64_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_isize_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_usize_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_f32_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_f64_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_bool_type(clux_context_t *ctx);
-clux_type_t *clux_context_get_str_type(clux_context_t *ctx);
-/* "void" 内建类型：只作为无返回值的返回类型（context 单例，无值）。 */
-clux_type_t *clux_context_get_void_type(clux_context_t *ctx);
+/* 内建类型按 kind 取回：引擎内部与测试的通用通道（非逐类型接口）。
+   script 层类型名与 identifier 合一——内建类型作为 type value 按名
+   注册进 global scope，经 context_lookup 按名查找，与用户类型/变量
+   共用同一查找通道（白皮书 §2.1）。注意：这只是底层机制上的统一，
+   sema 阶段仍会拒绝对内建类型名的遮蔽。 */
+clux_type_t *clux_context_builtin_type(clux_context_t *ctx,
+                                       clux_type_kind_t kind);
 /* "type" 内建类型：所有 type value 的类型（context 单例）。 */
 clux_type_t *clux_context_get_type_type(clux_context_t *ctx);
 /* "type_template" / "func_template" 内建类型：模板值的类型（context 单例）。

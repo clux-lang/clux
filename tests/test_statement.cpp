@@ -1044,7 +1044,7 @@ TEST(StmtVarTest, WithType) {
   node_t *node = parse_stmt(a, &p, "var x: i32 = 1;");
   expect_var_stmt(node, "var", true, 0);
   EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_VAR_TYPE)),
-            CLUX_NODE_LITERAL_TYPE);
+            CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -1421,7 +1421,7 @@ TEST(StmtTypeTest, SimpleAlias) {
   node_t *name = node_get_child(node, CLUX_STMT_TYPE_NAME);
   EXPECT_EQ(node_get_kind(name), CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_TYPE_VALUE)),
-            CLUX_NODE_LITERAL_TYPE);
+            CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);

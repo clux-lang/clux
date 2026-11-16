@@ -37,16 +37,22 @@
 ## 1.4 关键字
 
 ```text
-as       bitfield  bool      break     cfunc     comptime  const
+as       bitfield  break     cfunc     comptime  const
 continue cunion    default   defer     do        else      enum
-export   extends   extern    f32       f64       false     for
-foreach  from      func      i8        i16       i32       i64
+export   extends   extern    false     for
+foreach  from      func
 if       implements import   interface is        lib
-of       opaque    return    static_assert       str       struct
-switch   true      type      u8        u16       u32       u64
-undefined union    usize     var       void      volatile  while
+of       return    static_assert       struct
+switch   true      type
+undefined union     var       volatile  while
 using
 ```
+
+内建类型名（`bool`、`str`、`void`、`opaque`、`i8`..`i64`、`u8`..`u64`、
+`isize`、`usize`、`f32`、`f64`）不是关键字——与 identifier 合一（§2.1），
+词法层按普通标识符产出，类型经作用域查找到 global 注册的 type value。
+这只是底层机制上的统一处理：sema 阶段仍会拒绝对这些类型的遮蔽，
+遮蔽内建类型名是不合法的。
 
 `test` 不是全局关键字。只有顶层出现 `test "名称" { ... }` 时才按测试块解析；
 因此普通函数可以命名为 `test`。

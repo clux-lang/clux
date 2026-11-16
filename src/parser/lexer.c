@@ -115,21 +115,17 @@ token_t *lexer_read_string(allocator_t *allocator,
   return token;
 }
 
+/* 注意：类型名（bool/i32/void/str 等）不是保留字——与 identifier 合一
+   （白皮书 §2.1），词法层按普通标识符产出，类型经作用域查找。 */
 static const char *keywords[] = {
-    "var",       "func",       "cfunc",     "import",
-    "export",    "if",         "else",      "for",
-    "foreach",   "while",      "do",        "break",
-    "continue",  "return",     "using",     "const",
-    "volatile",  "bool",       "defer",     "i8",
-    "i16",       "i32",        "i64",       "u8",
-    "u16",       "u32",        "u64",       "isize",
-    "usize",     "f32",        "f64",       "str",
-    "void",      "opaque",     "struct",    "union",
-    "cunion",    "enum",       "undefined", "none",
-    "true",      "false",      "as",        "is",
-    "extends",   "implements", "comptime",  "type",
-    "of",        "switch",     "default",   "bitfield",
-    "from",      "extern",     "lib",       "static_assert",
+    "var",       "func",     "cfunc",     "import",  "export",
+    "if",        "else",     "for",       "foreach", "while",
+    "do",        "break",    "continue",  "return",  "using",
+    "const",     "volatile", "defer",     "struct",  "union",
+    "cunion",    "enum",     "undefined", "none",    "true",
+    "false",     "as",       "is",        "extends", "implements",
+    "comptime",  "type",     "of",        "switch",  "default",
+    "bitfield",  "from",     "extern",    "lib",     "static_assert",
     "interface", NULL,
 };
 

@@ -25,10 +25,6 @@ node_t *create_literal_identifier_node(allocator_t *allocator) {
   return create_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER);
 }
 
-node_t *create_literal_type_node(allocator_t *allocator) {
-  return create_node(allocator, CLUX_NODE_LITERAL_TYPE);
-}
-
 static void
 write_literal(json_writer_t *writer, node_t *self, const char *kind) {
   node_json_begin(writer, self, kind);
@@ -53,7 +49,4 @@ void literal_boolean_node_to_json(json_writer_t *writer, node_t *self) {
 }
 void literal_identifier_node_to_json(json_writer_t *writer, node_t *self) {
   write_literal(writer, self, "LiteralIdentifier");
-}
-void literal_type_node_to_json(json_writer_t *writer, node_t *self) {
-  write_literal(writer, self, "LiteralType");
 }

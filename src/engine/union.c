@@ -129,7 +129,7 @@ union_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
 static clux_value_t *
 union_is_member(clux_context_t *ctx, clux_value_t *value, const char *name) {
   clux_type_t *type = clux_value_get_type(value);
-  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
   const clux_union_member_t *member = clux_union_find_member(type, name);
   if (!member) {
     const char *type_name = clux_type_get_name(type);
@@ -173,7 +173,7 @@ static clux_value_t *union_compare(clux_context_t *ctx,
         "operator '%s' requires operands of the same type",
         op == CLUX_OP_EQ ? "==" : "!=");
   }
-  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
   if (clux_value_is_shadow(left) || clux_value_is_shadow(right)) {
     return clux_context_create_shadow_value(ctx, bool_type);
   }

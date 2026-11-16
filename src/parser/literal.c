@@ -263,45 +263,11 @@ node_t *parser_read_literal_identifier(allocator_t *allocator,
       allocator, parser, CLUX_TOKEN_IDENTIFIER, create_literal_identifier_node);
 }
 
-/* 内建类型名（白皮书 §2.1）。词法层把它们识别为关键字。 */
-static const char *type_names[] = {
-    "bool",
-    "str",
-    "void",
-    "opaque",
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "u8",
-    "u16",
-    "u32",
-    "u64",
-    "f32",
-    "f64",
-    "isize",
-    "usize",
-    NULL,
-};
+/* 内建类型名与 identifier 合一（白皮书 §2.1）：类型名不再保留字，
+   按普通标识符解析，语义层经 lookup 找到 global scope 里注册的
+   type value。 */
 
-node_t *parser_read_literal_type(allocator_t *allocator, parser_t *parser) {
-  token_t *token = parser_peek_token(parser);
-  if (!token || token_get_kind(token) != CLUX_TOKEN_KEYWORD) {
-    return NULL;
-  }
-  for (size_t idx = 0; type_names[idx] != NULL; idx++) {
-    if (token_is(token, CLUX_TOKEN_KEYWORD, type_names[idx])) {
-      location_t loc = *token_get_location(token);
-      parser_next(parser);
-      node_t *node = create_literal_type_node(allocator);
-      node_set_location(node, &loc);
-      return node;
-    }
-  }
-  return NULL;
-}
-
-/* 数字类型后缀（词法层识别为关键字）。 */
+/* 数字类型后缀（identifier，与数字紧邻才算后缀）。 */
 static const char *numeric_suffixes[] = {
     "i8",
     "i16",
@@ -318,10 +284,12 @@ static const char *numeric_suffixes[] = {
     NULL,
 };
 
+/* 数字类型后缀（identifier，与数字紧邻才算后缀）。
+   类型名与 identifier 合一后，后缀按普通标识符匹配。 */
 static bool is_numeric_suffix(token_t *token) {
-  if (token_get_kind(token) != CLUX_TOKEN_KEYWORD) return false;
+  if (token_get_kind(token) != CLUX_TOKEN_IDENTIFIER) return false;
   for (size_t idx = 0; numeric_suffixes[idx] != NULL; idx++) {
-    if (token_is(token, CLUX_TOKEN_KEYWORD, numeric_suffixes[idx])) {
+    if (token_is(token, CLUX_TOKEN_IDENTIFIER, numeric_suffixes[idx])) {
       return true;
     }
   }
@@ -397,8 +365,8 @@ static void validate_numeric_literal(allocator_t *allocator,
   if (!suffix) {
     return;
   }
-  bool float_suffix = token_is(suffix, CLUX_TOKEN_KEYWORD, "f32") ||
-                      token_is(suffix, CLUX_TOKEN_KEYWORD, "f64");
+  bool float_suffix = token_is(suffix, CLUX_TOKEN_IDENTIFIER, "f32") ||
+                      token_is(suffix, CLUX_TOKEN_IDENTIFIER, "f64");
   if (is_float && !float_suffix) {
     parser_push_error(
         parser,
@@ -445,10 +413,6 @@ node_t *parser_read_literal(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = parser_read_literal_boolean(allocator, parser);
-  if (node) {
-    return node;
-  }
-  node = parser_read_literal_type(allocator, parser);
   if (node) {
     return node;
   }

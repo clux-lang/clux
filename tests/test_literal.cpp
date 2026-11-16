@@ -615,7 +615,6 @@ TEST(LiteralTest, NoLeakAcrossAllReaders) {
     if (!node) node = parser_read_literal_string(a, p);
     if (!node) node = parser_read_literal_character(a, p);
     if (!node) node = parser_read_literal_boolean(a, p);
-    if (!node) node = parser_read_literal_type(a, p);
     if (!node) node = parser_read_literal_numeric(a, p);
     if (!node) node = parser_read_literal_identifier(a, p);
     EXPECT_NE(node, nullptr) << "src=" << sources[i];
@@ -780,7 +779,7 @@ TEST(LiteralDispatchTest, AttachesParent) {
   delete_allocator(&a);
 }
 
-/* ---- 内建类型名 ---- */
+/* ---- 内建类型名与 identifier 合一（白皮书 §2.1）---- */
 
 static const char *kTypeNames[] = {"bool",
                                    "str",
@@ -800,13 +799,28 @@ static const char *kTypeNames[] = {"bool",
                                    "usize",
                                    nullptr};
 
-TEST(LiteralTypeTest, MatchesEveryBuiltinTypeName) {
+/* 类型名不再是关键字：词法层产出普通标识符。 */
+TEST(LiteralTypeNameTest, TypeNamesAreIdentifiers) {
   for (size_t i = 0; kTypeNames[i] != nullptr; i++) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", kTypeNames[i]);
-    node_t *node = parser_read_literal_type(a, p);
+    token_t *tok = parser_peek_token(p);
+    ASSERT_NE(tok, nullptr) << "name=" << kTypeNames[i];
+    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_IDENTIFIER)
+        << "name=" << kTypeNames[i];
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 类型名按标识符参与字面量分派，类型查找交给语义层 lookup。 */
+TEST(LiteralTypeNameTest, ParsesAsIdentifier) {
+  for (size_t i = 0; kTypeNames[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p = create_parser(a, "test.clux", kTypeNames[i]);
+    node_t *node = parser_read_literal(a, p);
     ASSERT_NE(node, nullptr) << "name=" << kTypeNames[i];
-    EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_TYPE)
+    EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_IDENTIFIER)
         << "name=" << kTypeNames[i];
     EXPECT_EQ(parser_get_position(p), 1u) << "name=" << kTypeNames[i];
     /* location 精确覆盖类型名，不含前后 trivia */
@@ -824,120 +838,16 @@ TEST(LiteralTypeTest, MatchesEveryBuiltinTypeName) {
   }
 }
 
-/* 类型名是关键字，不是 identifier。 */
-TEST(LiteralTypeTest, TypeNamesAreKeywords) {
-  for (size_t i = 0; kTypeNames[i] != nullptr; i++) {
-    allocator_t *a = create_allocator(malloc, free);
-    parser_t *p = create_parser(a, "test.clux", kTypeNames[i]);
-    token_t *tok = parser_peek_token(p);
-    ASSERT_NE(tok, nullptr) << "name=" << kTypeNames[i];
-    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_KEYWORD)
-        << "name=" << kTypeNames[i];
-    delete_parser(&p);
-    delete_allocator(&a);
-  }
-}
-
-/* opaque 此前遗漏在词法关键字表外，这里显式锁定。 */
-TEST(LiteralTypeTest, OpaqueIsKeyword) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "opaque");
-  token_t *tok = parser_peek_token(p);
-  ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_KEYWORD);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(LiteralTypeTest, RejectsOtherKeyword) {
-  const char *sources[] = {"var", "func", "struct", "none", "true", nullptr};
-  for (size_t i = 0; sources[i] != nullptr; i++) {
-    allocator_t *a = create_allocator(malloc, free);
-    parser_t *p = create_parser(a, "test.clux", sources[i]);
-    EXPECT_EQ(parser_read_literal_type(a, p), nullptr) << "src=" << sources[i];
-    EXPECT_EQ(parser_get_position(p), 0u) << "src=" << sources[i];
-    delete_parser(&p);
-    delete_allocator(&a);
-  }
-}
-
-TEST(LiteralTypeTest, RejectsIdentifier) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "User");
-  EXPECT_EQ(parser_read_literal_type(a, p), nullptr);
-  EXPECT_EQ(parser_get_position(p), 0u);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-/* 类型名后跟标识符字符时词法层已切成一个 identifier，不是类型名。 */
-TEST(LiteralTypeTest, RejectsTypeNamePrefix) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "i32x");
-  EXPECT_EQ(parser_read_literal_type(a, p), nullptr);
-  EXPECT_EQ(parser_get_position(p), 0u);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(LiteralTypeTest, RejectsNumeric) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "123");
-  EXPECT_EQ(parser_read_literal_type(a, p), nullptr);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(LiteralTypeTest, RejectsString) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "\"i32\"");
-  EXPECT_EQ(parser_read_literal_type(a, p), nullptr);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(LiteralTypeTest, EmptyStreamReturnsNull) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "");
-  EXPECT_EQ(parser_read_literal_type(a, p), nullptr);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(LiteralTypeTest, AttachesParent) {
+TEST(LiteralTypeNameTest, AttachesParent) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "i32");
   node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
-  node_t *node = parser_read_literal_type(a, p);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   node_set_parent(node, parent);
   EXPECT_EQ(node_get_parent(node), parent);
   delete_node(&node);
   delete_node(&parent);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-/* 聚合入口：类型名优先于 identifier（后者本来也匹配不到关键字）。 */
-TEST(LiteralDispatchTest, DispatchesTypeName) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "i32");
-  node_t *node = parser_read_literal(a, p);
-  ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_TYPE);
-  EXPECT_EQ(parser_get_position(p), 1u);
-  delete_node(&node);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(LiteralDispatchTest, DispatchesOpaque) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "opaque");
-  node_t *node = parser_read_literal(a, p);
-  ASSERT_NE(node, nullptr);
-  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_TYPE);
-  delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);
 }

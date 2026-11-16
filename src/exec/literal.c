@@ -34,9 +34,19 @@ static int hex_value(char c) {
 
 /* 尾部剥类型后缀：返回后缀文本或 NULL；*num_len 写入数字部分长度。 */
 static const char *strip_suffix(const char *text, size_t len, size_t *num_len) {
-  static const char *suffixes[] = {"isize", "usize", "i8",  "i16", "i32",
-                                   "i64",   "u8",    "u16", "u32", "u64",
-                                   "f32",   "f64",   NULL};
+  static const char *suffixes[] = {"isize",
+                                   "usize",
+                                   "i8",
+                                   "i16",
+                                   "i32",
+                                   "i64",
+                                   "u8",
+                                   "u16",
+                                   "u32",
+                                   "u64",
+                                   "f32",
+                                   "f64",
+                                   NULL};
   for (size_t idx = 0; suffixes[idx] != NULL; idx++) {
     size_t slen = strlen(suffixes[idx]);
     if (len > slen && strncmp(text + len - slen, suffixes[idx], slen) == 0) {
@@ -100,7 +110,8 @@ static clux_value_t *make_float(clux_context_t *ctx,
   location_t *where = (location_t *)loc;
   char buffer[64];
   if (digits_len >= sizeof(buffer)) {
-    return clux_context_create_error_message(ctx, where, "numeric literal too long");
+    return clux_context_create_error_message(
+        ctx, where, "numeric literal too long");
   }
   memcpy(buffer, digits, digits_len);
   buffer[digits_len] = '\0';
@@ -204,9 +215,8 @@ static size_t decode_escape(const char *s, const char *end, uint32_t *out) {
 
 /* 字面量内容解码（去引号）：返回分配的 NUL 结尾副本并写 *out_len，
    转义非法返回 NULL。 */
-static char *decode_content(clux_context_t *ctx,
-                            const location_t *loc,
-                            size_t *out_len) {
+static char *
+decode_content(clux_context_t *ctx, const location_t *loc, size_t *out_len) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   const char *s = loc->begin.offset + 1;
   const char *end = loc->end.offset - 1;
@@ -242,7 +252,8 @@ clux_value_t *exec_literal_string(clux_context_t *ctx, node_t *node) {
     return clux_context_create_error_message(
         ctx, (location_t *)loc, "invalid escape sequence in string literal");
   }
-  clux_value_t *value = clux_context_create_str(ctx, text, NULL, (location_t *)loc);
+  clux_value_t *value =
+      clux_context_create_str(ctx, text, NULL, (location_t *)loc);
   allocator_free(allocator, (void **)&text);
   return value;
 }
@@ -272,40 +283,4 @@ clux_value_t *exec_literal_boolean(clux_context_t *ctx, node_t *node) {
   const location_t *loc = node_get_location(node);
   return clux_context_create_bool(
       ctx, location_is(loc, "true"), NULL, (location_t *)loc);
-}
-
-clux_value_t *exec_literal_type(clux_context_t *ctx, node_t *node) {
-  const location_t *loc = node_get_location(node);
-  const struct {
-    const char *name;
-    clux_type_t *(*get)(clux_context_t *);
-  } table[] = {
-      {"i8", clux_context_get_i8_type},
-      {"i16", clux_context_get_i16_type},
-      {"i32", clux_context_get_i32_type},
-      {"i64", clux_context_get_i64_type},
-      {"u8", clux_context_get_u8_type},
-      {"u16", clux_context_get_u16_type},
-      {"u32", clux_context_get_u32_type},
-      {"u64", clux_context_get_u64_type},
-      {"isize", clux_context_get_isize_type},
-      {"usize", clux_context_get_usize_type},
-      {"f32", clux_context_get_f32_type},
-      {"f64", clux_context_get_f64_type},
-      {"bool", clux_context_get_bool_type},
-      {"str", clux_context_get_str_type},
-      {"void", clux_context_get_void_type},
-  };
-  for (size_t idx = 0; idx < sizeof(table) / sizeof(table[0]); idx++) {
-    if (location_is(loc, table[idx].name)) {
-      return clux_context_create_type_value(
-          ctx, table[idx].get(ctx), NULL, (location_t *)loc);
-    }
-  }
-  allocator_t *allocator = clux_context_get_allocator(ctx);
-  char *str = location_get(loc, allocator);
-  clux_value_t *error = clux_context_create_error_message(
-      ctx, (location_t *)loc, "type '%s' is not executable", str);
-  allocator_free(allocator, (void **)&str);
-  return error;
 }

@@ -17,9 +17,6 @@ enum _node_kind_t {
   CLUX_NODE_LITERAL_NUMERIC,
   CLUX_NODE_LITERAL_BOOLEAN,
   CLUX_NODE_LITERAL_IDENTIFIER,
-  /* 内建类型名（i8..f64、isize/usize、bool/str/void/opaque）。
-     语法阶段与 literal 同级，就是普通表达式。 */
-  CLUX_NODE_LITERAL_TYPE,
   /* 源码原文片段：叶子节点，location 指向源码中的原始文本区间，
      文本内容即该区间（不复制、不转义）。供 static_assert / assert
      在编译期引用表达式源码。 */
@@ -270,7 +267,6 @@ void literal_character_node_to_json(json_writer_t *writer, node_t *self);
 void literal_numeric_node_to_json(json_writer_t *writer, node_t *self);
 void literal_boolean_node_to_json(json_writer_t *writer, node_t *self);
 void literal_identifier_node_to_json(json_writer_t *writer, node_t *self);
-void literal_type_node_to_json(json_writer_t *writer, node_t *self);
 void source_text_node_to_json(json_writer_t *writer, node_t *self);
 void assign_node_to_json(json_writer_t *writer, node_t *self);
 void ternary_node_to_json(json_writer_t *writer, node_t *self);

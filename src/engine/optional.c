@@ -74,7 +74,7 @@ static clux_value_t *optional_take(clux_context_t *ctx,
 /* 判空查询（#is_none）：读首字节 present 标志，none 返回 true。 */
 static clux_value_t *optional_is_none(clux_context_t *ctx,
                                       clux_value_t *optional) {
-  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
   if (clux_value_is_shadow(optional)) {
     return clux_context_create_shadow_value(ctx, bool_type);
   }
@@ -99,7 +99,7 @@ static clux_value_t *optional_compare(clux_context_t *ctx,
   }
   clux_type_t *type = clux_value_get_type(left);
   clux_type_t *right_type = clux_value_get_type(right);
-  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
   bool right_is_optional = optional_kind(clux_type_get_kind(right_type)) &&
                            clux_type_equal(optional_meta(type)->base,
                                            optional_meta(right_type)->base);

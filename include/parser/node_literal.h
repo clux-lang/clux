@@ -14,8 +14,6 @@ node_t *create_literal_character_node(allocator_t *allocator);
 node_t *create_literal_numeric_node(allocator_t *allocator);
 node_t *create_literal_boolean_node(allocator_t *allocator);
 node_t *create_literal_identifier_node(allocator_t *allocator);
-/* 内建类型名（i8..f64、isize/usize、bool/str/void/opaque）。 */
-node_t *create_literal_type_node(allocator_t *allocator);
 #ifdef __cplusplus
 }
 #endif

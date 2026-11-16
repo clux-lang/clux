@@ -1383,9 +1383,6 @@ void expr_to_json(json_writer_t *writer, node_t *node) {
   case CLUX_NODE_LITERAL_IDENTIFIER:
     literal_identifier_node_to_json(writer, node);
     break;
-  case CLUX_NODE_LITERAL_TYPE:
-    literal_type_node_to_json(writer, node);
-    break;
   case CLUX_NODE_SOURCE_TEXT:
     source_text_node_to_json(writer, node);
     break;

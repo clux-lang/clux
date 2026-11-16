@@ -107,7 +107,8 @@ TEST(LexerKeywordTest, IfElseAreKeywords) {
   delete_allocator(&a);
 }
 
-TEST(LexerKeywordTest, TypeKeywords) {
+/* 类型名与 identifier 合一（白皮书 §2.1）：不是关键字。 */
+TEST(LexerKeywordTest, TypeNamesAreIdentifiers) {
   allocator_t *a = create_allocator(malloc, free);
   const char *kws[] = {"bool",
                        "i8",
@@ -130,7 +131,7 @@ TEST(LexerKeywordTest, TypeKeywords) {
     position_t p = lexer_test_pos(kws[i]);
     token_t *tok = lexer_read_identifier(a, &p, "test.clux");
     ASSERT_NE(tok, nullptr) << "kw=" << kws[i];
-    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_KEYWORD) << "kw=" << kws[i];
+    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_IDENTIFIER) << "kw=" << kws[i];
     delete_token(&tok);
   }
   delete_allocator(&a);

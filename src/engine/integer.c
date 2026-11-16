@@ -255,7 +255,7 @@ static clux_value_t *integer_compare(clux_context_t *ctx,
       return right_operand;
     }
   }
-  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
   if (clux_value_is_shadow(left_operand) ||
       clux_value_is_shadow(right_operand)) {
     return clux_context_create_shadow_value(ctx, bool_type);

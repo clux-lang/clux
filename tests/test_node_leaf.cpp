@@ -32,7 +32,6 @@ TEST_F(NodeLeafTest, LiteralFactories) {
       {create_literal_numeric_node, CLUX_NODE_LITERAL_NUMERIC},
       {create_literal_boolean_node, CLUX_NODE_LITERAL_BOOLEAN},
       {create_literal_identifier_node, CLUX_NODE_LITERAL_IDENTIFIER},
-      {create_literal_type_node, CLUX_NODE_LITERAL_TYPE},
   };
   for (auto &c : cases) {
     node_t *n = c.create(a);

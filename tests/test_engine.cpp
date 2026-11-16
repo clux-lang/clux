@@ -115,7 +115,7 @@ TEST(EngineTest, ContextAndBuiltinTypes) {
   clux_context_t *ctx = create_clux_context(a);
   ASSERT_NE(ctx, nullptr);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   ASSERT_NE(i32_type, nullptr);
   EXPECT_EQ(clux_type_get_kind(i32_type), CLUX_TYPE_I32);
   EXPECT_STREQ(clux_type_get_name(i32_type), "i32");
@@ -143,10 +143,22 @@ TEST(EngineTest, BuiltinIntegerTypes) {
     const char *name;
     size_t size;
   } cases[] = {
-      {clux_context_get_i8_type(ctx), CLUX_TYPE_I8, "i8", sizeof(int8_t)},
-      {clux_context_get_i16_type(ctx), CLUX_TYPE_I16, "i16", sizeof(int16_t)},
-      {clux_context_get_i32_type(ctx), CLUX_TYPE_I32, "i32", sizeof(int32_t)},
-      {clux_context_get_i64_type(ctx), CLUX_TYPE_I64, "i64", sizeof(int64_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_I8),
+       CLUX_TYPE_I8,
+       "i8",
+       sizeof(int8_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_I16),
+       CLUX_TYPE_I16,
+       "i16",
+       sizeof(int16_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_I32),
+       CLUX_TYPE_I32,
+       "i32",
+       sizeof(int32_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_I64),
+       CLUX_TYPE_I64,
+       "i64",
+       sizeof(int64_t)},
   };
   for (const auto &c : cases) {
     ASSERT_NE(c.type, nullptr);
@@ -192,14 +204,16 @@ TEST(EngineTest, CreateI8I16I64ValuesAndAdd) {
   clux_value_t *i8_right = clux_context_create_i8(ctx, 22, NULL, NULL);
   clux_value_t *i8_sum = clux_context_add(ctx, i8_left, i8_right, NULL);
   ASSERT_NE(i8_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(i8_sum), clux_context_get_i8_type(ctx));
+  EXPECT_EQ(clux_value_get_type(i8_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I8));
   EXPECT_EQ(read_i8(i8_sum), 42);
 
   clux_value_t *i16_left = clux_context_create_i16(ctx, 200, NULL, NULL);
   clux_value_t *i16_right = clux_context_create_i16(ctx, 300, NULL, NULL);
   clux_value_t *i16_sum = clux_context_add(ctx, i16_left, i16_right, NULL);
   ASSERT_NE(i16_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(i16_sum), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(i16_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I16));
   EXPECT_EQ(read_i16(i16_sum), 500);
 
   clux_value_t *i64_left =
@@ -208,7 +222,8 @@ TEST(EngineTest, CreateI8I16I64ValuesAndAdd) {
       clux_context_create_i64(ctx, INT64_C(2000000000), NULL, NULL);
   clux_value_t *i64_sum = clux_context_add(ctx, i64_left, i64_right, NULL);
   ASSERT_NE(i64_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(i64_sum), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(i64_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   EXPECT_EQ(read_i64(i64_sum), INT64_C(6000000000));
 
   delete_clux_context(&ctx);
@@ -220,8 +235,8 @@ TEST(EngineTest, PlatformIsizeAndUsizeTypes) {
   clux_context_t *ctx = create_clux_context(a);
 
   /* 元信息：宽度跟随平台指针宽度 */
-  clux_type_t *isize_type = clux_context_get_isize_type(ctx);
-  clux_type_t *usize_type = clux_context_get_usize_type(ctx);
+  clux_type_t *isize_type = clux_context_builtin_type(ctx, CLUX_TYPE_ISIZE);
+  clux_type_t *usize_type = clux_context_builtin_type(ctx, CLUX_TYPE_USIZE);
   ASSERT_NE(isize_type, nullptr);
   ASSERT_NE(usize_type, nullptr);
   EXPECT_EQ(clux_type_get_kind(isize_type), CLUX_TYPE_ISIZE);
@@ -232,8 +247,8 @@ TEST(EngineTest, PlatformIsizeAndUsizeTypes) {
   EXPECT_EQ(clux_type_get_size(usize_type), sizeof(size_t));
   EXPECT_EQ(clux_type_get_align(isize_type), sizeof(intptr_t));
   EXPECT_EQ(clux_type_get_align(usize_type), sizeof(size_t));
-  EXPECT_EQ(clux_context_get_isize_type(ctx), isize_type);
-  EXPECT_EQ(clux_context_get_usize_type(ctx), usize_type);
+  EXPECT_EQ(clux_context_builtin_type(ctx, CLUX_TYPE_ISIZE), isize_type);
+  EXPECT_EQ(clux_context_builtin_type(ctx, CLUX_TYPE_USIZE), usize_type);
 
   /* 算术：同类型相加保类型 */
   clux_value_t *isize_left = clux_context_create_isize(ctx, -100, NULL, NULL);
@@ -272,7 +287,7 @@ TEST(EngineTest, PlatformIsizeAndUsizeTypes) {
   EXPECT_EQ(read_isize(to_isize), 12345);
 
   clux_value_t *narrowed = clux_context_safe_cast(
-      ctx, isize_left, clux_context_get_i32_type(ctx), NULL);
+      ctx, isize_left, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(narrowed, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(narrowed)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(narrowed),
@@ -293,8 +308,8 @@ TEST(EngineTest, PlatformIsizeAndUsizeTypes) {
   EXPECT_EQ(clux_value_get_type(f64_to_isize), isize_type);
   EXPECT_EQ(read_isize(f64_to_isize), -3);
 
-  clux_value_t *usize_to_u32 =
-      clux_context_cast(ctx, usize_left, clux_context_get_u32_type(ctx), NULL);
+  clux_value_t *usize_to_u32 = clux_context_cast(
+      ctx, usize_left, clux_context_builtin_type(ctx, CLUX_TYPE_U32), NULL);
   ASSERT_NE(usize_to_u32, nullptr);
   EXPECT_EQ(read_u32(usize_to_u32), (uint32_t)3000000000u);
 
@@ -325,7 +340,8 @@ TEST(EngineTest, BinaryWidensIntegerOperands) {
   clux_value_t *i16_sum =
       clux_context_binary(ctx, CLUX_OP_ADD, i8_value, i16_value, NULL);
   ASSERT_NE(i16_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(i16_sum), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(i16_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I16));
   EXPECT_EQ(read_i16(i16_sum), 320);
 
   clux_value_t *i32_value = clux_context_create_i32(ctx, 100, NULL, NULL);
@@ -334,7 +350,8 @@ TEST(EngineTest, BinaryWidensIntegerOperands) {
   clux_value_t *i64_sum =
       clux_context_binary(ctx, CLUX_OP_ADD, i32_value, i64_value, NULL);
   ASSERT_NE(i64_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(i64_sum), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(i64_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   EXPECT_EQ(read_i64(i64_sum), INT64_C(4000000100));
 
   clux_value_t *i64_left =
@@ -343,14 +360,16 @@ TEST(EngineTest, BinaryWidensIntegerOperands) {
   clux_value_t *i64_right_sum =
       clux_context_binary(ctx, CLUX_OP_ADD, i64_left, i32_right, NULL);
   ASSERT_NE(i64_right_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(i64_right_sum), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(i64_right_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   EXPECT_EQ(read_i64(i64_right_sum), INT64_C(4000000100));
 
   clux_value_t *shift_count = clux_context_create_i16(ctx, 2, NULL, NULL);
   clux_value_t *shifted =
       clux_context_binary(ctx, CLUX_OP_SHL, i8_value, shift_count, NULL);
   ASSERT_NE(shifted, nullptr);
-  EXPECT_EQ(clux_value_get_type(shifted), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shifted),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I16));
   EXPECT_EQ(read_i16(shifted), 80);
 
   delete_clux_context(&ctx);
@@ -363,32 +382,36 @@ TEST(EngineTest, SafeCastWidensIntegers) {
 
   clux_value_t *i8_value = clux_context_create_i8(ctx, -5, NULL, NULL);
   clux_value_t *as_i16 = clux_context_safe_cast(
-      ctx, i8_value, clux_context_get_i16_type(ctx), NULL);
+      ctx, i8_value, clux_context_builtin_type(ctx, CLUX_TYPE_I16), NULL);
   ASSERT_NE(as_i16, nullptr);
-  EXPECT_EQ(clux_value_get_type(as_i16), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(as_i16),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I16));
   EXPECT_EQ(read_i16(as_i16), -5);
 
   clux_value_t *as_i32 = clux_context_safe_cast(
-      ctx, i8_value, clux_context_get_i32_type(ctx), NULL);
+      ctx, i8_value, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(as_i32, nullptr);
-  EXPECT_EQ(clux_value_get_type(as_i32), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(as_i32),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_EQ(read_i32(as_i32), -5);
 
   clux_value_t *as_i64 = clux_context_safe_cast(
-      ctx, i8_value, clux_context_get_i64_type(ctx), NULL);
+      ctx, i8_value, clux_context_builtin_type(ctx, CLUX_TYPE_I64), NULL);
   ASSERT_NE(as_i64, nullptr);
-  EXPECT_EQ(clux_value_get_type(as_i64), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(as_i64),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   EXPECT_EQ(read_i64(as_i64), -5);
 
   clux_value_t *i32_value = clux_context_create_i32(ctx, 123456, NULL, NULL);
   clux_value_t *i32_as_i64 = clux_context_safe_cast(
-      ctx, i32_value, clux_context_get_i64_type(ctx), NULL);
+      ctx, i32_value, clux_context_builtin_type(ctx, CLUX_TYPE_I64), NULL);
   ASSERT_NE(i32_as_i64, nullptr);
-  EXPECT_EQ(clux_value_get_type(i32_as_i64), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(i32_as_i64),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   EXPECT_EQ(read_i64(i32_as_i64), 123456);
 
   clux_value_t *identity = clux_context_safe_cast(
-      ctx, i32_value, clux_context_get_i32_type(ctx), NULL);
+      ctx, i32_value, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   EXPECT_EQ(identity, i32_value);
 
   delete_clux_context(&ctx);
@@ -404,11 +427,11 @@ TEST(EngineTest, SafeCastNarrowingProducesError) {
     clux_type_t *target;
   } cases[] = {
       {clux_context_create_i16(ctx, 1, NULL, NULL),
-       clux_context_get_i8_type(ctx)},
+       clux_context_builtin_type(ctx, CLUX_TYPE_I8)},
       {clux_context_create_i32(ctx, 1, NULL, NULL),
-       clux_context_get_i16_type(ctx)},
+       clux_context_builtin_type(ctx, CLUX_TYPE_I16)},
       {clux_context_create_i64(ctx, 1, NULL, NULL),
-       clux_context_get_i32_type(ctx)},
+       clux_context_builtin_type(ctx, CLUX_TYPE_I32)},
   };
   for (const auto &c : cases) {
     clux_value_t *result = clux_context_safe_cast(ctx, c.value, c.target, NULL);
@@ -441,8 +464,8 @@ TEST(EngineTest, SafeCastPropagatesErrorValue) {
   clux_context_t *ctx = create_clux_context(a);
   clux_error_t *error = create_error(a, NULL, "boom");
   clux_value_t *value = clux_context_create_error(ctx, error);
-  clux_value_t *result =
-      clux_context_safe_cast(ctx, value, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *result = clux_context_safe_cast(
+      ctx, value, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   EXPECT_EQ(result, value);
   EXPECT_NE(strstr(error_message_of(result), "boom"), nullptr);
   delete_clux_context(&ctx);
@@ -454,8 +477,8 @@ TEST(EngineTest, SafeCastNullInputsProduceError) {
   clux_context_t *ctx = create_clux_context(a);
   clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
 
-  clux_value_t *no_value =
-      clux_context_safe_cast(ctx, NULL, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *no_value = clux_context_safe_cast(
+      ctx, NULL, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(no_value, nullptr);
   EXPECT_EQ(clux_value_get_type(no_value), clux_context_get_error_type(ctx));
   EXPECT_NE(strstr(error_message_of(no_value),
@@ -492,7 +515,8 @@ TEST(EngineTest, BinaryArithmeticOps) {
   for (const auto &c : cases) {
     clux_value_t *result = clux_context_binary(ctx, c.op, left, right, NULL);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(clux_value_get_type(result), clux_context_get_i32_type(ctx));
+    EXPECT_EQ(clux_value_get_type(result),
+              clux_context_builtin_type(ctx, CLUX_TYPE_I32));
     EXPECT_EQ(read_i32(result), c.expected);
   }
 
@@ -665,12 +689,13 @@ TEST(EngineTest, NullOperandsProduceError) {
 TEST(EngineTest, ShadowValueBasics) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   ASSERT_NE(shadow, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow));
   EXPECT_EQ(clux_value_get_data(shadow), 0);
-  EXPECT_EQ(clux_value_get_type(shadow), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
 
   clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
   EXPECT_FALSE(clux_value_is_shadow(value));
@@ -683,19 +708,21 @@ TEST(EngineTest, BinaryWithShadowProducesShadow) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
   clux_value_t *value = clux_context_create_i32(ctx, 5, NULL, NULL);
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
 
   clux_value_t *left_shadow =
       clux_context_binary(ctx, CLUX_OP_ADD, shadow, value, NULL);
   ASSERT_NE(left_shadow, nullptr);
-  EXPECT_EQ(clux_value_get_type(left_shadow), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(left_shadow),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_TRUE(clux_value_is_shadow(left_shadow));
 
   clux_value_t *right_shadow =
       clux_context_binary(ctx, CLUX_OP_MUL, value, shadow, NULL);
   ASSERT_NE(right_shadow, nullptr);
-  EXPECT_EQ(clux_value_get_type(right_shadow), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(right_shadow),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_TRUE(clux_value_is_shadow(right_shadow));
 
   clux_value_t *both_shadow =
@@ -703,22 +730,24 @@ TEST(EngineTest, BinaryWithShadowProducesShadow) {
   ASSERT_NE(both_shadow, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(both_shadow));
 
-  clux_value_t *i8_shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i8_type(ctx));
+  clux_value_t *i8_shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I8));
   clux_value_t *i16_value = clux_context_create_i16(ctx, 2, NULL, NULL);
   clux_value_t *widened =
       clux_context_binary(ctx, CLUX_OP_ADD, i8_shadow, i16_value, NULL);
   ASSERT_NE(widened, nullptr);
-  EXPECT_EQ(clux_value_get_type(widened), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(widened),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I16));
   EXPECT_TRUE(clux_value_is_shadow(widened));
 
   clux_value_t *i8_value = clux_context_create_i8(ctx, 2, NULL, NULL);
-  clux_value_t *i16_shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i16_type(ctx));
+  clux_value_t *i16_shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I16));
   clux_value_t *widened_right =
       clux_context_binary(ctx, CLUX_OP_ADD, i8_value, i16_shadow, NULL);
   ASSERT_NE(widened_right, nullptr);
-  EXPECT_EQ(clux_value_get_type(widened_right), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(widened_right),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I16));
   EXPECT_TRUE(clux_value_is_shadow(widened_right));
 
   delete_clux_context(&ctx);
@@ -728,13 +757,14 @@ TEST(EngineTest, BinaryWithShadowProducesShadow) {
 TEST(EngineTest, PrefixWithShadowProducesShadow) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
 
   clux_value_t *negative =
       clux_context_prefix(ctx, CLUX_OP_NEGATIVE, shadow, NULL);
   ASSERT_NE(negative, nullptr);
-  EXPECT_EQ(clux_value_get_type(negative), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(negative),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_TRUE(clux_value_is_shadow(negative));
 
   clux_value_t *bit_not = clux_context_prefix(ctx, CLUX_OP_NOT, shadow, NULL);
@@ -748,26 +778,27 @@ TEST(EngineTest, PrefixWithShadowProducesShadow) {
 TEST(EngineTest, SafeCastShadowPropagates) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i8_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I8));
 
-  clux_value_t *widened =
-      clux_context_safe_cast(ctx, shadow, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *widened = clux_context_safe_cast(
+      ctx, shadow, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(widened, nullptr);
-  EXPECT_EQ(clux_value_get_type(widened), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(widened),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_TRUE(clux_value_is_shadow(widened));
 
-  clux_value_t *i32_shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *i32_shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *narrowed = clux_context_safe_cast(
-      ctx, i32_shadow, clux_context_get_i8_type(ctx), NULL);
+      ctx, i32_shadow, clux_context_builtin_type(ctx, CLUX_TYPE_I8), NULL);
   ASSERT_NE(narrowed, nullptr);
   EXPECT_EQ(clux_value_get_type(narrowed), clux_context_get_error_type(ctx));
   EXPECT_NE(strstr(error_message_of(narrowed), "narrowing conversion"),
             nullptr);
 
   clux_value_t *identity = clux_context_safe_cast(
-      ctx, i32_shadow, clux_context_get_i32_type(ctx), NULL);
+      ctx, i32_shadow, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   EXPECT_EQ(identity, i32_shadow);
 
   delete_clux_context(&ctx);
@@ -809,10 +840,22 @@ TEST(EngineTest, BuiltinUnsignedTypes) {
     const char *name;
     size_t size;
   } cases[] = {
-      {clux_context_get_u8_type(ctx), CLUX_TYPE_U8, "u8", sizeof(uint8_t)},
-      {clux_context_get_u16_type(ctx), CLUX_TYPE_U16, "u16", sizeof(uint16_t)},
-      {clux_context_get_u32_type(ctx), CLUX_TYPE_U32, "u32", sizeof(uint32_t)},
-      {clux_context_get_u64_type(ctx), CLUX_TYPE_U64, "u64", sizeof(uint64_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_U8),
+       CLUX_TYPE_U8,
+       "u8",
+       sizeof(uint8_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_U16),
+       CLUX_TYPE_U16,
+       "u16",
+       sizeof(uint16_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_U32),
+       CLUX_TYPE_U32,
+       "u32",
+       sizeof(uint32_t)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_U64),
+       CLUX_TYPE_U64,
+       "u64",
+       sizeof(uint64_t)},
   };
   for (const auto &c : cases) {
     ASSERT_NE(c.type, nullptr);
@@ -858,14 +901,16 @@ TEST(EngineTest, CreateUnsignedValuesAndAdd) {
   clux_value_t *u8_right = clux_context_create_u8(ctx, 55, NULL, NULL);
   clux_value_t *u8_sum = clux_context_add(ctx, u8_left, u8_right, NULL);
   ASSERT_NE(u8_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(u8_sum), clux_context_get_u8_type(ctx));
+  EXPECT_EQ(clux_value_get_type(u8_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U8));
   EXPECT_EQ(read_u8(u8_sum), 255);
 
   clux_value_t *u16_left = clux_context_create_u16(ctx, 60000, NULL, NULL);
   clux_value_t *u16_right = clux_context_create_u16(ctx, 5000, NULL, NULL);
   clux_value_t *u16_sum = clux_context_add(ctx, u16_left, u16_right, NULL);
   ASSERT_NE(u16_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(u16_sum), clux_context_get_u16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(u16_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U16));
   EXPECT_EQ(read_u16(u16_sum), 65000);
 
   clux_value_t *u32_left =
@@ -873,7 +918,8 @@ TEST(EngineTest, CreateUnsignedValuesAndAdd) {
   clux_value_t *u32_right = clux_context_create_u32(ctx, 200, NULL, NULL);
   clux_value_t *u32_sum = clux_context_add(ctx, u32_left, u32_right, NULL);
   ASSERT_NE(u32_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(u32_sum), clux_context_get_u32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(u32_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U32));
   EXPECT_EQ(read_u32(u32_sum), UINT32_C(4000000200));
 
   clux_value_t *u64_left =
@@ -882,7 +928,8 @@ TEST(EngineTest, CreateUnsignedValuesAndAdd) {
       clux_context_create_u64(ctx, UINT64_C(20000000000), NULL, NULL);
   clux_value_t *u64_sum = clux_context_add(ctx, u64_left, u64_right, NULL);
   ASSERT_NE(u64_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(u64_sum), clux_context_get_u64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(u64_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U64));
   EXPECT_EQ(read_u64(u64_sum), UINT64_C(30000000000));
 
   delete_clux_context(&ctx);
@@ -898,7 +945,8 @@ TEST(EngineTest, UnsignedWidensIntegerOperands) {
   clux_value_t *u16_sum =
       clux_context_binary(ctx, CLUX_OP_ADD, u8_value, u16_value, NULL);
   ASSERT_NE(u16_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(u16_sum), clux_context_get_u16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(u16_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U16));
   EXPECT_EQ(read_u16(u16_sum), 320);
 
   clux_value_t *u32_value = clux_context_create_u32(ctx, 100, NULL, NULL);
@@ -907,7 +955,8 @@ TEST(EngineTest, UnsignedWidensIntegerOperands) {
   clux_value_t *u64_sum =
       clux_context_binary(ctx, CLUX_OP_ADD, u32_value, u64_value, NULL);
   ASSERT_NE(u64_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(u64_sum), clux_context_get_u64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(u64_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U64));
   EXPECT_EQ(read_u64(u64_sum), UINT64_C(4000000100));
 
   delete_clux_context(&ctx);
@@ -968,20 +1017,21 @@ TEST(EngineTest, UnsignedSafeCast) {
 
   clux_value_t *u8_value = clux_context_create_u8(ctx, 200, NULL, NULL);
   clux_value_t *widened = clux_context_safe_cast(
-      ctx, u8_value, clux_context_get_u32_type(ctx), NULL);
+      ctx, u8_value, clux_context_builtin_type(ctx, CLUX_TYPE_U32), NULL);
   ASSERT_NE(widened, nullptr);
-  EXPECT_EQ(clux_value_get_type(widened), clux_context_get_u32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(widened),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U32));
   EXPECT_EQ(read_u32(widened), 200);
 
-  clux_value_t *narrowed =
-      clux_context_safe_cast(ctx, widened, clux_context_get_u8_type(ctx), NULL);
+  clux_value_t *narrowed = clux_context_safe_cast(
+      ctx, widened, clux_context_builtin_type(ctx, CLUX_TYPE_U8), NULL);
   ASSERT_NE(narrowed, nullptr);
   EXPECT_EQ(clux_value_get_type(narrowed), clux_context_get_error_type(ctx));
   EXPECT_NE(strstr(error_message_of(narrowed), "narrowing conversion"),
             nullptr);
 
   clux_value_t *to_signed = clux_context_safe_cast(
-      ctx, u8_value, clux_context_get_i64_type(ctx), NULL);
+      ctx, u8_value, clux_context_builtin_type(ctx, CLUX_TYPE_I64), NULL);
   ASSERT_NE(to_signed, nullptr);
   EXPECT_EQ(clux_value_get_type(to_signed), clux_context_get_error_type(ctx));
   EXPECT_NE(strstr(error_message_of(to_signed), "cannot safely cast 'u8'"),
@@ -1021,13 +1071,14 @@ TEST(EngineTest, MixedSignedAndUnsignedProducesError) {
 TEST(EngineTest, UnsignedShadowPropagates) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_u8_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_U8));
   clux_value_t *value = clux_context_create_u16(ctx, 2, NULL, NULL);
   clux_value_t *result =
       clux_context_binary(ctx, CLUX_OP_ADD, shadow, value, NULL);
   ASSERT_NE(result, nullptr);
-  EXPECT_EQ(clux_value_get_type(result), clux_context_get_u16_type(ctx));
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U16));
   EXPECT_TRUE(clux_value_is_shadow(result));
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -1051,35 +1102,38 @@ TEST(EngineTest, CastNarrowsAndCrossesSignedness) {
   clux_context_t *ctx = create_clux_context(a);
 
   clux_value_t *i32_value = clux_context_create_i32(ctx, 42, NULL, NULL);
-  clux_value_t *as_i8 =
-      clux_context_cast(ctx, i32_value, clux_context_get_i8_type(ctx), NULL);
+  clux_value_t *as_i8 = clux_context_cast(
+      ctx, i32_value, clux_context_builtin_type(ctx, CLUX_TYPE_I8), NULL);
   ASSERT_NE(as_i8, nullptr);
-  EXPECT_EQ(clux_value_get_type(as_i8), clux_context_get_i8_type(ctx));
+  EXPECT_EQ(clux_value_get_type(as_i8),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I8));
   EXPECT_EQ(read_i8(as_i8), 42);
 
   clux_value_t *minus_one = clux_context_create_i32(ctx, -1, NULL, NULL);
-  clux_value_t *as_u8 =
-      clux_context_cast(ctx, minus_one, clux_context_get_u8_type(ctx), NULL);
+  clux_value_t *as_u8 = clux_context_cast(
+      ctx, minus_one, clux_context_builtin_type(ctx, CLUX_TYPE_U8), NULL);
   ASSERT_NE(as_u8, nullptr);
-  EXPECT_EQ(clux_value_get_type(as_u8), clux_context_get_u8_type(ctx));
+  EXPECT_EQ(clux_value_get_type(as_u8),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U8));
   EXPECT_EQ(read_u8(as_u8), 255);
 
-  clux_value_t *as_u32 =
-      clux_context_cast(ctx, minus_one, clux_context_get_u32_type(ctx), NULL);
+  clux_value_t *as_u32 = clux_context_cast(
+      ctx, minus_one, clux_context_builtin_type(ctx, CLUX_TYPE_U32), NULL);
   ASSERT_NE(as_u32, nullptr);
-  EXPECT_EQ(clux_value_get_type(as_u32), clux_context_get_u32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(as_u32),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U32));
   EXPECT_EQ(read_u32(as_u32), UINT32_MAX);
 
   clux_value_t *u8_value = clux_context_create_u8(ctx, 255, NULL, NULL);
-  clux_value_t *as_i8_from_u8 =
-      clux_context_cast(ctx, u8_value, clux_context_get_i8_type(ctx), NULL);
+  clux_value_t *as_i8_from_u8 = clux_context_cast(
+      ctx, u8_value, clux_context_builtin_type(ctx, CLUX_TYPE_I8), NULL);
   ASSERT_NE(as_i8_from_u8, nullptr);
   EXPECT_EQ(read_i8(as_i8_from_u8), -1);
 
   clux_value_t *u32_value =
       clux_context_create_u32(ctx, UINT32_C(300), NULL, NULL);
-  clux_value_t *as_u8_from_u32 =
-      clux_context_cast(ctx, u32_value, clux_context_get_u8_type(ctx), NULL);
+  clux_value_t *as_u8_from_u32 = clux_context_cast(
+      ctx, u32_value, clux_context_builtin_type(ctx, CLUX_TYPE_U8), NULL);
   ASSERT_NE(as_u8_from_u32, nullptr);
   EXPECT_EQ(read_u8(as_u8_from_u32), 44);
 
@@ -1090,12 +1144,13 @@ TEST(EngineTest, CastNarrowsAndCrossesSignedness) {
 TEST(EngineTest, CastShadowPropagates) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i8_type(ctx));
-  clux_value_t *result =
-      clux_context_cast(ctx, shadow, clux_context_get_u64_type(ctx), NULL);
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I8));
+  clux_value_t *result = clux_context_cast(
+      ctx, shadow, clux_context_builtin_type(ctx, CLUX_TYPE_U64), NULL);
   ASSERT_NE(result, nullptr);
-  EXPECT_EQ(clux_value_get_type(result), clux_context_get_u64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U64));
   EXPECT_TRUE(clux_value_is_shadow(result));
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -1106,8 +1161,8 @@ TEST(EngineTest, CastPropagatesErrorValue) {
   clux_context_t *ctx = create_clux_context(a);
   clux_error_t *error = create_error(a, NULL, "boom");
   clux_value_t *value = clux_context_create_error(ctx, error);
-  clux_value_t *result =
-      clux_context_cast(ctx, value, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *result = clux_context_cast(
+      ctx, value, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   EXPECT_EQ(result, value);
   EXPECT_NE(strstr(error_message_of(result), "boom"), nullptr);
   delete_clux_context(&ctx);
@@ -1133,8 +1188,8 @@ TEST(EngineTest, CastNullInputsProduceError) {
   clux_context_t *ctx = create_clux_context(a);
   clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
 
-  clux_value_t *no_value =
-      clux_context_cast(ctx, NULL, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *no_value = clux_context_cast(
+      ctx, NULL, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(no_value, nullptr);
   EXPECT_EQ(clux_value_get_type(no_value), clux_context_get_error_type(ctx));
   EXPECT_NE(strstr(error_message_of(no_value),
@@ -1156,8 +1211,8 @@ TEST(EngineTest, CastIdentityReturnsSameValue) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
   clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
-  clux_value_t *result =
-      clux_context_cast(ctx, value, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *result = clux_context_cast(
+      ctx, value, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   EXPECT_EQ(result, value);
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -1173,8 +1228,14 @@ TEST(EngineTest, BuiltinFloatingTypes) {
     const char *name;
     size_t size;
   } cases[] = {
-      {clux_context_get_f32_type(ctx), CLUX_TYPE_F32, "f32", sizeof(float)},
-      {clux_context_get_f64_type(ctx), CLUX_TYPE_F64, "f64", sizeof(double)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_F32),
+       CLUX_TYPE_F32,
+       "f32",
+       sizeof(float)},
+      {clux_context_builtin_type(ctx, CLUX_TYPE_F64),
+       CLUX_TYPE_F64,
+       "f64",
+       sizeof(double)},
   };
   for (const auto &c : cases) {
     ASSERT_NE(c.type, nullptr);
@@ -1214,7 +1275,8 @@ TEST(EngineTest, FloatingArithmeticOps) {
   clux_value_t *f32_right = clux_context_create_f32(ctx, 2.25f, NULL, NULL);
   clux_value_t *f32_sum = clux_context_add(ctx, f32_left, f32_right, NULL);
   ASSERT_NE(f32_sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(f32_sum), clux_context_get_f32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(f32_sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F32));
   EXPECT_FLOAT_EQ(read_f32(f32_sum), 3.75f);
 
   clux_value_t *f64_left = clux_context_create_f64(ctx, 7.5, NULL, NULL);
@@ -1231,7 +1293,8 @@ TEST(EngineTest, FloatingArithmeticOps) {
     clux_value_t *result =
         clux_context_binary(ctx, c.op, f64_left, f64_right, nullptr);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(clux_value_get_type(result), clux_context_get_f64_type(ctx));
+    EXPECT_EQ(clux_value_get_type(result),
+              clux_context_builtin_type(ctx, CLUX_TYPE_F64));
     EXPECT_DOUBLE_EQ(read_f64(result), c.expected);
   }
 
@@ -1255,7 +1318,8 @@ TEST(EngineTest, FloatWidensToDouble) {
   clux_value_t *f64_value = clux_context_create_f64(ctx, 2.25, NULL, NULL);
   clux_value_t *sum = clux_context_add(ctx, f32_value, f64_value, NULL);
   ASSERT_NE(sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(sum), clux_context_get_f64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F64));
   EXPECT_DOUBLE_EQ(read_f64(sum), 3.75);
 
   delete_clux_context(&ctx);
@@ -1271,7 +1335,8 @@ TEST(EngineTest, FloatDivisionByZeroFollowsIEEE) {
   clux_value_t *quotient =
       clux_context_binary(ctx, CLUX_OP_DIV, left, right, NULL);
   ASSERT_NE(quotient, nullptr);
-  EXPECT_EQ(clux_value_get_type(quotient), clux_context_get_f64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(quotient),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F64));
   EXPECT_TRUE(std::isinf(read_f64(quotient)));
 
   delete_clux_context(&ctx);
@@ -1284,21 +1349,22 @@ TEST(EngineTest, FloatSafeCastWidensOnly) {
 
   clux_value_t *f32_value = clux_context_create_f32(ctx, 1.5f, NULL, NULL);
   clux_value_t *widened = clux_context_safe_cast(
-      ctx, f32_value, clux_context_get_f64_type(ctx), NULL);
+      ctx, f32_value, clux_context_builtin_type(ctx, CLUX_TYPE_F64), NULL);
   ASSERT_NE(widened, nullptr);
-  EXPECT_EQ(clux_value_get_type(widened), clux_context_get_f64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(widened),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F64));
   EXPECT_DOUBLE_EQ(read_f64(widened), 1.5);
 
   clux_value_t *f64_value = clux_context_create_f64(ctx, 1.5, NULL, NULL);
   clux_value_t *narrowed = clux_context_safe_cast(
-      ctx, f64_value, clux_context_get_f32_type(ctx), NULL);
+      ctx, f64_value, clux_context_builtin_type(ctx, CLUX_TYPE_F32), NULL);
   ASSERT_NE(narrowed, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(narrowed)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(narrowed),
                "cannot safely cast 'f64' to 'f32': narrowing conversion");
 
   clux_value_t *to_int = clux_context_safe_cast(
-      ctx, f64_value, clux_context_get_i32_type(ctx), NULL);
+      ctx, f64_value, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(to_int, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(to_int)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(to_int), "cannot safely cast 'f64' to 'i32'");
@@ -1312,30 +1378,34 @@ TEST(EngineTest, FloatCastCrossesCategories) {
   clux_context_t *ctx = create_clux_context(a);
 
   clux_value_t *f64_value = clux_context_create_f64(ctx, 2.5, NULL, NULL);
-  clux_value_t *to_i32 =
-      clux_context_cast(ctx, f64_value, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *to_i32 = clux_context_cast(
+      ctx, f64_value, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(to_i32, nullptr);
-  EXPECT_EQ(clux_value_get_type(to_i32), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(to_i32),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_EQ(read_i32(to_i32), 2);
 
   clux_value_t *i32_value = clux_context_create_i32(ctx, 7, NULL, NULL);
-  clux_value_t *to_f64 =
-      clux_context_cast(ctx, i32_value, clux_context_get_f64_type(ctx), NULL);
+  clux_value_t *to_f64 = clux_context_cast(
+      ctx, i32_value, clux_context_builtin_type(ctx, CLUX_TYPE_F64), NULL);
   ASSERT_NE(to_f64, nullptr);
-  EXPECT_EQ(clux_value_get_type(to_f64), clux_context_get_f64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(to_f64),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F64));
   EXPECT_DOUBLE_EQ(read_f64(to_f64), 7.0);
 
   clux_value_t *u8_value = clux_context_create_u8(ctx, 255, NULL, NULL);
-  clux_value_t *u8_to_f32 =
-      clux_context_cast(ctx, u8_value, clux_context_get_f32_type(ctx), NULL);
+  clux_value_t *u8_to_f32 = clux_context_cast(
+      ctx, u8_value, clux_context_builtin_type(ctx, CLUX_TYPE_F32), NULL);
   ASSERT_NE(u8_to_f32, nullptr);
-  EXPECT_EQ(clux_value_get_type(u8_to_f32), clux_context_get_f32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(u8_to_f32),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F32));
   EXPECT_FLOAT_EQ(read_f32(u8_to_f32), 255.0f);
 
-  clux_value_t *narrowed =
-      clux_context_cast(ctx, f64_value, clux_context_get_f32_type(ctx), NULL);
+  clux_value_t *narrowed = clux_context_cast(
+      ctx, f64_value, clux_context_builtin_type(ctx, CLUX_TYPE_F32), NULL);
   ASSERT_NE(narrowed, nullptr);
-  EXPECT_EQ(clux_value_get_type(narrowed), clux_context_get_f32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(narrowed),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F32));
   EXPECT_FLOAT_EQ(read_f32(narrowed), 2.5f);
 
   delete_clux_context(&ctx);
@@ -1346,13 +1416,14 @@ TEST(EngineTest, FloatShadowAndErrorPropagate) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_value_t *shadow_f32 =
-      clux_context_create_shadow_value(ctx, clux_context_get_f32_type(ctx));
+  clux_value_t *shadow_f32 = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_F32));
   clux_value_t *f64_value = clux_context_create_f64(ctx, 1.0, NULL, NULL);
   clux_value_t *sum = clux_context_add(ctx, shadow_f32, f64_value, NULL);
   ASSERT_NE(sum, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(sum));
-  EXPECT_EQ(clux_value_get_type(sum), clux_context_get_f64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F64));
 
   clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
   clux_value_t *propagated = clux_context_add(ctx, error, f64_value, NULL);
@@ -1402,7 +1473,7 @@ TEST(EngineTest, BuiltinBoolType) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *type = clux_context_get_bool_type(ctx);
+  clux_type_t *type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
   ASSERT_NE(type, nullptr);
   EXPECT_EQ(clux_type_get_kind(type), CLUX_TYPE_BOOL);
   EXPECT_STREQ(clux_type_get_name(type), "bool");
@@ -1444,7 +1515,8 @@ TEST(EngineTest, BoolLogicNot) {
   clux_value_t *truth = clux_context_create_bool(ctx, true, NULL, NULL);
   clux_value_t *negated = clux_context_prefix(ctx, CLUX_OP_LNOT, truth, NULL);
   ASSERT_NE(negated, nullptr);
-  EXPECT_EQ(clux_value_get_type(negated), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(negated),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   EXPECT_FALSE(read_bool(negated));
 
   clux_value_t *again = clux_context_prefix(ctx, CLUX_OP_LNOT, negated, NULL);
@@ -1460,19 +1532,19 @@ TEST(EngineTest, BoolCastToNumeric) {
   clux_context_t *ctx = create_clux_context(a);
 
   clux_value_t *truth = clux_context_create_bool(ctx, true, NULL, NULL);
-  clux_value_t *to_i32 =
-      clux_context_cast(ctx, truth, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *to_i32 = clux_context_cast(
+      ctx, truth, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(to_i32, nullptr);
   EXPECT_EQ(read_i32(to_i32), 1);
 
   clux_value_t *lie = clux_context_create_bool(ctx, false, NULL, NULL);
-  clux_value_t *to_u8 =
-      clux_context_cast(ctx, lie, clux_context_get_u8_type(ctx), NULL);
+  clux_value_t *to_u8 = clux_context_cast(
+      ctx, lie, clux_context_builtin_type(ctx, CLUX_TYPE_U8), NULL);
   ASSERT_NE(to_u8, nullptr);
   EXPECT_EQ(read_u8(to_u8), 0);
 
-  clux_value_t *to_f64 =
-      clux_context_cast(ctx, truth, clux_context_get_f64_type(ctx), NULL);
+  clux_value_t *to_f64 = clux_context_cast(
+      ctx, truth, clux_context_builtin_type(ctx, CLUX_TYPE_F64), NULL);
   ASSERT_NE(to_f64, nullptr);
   EXPECT_DOUBLE_EQ(read_f64(to_f64), 1.0);
 
@@ -1497,10 +1569,11 @@ TEST(EngineTest, NumericCastToBool) {
       {clux_context_create_f64(ctx, 2.5, NULL, NULL), true},
   };
   for (const auto &c : cases) {
-    clux_value_t *result =
-        clux_context_cast(ctx, c.value, clux_context_get_bool_type(ctx), NULL);
+    clux_value_t *result = clux_context_cast(
+        ctx, c.value, clux_context_builtin_type(ctx, CLUX_TYPE_BOOL), NULL);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(clux_value_get_type(result), clux_context_get_bool_type(ctx));
+    EXPECT_EQ(clux_value_get_type(result),
+              clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
     EXPECT_EQ(read_bool(result), c.expected);
   }
 
@@ -1513,12 +1586,12 @@ TEST(EngineTest, BoolSafeCastStrict) {
   clux_context_t *ctx = create_clux_context(a);
 
   clux_value_t *truth = clux_context_create_bool(ctx, true, NULL, NULL);
-  clux_value_t *identity =
-      clux_context_safe_cast(ctx, truth, clux_context_get_bool_type(ctx), NULL);
+  clux_value_t *identity = clux_context_safe_cast(
+      ctx, truth, clux_context_builtin_type(ctx, CLUX_TYPE_BOOL), NULL);
   EXPECT_EQ(identity, truth);
 
-  clux_value_t *to_i32 =
-      clux_context_safe_cast(ctx, truth, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *to_i32 = clux_context_safe_cast(
+      ctx, truth, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(to_i32, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(to_i32)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(to_i32), "cannot safely cast 'bool' to 'i32'");
@@ -1558,12 +1631,13 @@ TEST(EngineTest, BoolShadowAndErrorPropagate) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_bool_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   clux_value_t *negated = clux_context_prefix(ctx, CLUX_OP_LNOT, shadow, NULL);
   ASSERT_NE(negated, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(negated));
-  EXPECT_EQ(clux_value_get_type(negated), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(negated),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
 
   clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
   clux_value_t *propagated =
@@ -1578,7 +1652,7 @@ TEST(EngineTest, BuiltinStrType) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *type = clux_context_get_str_type(ctx);
+  clux_type_t *type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
   ASSERT_NE(type, nullptr);
   EXPECT_EQ(clux_type_get_kind(type), CLUX_TYPE_STR);
   EXPECT_STREQ(clux_type_get_name(type), "str");
@@ -1619,13 +1693,15 @@ TEST(EngineTest, StrCreateAndConcat) {
 
   clux_value_t *hello = clux_context_create_str(ctx, "hello ", NULL, NULL);
   ASSERT_NE(hello, nullptr);
-  EXPECT_EQ(clux_value_get_type(hello), clux_context_get_str_type(ctx));
+  EXPECT_EQ(clux_value_get_type(hello),
+            clux_context_builtin_type(ctx, CLUX_TYPE_STR));
   EXPECT_STREQ(read_str(hello), "hello ");
 
   clux_value_t *world = clux_context_create_str(ctx, "world", NULL, NULL);
   clux_value_t *joined = clux_context_add(ctx, hello, world, NULL);
   ASSERT_NE(joined, nullptr);
-  EXPECT_EQ(clux_value_get_type(joined), clux_context_get_str_type(ctx));
+  EXPECT_EQ(clux_value_get_type(joined),
+            clux_context_builtin_type(ctx, CLUX_TYPE_STR));
   EXPECT_STREQ(read_str(joined), "hello world");
 
   clux_value_t *bang = clux_context_create_str(ctx, "!", NULL, NULL);
@@ -1674,13 +1750,14 @@ TEST(EngineTest, StrShadowAndErrorPropagate) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_str_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_STR));
   clux_value_t *text = clux_context_create_str(ctx, "x", NULL, NULL);
   clux_value_t *shadow_joined = clux_context_add(ctx, shadow, text, NULL);
   ASSERT_NE(shadow_joined, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_joined));
-  EXPECT_EQ(clux_value_get_type(shadow_joined), clux_context_get_str_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_joined),
+            clux_context_builtin_type(ctx, CLUX_TYPE_STR));
 
   clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
   EXPECT_EQ(clux_context_add(ctx, error, text, NULL), error);
@@ -1702,14 +1779,14 @@ TEST(EngineTest, StrUnsupportedOps) {
   EXPECT_STREQ(error_message_of(sub),
                "type 'str' does not support operator '-'");
 
-  clux_value_t *safe =
-      clux_context_safe_cast(ctx, left, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *safe = clux_context_safe_cast(
+      ctx, left, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(safe, nullptr);
   EXPECT_STREQ(error_message_of(safe),
                "type 'str' cannot be safely cast to 'i32'");
 
-  clux_value_t *cast =
-      clux_context_cast(ctx, left, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *cast = clux_context_cast(
+      ctx, left, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(cast, nullptr);
   EXPECT_STREQ(error_message_of(cast), "type 'str' cannot be cast to 'i32'");
 
@@ -1737,7 +1814,8 @@ TEST(EngineTest, IntegerComparisonOps) {
   for (const auto &c : cases) {
     clux_value_t *result = clux_context_binary(ctx, c.op, small, large, NULL);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(clux_value_get_type(result), clux_context_get_bool_type(ctx));
+    EXPECT_EQ(clux_value_get_type(result),
+              clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
     EXPECT_EQ(read_bool(result), c.expected);
   }
 
@@ -1760,7 +1838,8 @@ TEST(EngineTest, UnsignedComparisonOps) {
   clux_value_t *large = clux_context_create_u32(ctx, 300, NULL, NULL);
   clux_value_t *cmp = clux_context_binary(ctx, CLUX_OP_LT, small, large, NULL);
   ASSERT_NE(cmp, nullptr);
-  EXPECT_EQ(clux_value_get_type(cmp), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(cmp),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   EXPECT_TRUE(read_bool(cmp));
 
   clux_value_t *max = clux_context_create_u8(ctx, 255, NULL, NULL);
@@ -1793,7 +1872,8 @@ TEST(EngineTest, FloatComparisonOps) {
   for (const auto &c : cases) {
     clux_value_t *result = clux_context_binary(ctx, c.op, small, large, NULL);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(clux_value_get_type(result), clux_context_get_bool_type(ctx));
+    EXPECT_EQ(clux_value_get_type(result),
+              clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
     EXPECT_EQ(read_bool(result), c.expected);
   }
 
@@ -1815,7 +1895,8 @@ TEST(EngineTest, BoolComparisonOps) {
   clux_value_t *lie = clux_context_create_bool(ctx, false, NULL, NULL);
   clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, truth, truth, NULL);
   ASSERT_NE(eq, nullptr);
-  EXPECT_EQ(clux_value_get_type(eq), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(eq),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   EXPECT_TRUE(read_bool(eq));
   clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, truth, lie, NULL);
   ASSERT_NE(ne, nullptr);
@@ -1847,7 +1928,8 @@ TEST(EngineTest, StrComparisonOps) {
   clux_value_t *abd = clux_context_create_str(ctx, "abd", NULL, NULL);
   clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, abc, abc2, NULL);
   ASSERT_NE(eq, nullptr);
-  EXPECT_EQ(clux_value_get_type(eq), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(eq),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   EXPECT_TRUE(read_bool(eq));
   clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, abc, abd, NULL);
   ASSERT_NE(ne, nullptr);
@@ -1873,14 +1955,15 @@ TEST(EngineTest, ComparisonShadowAndErrorPropagate) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
   clux_value_t *shadow_cmp =
       clux_context_binary(ctx, CLUX_OP_EQ, shadow, value, NULL);
   ASSERT_NE(shadow_cmp, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_cmp));
-  EXPECT_EQ(clux_value_get_type(shadow_cmp), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_cmp),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
 
   clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
   EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, error, value, NULL), error);
@@ -1894,7 +1977,7 @@ TEST(EngineTest, PtrTypeIsInternedByBase) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32 = clux_context_get_i32_type(ctx);
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32);
   ASSERT_NE(ptr_i32, nullptr);
   EXPECT_EQ(clux_context_get_ptr_type(ctx, i32), ptr_i32);
@@ -1912,8 +1995,8 @@ TEST(EngineTest, PtrTypeIsInternedByBase) {
   EXPECT_NE(vt->safe_cast, nullptr);
   EXPECT_EQ(vt->cast, nullptr);
 
-  clux_type_t *ptr_f64 =
-      clux_context_get_ptr_type(ctx, clux_context_get_f64_type(ctx));
+  clux_type_t *ptr_f64 = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_F64));
   ASSERT_NE(ptr_f64, nullptr);
   EXPECT_NE(ptr_f64, ptr_i32);
   EXPECT_STREQ(clux_type_get_name(ptr_f64), "*f64");
@@ -1930,13 +2013,15 @@ TEST(EngineTest, RefAndDerefRoundTrip) {
   clux_value_t *p = clux_context_ref(ctx, x, NULL);
   ASSERT_NE(p, nullptr);
   EXPECT_EQ(clux_value_get_type(p),
-            clux_context_get_ptr_type(ctx, clux_context_get_i32_type(ctx)));
+            clux_context_get_ptr_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32)));
   EXPECT_FALSE(clux_value_is_shadow(p));
 
   /* 解引用：deref 返回 base 类型的 view（与目标内存共享） */
   clux_value_t *read = clux_context_deref(ctx, p, NULL);
   ASSERT_NE(read, nullptr);
-  EXPECT_EQ(clux_value_get_type(read), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(read),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_EQ(read_i32(read), 42);
 
   /* 写入走通用 assign：写穿 view 即写穿透到目标值本体 */
@@ -1972,8 +2057,8 @@ TEST(EngineTest, PtrToPtrType) {
   clux_value_t *p = clux_context_ref(ctx, x, NULL);
   clux_value_t *pp = clux_context_ref(ctx, p, NULL);
   ASSERT_NE(pp, nullptr);
-  clux_type_t *ptr_i32 =
-      clux_context_get_ptr_type(ctx, clux_context_get_i32_type(ctx));
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_type_t *ptr_ptr_i32 = clux_context_get_ptr_type(ctx, ptr_i32);
   EXPECT_EQ(clux_value_get_type(p), ptr_i32);
   EXPECT_EQ(clux_value_get_type(pp), ptr_ptr_i32);
@@ -1997,8 +2082,8 @@ TEST(EngineTest, RefOfShadowAndErrorPropagate) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *p_shadow = clux_context_ref(ctx, shadow, NULL);
   ASSERT_NE(p_shadow, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(p_shadow));
@@ -2006,13 +2091,15 @@ TEST(EngineTest, RefOfShadowAndErrorPropagate) {
   clux_value_t *shadow_read = clux_context_deref(ctx, p_shadow, NULL);
   ASSERT_NE(shadow_read, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_read));
-  EXPECT_EQ(clux_value_get_type(shadow_read), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_read),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
 
   clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
   clux_value_t *shadow_set = clux_context_assign(ctx, shadow_read, x, NULL);
   ASSERT_NE(shadow_set, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_set));
-  EXPECT_EQ(clux_value_get_type(shadow_set), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_set),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
 
   clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
   EXPECT_EQ(clux_context_ref(ctx, err, NULL), err);
@@ -2035,7 +2122,8 @@ TEST(EngineTest, PtrComparisonOps) {
 
   clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, px, px2, NULL);
   ASSERT_NE(eq, nullptr);
-  EXPECT_EQ(clux_value_get_type(eq), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(eq),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   EXPECT_TRUE(read_bool(eq));
   clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, px, py, NULL);
   ASSERT_NE(ne, nullptr);
@@ -2050,15 +2138,17 @@ TEST(EngineTest, PtrComparisonOps) {
   EXPECT_STREQ(error_message_of(mixed),
                "operator '==' requires operands of the same type");
 
-  clux_value_t *shadow_px = clux_context_ref(
-      ctx,
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx)),
-      NULL);
+  clux_value_t *shadow_px =
+      clux_context_ref(ctx,
+                       clux_context_create_shadow_value(
+                           ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32)),
+                       NULL);
   clux_value_t *shadow_cmp =
       clux_context_binary(ctx, CLUX_OP_EQ, shadow_px, px, NULL);
   ASSERT_NE(shadow_cmp, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_cmp));
-  EXPECT_EQ(clux_value_get_type(shadow_cmp), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_cmp),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
 
   clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
   EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, err, px, NULL), err);
@@ -2121,8 +2211,8 @@ TEST(EngineTest, PtrUnsupportedOps) {
   EXPECT_STREQ(error_message_of(index_of_ptr),
                "type '*i32' does not support indexing");
 
-  clux_value_t *safe_cast =
-      clux_context_safe_cast(ctx, p, clux_context_get_i32_type(ctx), NULL);
+  clux_value_t *safe_cast = clux_context_safe_cast(
+      ctx, p, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL);
   ASSERT_NE(safe_cast, nullptr);
   EXPECT_STREQ(error_message_of(safe_cast),
                "cannot safely cast '*i32' to 'i32'");
@@ -2165,10 +2255,10 @@ TEST(EngineTest, TypeEqualByKind) {
   clux_context_t *ctx = create_clux_context(a);
   clux_context_t *other_ctx = create_clux_context(a);
 
-  clux_type_t *i32 = clux_context_get_i32_type(ctx);
-  clux_type_t *i32_b = clux_context_get_i32_type(other_ctx);
-  clux_type_t *i64 = clux_context_get_i64_type(ctx);
-  clux_type_t *str = clux_context_get_str_type(ctx);
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i32_b = clux_context_builtin_type(other_ctx, CLUX_TYPE_I32);
+  clux_type_t *i64 = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *str = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
   /* 同指针与 kind 判等两个路径都为 true。 */
   EXPECT_TRUE(clux_type_equal(i32, i32));
   EXPECT_TRUE(clux_type_equal(i32, i32_b));
@@ -2200,11 +2290,12 @@ TEST(EngineTest, PtrTypeEqualAndExtendsRecursive) {
   clux_context_t *ctx = create_clux_context(a);
   clux_context_t *other_ctx = create_clux_context(a);
 
-  clux_type_t *i32 = clux_context_get_i32_type(ctx);
-  clux_type_t *i32_b = clux_context_get_i32_type(other_ctx);
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i32_b = clux_context_builtin_type(other_ctx, CLUX_TYPE_I32);
   clux_type_t *ptr_i32 = clux_type_get_ptr_type(i32_b);
   clux_type_t *ptr_i32_b = clux_type_get_ptr_type(i32);
-  clux_type_t *ptr_i64 = clux_type_get_ptr_type(clux_context_get_i64_type(ctx));
+  clux_type_t *ptr_i64 =
+      clux_type_get_ptr_type(clux_context_builtin_type(ctx, CLUX_TYPE_I64));
 
   /* 递归判等：不同实例同 kind 同 base。 */
   EXPECT_TRUE(clux_type_equal(ptr_i32, ptr_i32_b));
@@ -2243,7 +2334,8 @@ TEST(EngineTest, CreateI32ValueAndReadData) {
   clux_context_t *ctx = create_clux_context(a);
   clux_value_t *value = clux_context_create_i32(ctx, 42, "answer", NULL);
   ASSERT_NE(value, nullptr);
-  EXPECT_EQ(clux_value_get_type(value), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(value),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_EQ(read_i32(value), 42);
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -2296,7 +2388,8 @@ TEST(EngineTest, AddI32Values) {
   clux_value_t *right = clux_context_create_i32(ctx, 22, NULL, NULL);
   clux_value_t *sum = clux_context_add(ctx, left, right, NULL);
   ASSERT_NE(sum, nullptr);
-  EXPECT_EQ(clux_value_get_type(sum), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(clux_value_get_type(sum),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_EQ(read_i32(sum), 42);
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -2440,16 +2533,16 @@ TEST(EngineTest, AssignPropagatesErrorShadowAndNull) {
   EXPECT_EQ(clux_context_assign(ctx, err_right, value, NULL), err_right);
 
   /* shadow 左值：返回左值 shadow 本身，不发生写入 */
-  clux_value_t *shadow_target =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow_target = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *shadow_result =
       clux_context_assign(ctx, shadow_target, value, NULL);
   EXPECT_EQ(shadow_result, shadow_target);
   EXPECT_TRUE(clux_value_is_shadow(shadow_target));
 
   /* 右值 shadow：返回左值，数据不变 */
-  clux_value_t *shadow_right =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow_right = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *mixed = clux_context_assign(ctx, target, shadow_right, NULL);
   EXPECT_EQ(mixed, target);
   EXPECT_EQ(read_i32(target), 1);
@@ -2513,12 +2606,13 @@ TEST(EngineTest, ClonePropagatesErrorShadowAndNull) {
   EXPECT_EQ(clux_context_clone(ctx, bad, NULL), bad);
 
   /* shadow 克隆为同类型 shadow */
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i64_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   clux_value_t *shadow_copy = clux_context_clone(ctx, shadow, NULL);
   ASSERT_NE(shadow_copy, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_copy));
-  EXPECT_EQ(clux_value_get_type(shadow_copy), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_copy),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -2528,7 +2622,7 @@ TEST(EngineTest, QualifiedTypeMetaAndInterning) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *const_i32 =
       clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
   ASSERT_NE(const_i32, nullptr);
@@ -2575,7 +2669,7 @@ TEST(EngineTest, QualifiedTypeEqualAndExtends) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *const_i32 =
       clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
   clux_type_t *volatile_i32 =
@@ -2613,9 +2707,9 @@ TEST(EngineTest, AssignRespectsConstQualifier) {
   clux_context_t *ctx = create_clux_context(a);
 
   clux_type_t *const_i32 = clux_type_get_qualified_type(
-      clux_context_get_i32_type(ctx), CLUX_TYPE_CONST);
+      clux_context_builtin_type(ctx, CLUX_TYPE_I32), CLUX_TYPE_CONST);
   clux_type_t *volatile_i32 = clux_type_get_qualified_type(
-      clux_context_get_i32_type(ctx), CLUX_TYPE_VOLATILE);
+      clux_context_builtin_type(ctx, CLUX_TYPE_I32), CLUX_TYPE_VOLATILE);
 
   /* const 目标：直接建值并赋值被拒绝 */
   clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
@@ -2647,7 +2741,7 @@ TEST(EngineTest, DerefThroughConstPointer) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *const_i32 =
       clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
   clux_type_t *ptr_const = clux_context_get_ptr_type(ctx, const_i32);
@@ -2703,7 +2797,7 @@ TEST(EngineTest, DerefThroughVolatilePointer) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *volatile_i32 =
       clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE);
   clux_type_t *ptr_volatile = clux_context_get_ptr_type(ctx, volatile_i32);
@@ -2733,7 +2827,7 @@ TEST(EngineTest, SliceTypeInterningAndMeta) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *slice_i32 = clux_context_get_slice_type(ctx, i32_type);
   ASSERT_NE(slice_i32, nullptr);
   EXPECT_EQ(clux_type_get_kind(slice_i32), CLUX_TYPE_SLICE);
@@ -2743,8 +2837,8 @@ TEST(EngineTest, SliceTypeInterningAndMeta) {
   EXPECT_EQ(clux_type_get_align(slice_i32), alignof(clux_slice_data_t));
 
   /* 不同 base 产出不同实例；判等由 vtable 递归回答 */
-  clux_type_t *slice_i64 =
-      clux_context_get_slice_type(ctx, clux_context_get_i64_type(ctx));
+  clux_type_t *slice_i64 = clux_context_get_slice_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   ASSERT_NE(slice_i64, nullptr);
   EXPECT_NE(slice_i64, slice_i32);
   EXPECT_TRUE(clux_type_equal(slice_i32, slice_i32));
@@ -2772,8 +2866,8 @@ TEST(EngineTest, SliceCreateAndLen) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *slice_i32 =
-      clux_context_get_slice_type(ctx, clux_context_get_i32_type(ctx));
+  clux_type_t *slice_i32 = clux_context_get_slice_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *x = clux_context_create_i32(ctx, 42, NULL, NULL);
   clux_value_t *slice = clux_context_create_slice(
       ctx, slice_i32, clux_value_get_data(x), 4, "s", NULL);
@@ -2815,8 +2909,8 @@ TEST(EngineTest, SliceCompareAndCloneAssign) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *slice_i32 =
-      clux_context_get_slice_type(ctx, clux_context_get_i32_type(ctx));
+  clux_type_t *slice_i32 = clux_context_get_slice_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *x = clux_context_create_i32(ctx, 42, NULL, NULL);
   ptr_handle_t target = clux_value_get_data(x);
   clux_value_t *s1 =
@@ -2875,7 +2969,7 @@ TEST(EngineTest, ArrayTypeInterningAndMeta) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *arr3 = clux_context_get_array_type(ctx, i32_type, 3);
   ASSERT_NE(arr3, nullptr);
   EXPECT_EQ(clux_type_get_kind(arr3), CLUX_TYPE_ARRAY);
@@ -2886,8 +2980,8 @@ TEST(EngineTest, ArrayTypeInterningAndMeta) {
 
   /* 不同长度/不同 base 均为不同实例 */
   clux_type_t *arr4 = clux_context_get_array_type(ctx, i32_type, 4);
-  clux_type_t *arr3_i64 =
-      clux_context_get_array_type(ctx, clux_context_get_i64_type(ctx), 3);
+  clux_type_t *arr3_i64 = clux_context_get_array_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I64), 3);
   EXPECT_NE(arr4, arr3);
   EXPECT_NE(arr3_i64, arr3);
   EXPECT_FALSE(clux_type_equal(arr3, arr4));
@@ -2911,7 +3005,7 @@ TEST(EngineTest, ArrayIndexReadWrite) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *arr_type = clux_context_get_array_type(ctx, i32_type, 3);
   clux_value_t *arr = clux_context_create_array(ctx, arr_type, "arr", NULL);
   ASSERT_NE(arr, nullptr);
@@ -3007,7 +3101,7 @@ TEST(EngineTest, ArrayConstElementAndCompareAndClone) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *const_i32 =
       clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
   clux_type_t *const_arr = clux_context_get_array_type(ctx, const_i32, 2);
@@ -3068,7 +3162,7 @@ TEST(EngineTest, OptionalTypeInterningAndMeta) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
   ASSERT_NE(opt_i32, nullptr);
   EXPECT_EQ(clux_type_get_kind(opt_i32), CLUX_TYPE_OPTIONAL);
@@ -3080,8 +3174,8 @@ TEST(EngineTest, OptionalTypeInterningAndMeta) {
   EXPECT_EQ(clux_type_get_optional_base(opt_i32), i32_type);
 
   /* 不同 base / 带限定载荷均为不同实例 */
-  clux_type_t *opt_i64 =
-      clux_context_get_optional_type(ctx, clux_context_get_i64_type(ctx));
+  clux_type_t *opt_i64 = clux_context_get_optional_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   clux_type_t *opt_const = clux_context_get_optional_type(
       ctx, clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST));
   ASSERT_NE(opt_i64, nullptr);
@@ -3108,7 +3202,7 @@ TEST(EngineTest, OptionalSomeNoneAndUnwrap) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
   clux_value_t *v5 = clux_context_create_i32(ctx, 5, NULL, NULL);
   clux_value_t *some =
@@ -3161,7 +3255,7 @@ TEST(EngineTest, OptionalIsNoneQuery) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
   clux_value_t *v5 = clux_context_create_i32(ctx, 5, NULL, NULL);
   clux_value_t *some =
@@ -3186,7 +3280,7 @@ TEST(EngineTest, OptionalIsNoneQuery) {
   ASSERT_NE(shadow_result, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_result));
   EXPECT_EQ(clux_value_get_type(shadow_result),
-            clux_context_get_bool_type(ctx));
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
   EXPECT_EQ(clux_context_is_none(ctx, err, NULL), err);
 
@@ -3198,7 +3292,7 @@ TEST(EngineTest, OptionalCompareSameType) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
   clux_value_t *v5 = clux_context_create_i32(ctx, 5, NULL, NULL);
   clux_value_t *some5 =
@@ -3223,12 +3317,12 @@ TEST(EngineTest, OptionalCompareSameType) {
       read_bool(clux_context_binary(ctx, CLUX_OP_EQ, none, none, NULL)));
 
   /* 类型不匹配 */
-  clux_type_t *opt_i64 =
-      clux_context_get_optional_type(ctx, clux_context_get_i64_type(ctx));
+  clux_type_t *opt_i64 = clux_context_get_optional_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I64));
   EXPECT_STREQ(clux_type_get_name(opt_i64), "?i64");
   clux_value_t *some64 = clux_context_create_optional_some(
       ctx,
-      clux_context_get_i64_type(ctx),
+      clux_context_builtin_type(ctx, CLUX_TYPE_I64),
       clux_context_create_i64(ctx, 1, NULL, NULL),
       NULL,
       NULL);
@@ -3263,7 +3357,7 @@ TEST(EngineTest, OptionalConstructionAndAssign) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
 
   /* #none(i32)：载荷类型入参，产出 ?T{none}（零值） */
@@ -3320,8 +3414,8 @@ TEST(EngineTest, CunionTypeAndFieldAccess) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
 
   /* 创建：size/align 取成员最大值（C ABI 布局） */
   clux_cunion_member_t members[] = {
@@ -3458,8 +3552,8 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
 
   /* 创建：tag u32 在偏移 0，payload 从对齐处开始
      （align = max(4, 成员对齐) = 8，size = round_up(8 + 8, 8) = 16） */
@@ -3588,7 +3682,8 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
       clux_context_is_member(ctx, shadow_union, "a", NULL);
   ASSERT_NE(shadow_is, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_is));
-  EXPECT_EQ(clux_value_get_type(shadow_is), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_is),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
   EXPECT_EQ(clux_context_union_set_member(ctx, shadow_union, "b", NULL),
             shadow_union);
 
@@ -3632,8 +3727,8 @@ TEST(EngineTest, FuncTypeInvokeAndCaptures) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
 
   /* 创建：头部 AST 指针在偏移 0，捕获字段从对齐处平铺
      （align = max(8, 4, 8) = 8；a 偏移 8，b 偏移 round_up(12, 8) = 16，
@@ -3873,8 +3968,8 @@ TEST(EngineTest, StructTypeFieldsAndEquality) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
 
   /* 创建：字段按声明序 C 布局平铺
      （a 偏移 0，b 偏移 round_up(4, 8) = 8，size = round_up(16, 8) = 16） */
@@ -3969,7 +4064,8 @@ TEST(EngineTest, StructTypeFieldsAndEquality) {
       clux_context_binary(ctx, CLUX_OP_EQ, shadow_struct, p, NULL);
   ASSERT_NE(shadow_eq, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_eq));
-  EXPECT_EQ(clux_value_get_type(shadow_eq), clux_context_get_bool_type(ctx));
+  EXPECT_EQ(clux_value_get_type(shadow_eq),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
 
   /* eq/ne 逐字段递归（白皮书 §5.5） */
   clux_value_t *q = clux_context_create_struct(ctx, point_type, NULL, NULL);
@@ -4026,7 +4122,7 @@ TEST(EngineTest, StructAttributesMethodsSubtypes) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
 
   /* method 本体：func(i32, i32) -> i32，挂 AST */
   clux_type_t *param_types[] = {i32_type, i32_type};
@@ -4202,9 +4298,9 @@ TEST(EngineTest, StructPointerCovariantImplicitCast) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
-  clux_type_t *f32_type = clux_context_get_f32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *f32_type = clux_context_builtin_type(ctx, CLUX_TYPE_F32);
 
   /* Base{a,b} ← Derived{a,b,c} 字段前缀兼容；Unrelated 横跨不兼容 */
   clux_struct_field_t base_fields[] = {
@@ -4331,9 +4427,9 @@ TEST(EngineTest, StructDuckTypeImplicitCast) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
-  clux_type_t *f32_type = clux_context_get_f32_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *f32_type = clux_context_builtin_type(ctx, CLUX_TYPE_F32);
 
   /* P 与 Q 字段表一致但 attribute 声明不同：不去重折叠为同一类型，
      鸭子判据（只看字段名+顺序+类型）双向成立 */
@@ -4439,8 +4535,8 @@ TEST(EngineTest, TypeValueWrapsType) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
   clux_type_t *type_type = clux_context_get_type_type(ctx);
 
   /* "type" 类型属性：vtable 只绑 eq 与 value_extends，其余槽位为空 */
@@ -4528,7 +4624,7 @@ TEST(EngineTest, TypeValueWrapsType) {
 
   /* value_extends 代理 clux_type_extends：*Derived extends *Base 成立，
      反向拒绝 */
-  clux_type_t *f32_type = clux_context_get_f32_type(ctx);
+  clux_type_t *f32_type = clux_context_builtin_type(ctx, CLUX_TYPE_F32);
   clux_struct_field_t base_fields[] = {
       {"a", i32_type},
       {"b", i64_type},
@@ -4565,8 +4661,8 @@ TEST(EngineTest, TypeValueVariableShareNamespace) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
-  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
 
   /* 类型 T 以 type value 身份进词法作用域 */
   clux_value_t *t = clux_context_create_type_value(ctx, i32_type, "T", NULL);
@@ -4690,8 +4786,8 @@ TEST(EngineTest, NoLeak) {
   clux_value_t *right = clux_context_create_i32(ctx, 2, "b", NULL);
   clux_value_t *sum = clux_context_add(ctx, left, right, NULL);
   ASSERT_NE(sum, nullptr);
-  clux_value_t *shadow =
-      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *shadow_sum = clux_context_add(ctx, shadow, right, NULL);
   ASSERT_NE(shadow_sum, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_sum));
@@ -4708,13 +4804,14 @@ TEST(EngineTest, NoLeak) {
   EXPECT_EQ(clux_context_assign(ctx, deref, right, NULL), deref);
   clux_value_t *same = clux_context_binary(ctx, CLUX_OP_EQ, ptr, ptr, NULL);
   ASSERT_NE(same, nullptr);
-  clux_value_t *ptr_shadow = clux_context_ref(
-      ctx,
-      clux_context_create_shadow_value(ctx, clux_context_get_str_type(ctx)),
-      NULL);
+  clux_value_t *ptr_shadow =
+      clux_context_ref(ctx,
+                       clux_context_create_shadow_value(
+                           ctx, clux_context_builtin_type(ctx, CLUX_TYPE_STR)),
+                       NULL);
   ASSERT_NE(ptr_shadow, nullptr);
   clux_type_t *const_type = clux_type_get_qualified_type(
-      clux_context_get_i32_type(ctx), CLUX_TYPE_CONST);
+      clux_context_builtin_type(ctx, CLUX_TYPE_I32), CLUX_TYPE_CONST);
   clux_type_t *volatile_const_type =
       clux_type_get_qualified_type(const_type, CLUX_TYPE_VOLATILE);
   ASSERT_NE(volatile_const_type, nullptr);
@@ -4727,16 +4824,16 @@ TEST(EngineTest, NoLeak) {
                               NULL),
       NULL);
   ASSERT_NE(qualified_read, nullptr);
-  clux_type_t *slice_type =
-      clux_context_get_slice_type(ctx, clux_context_get_i32_type(ctx));
+  clux_type_t *slice_type = clux_context_get_slice_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   clux_value_t *slice = clux_context_create_slice(
       ctx, slice_type, clux_value_get_data(left), 4, NULL, NULL);
   ASSERT_NE(slice, nullptr);
   ASSERT_NE(clux_context_slice_len(ctx, slice, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, slice, slice, NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, slice, NULL), nullptr);
-  clux_type_t *array_type =
-      clux_context_get_array_type(ctx, clux_context_get_i32_type(ctx), 3);
+  clux_type_t *array_type = clux_context_get_array_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), 3);
   clux_value_t *array = clux_context_create_array(ctx, array_type, NULL, NULL);
   ASSERT_NE(array, nullptr);
   clux_value_t *array_zero = clux_context_index(
@@ -4746,20 +4843,20 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, array, array, NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, array, NULL), nullptr);
   clux_value_t *some = clux_context_create_optional_some(
-      ctx, clux_context_get_i32_type(ctx), left, NULL, NULL);
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), left, NULL, NULL);
   ASSERT_NE(some, nullptr);
   ASSERT_NE(clux_context_take(ctx, some, NULL), nullptr);
   ASSERT_NE(clux_context_is_none(ctx, some, NULL), nullptr);
   clux_value_t *none = clux_context_create_optional_none(
-      ctx, clux_context_get_i32_type(ctx), NULL, NULL);
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), NULL, NULL);
   ASSERT_NE(none, nullptr);
   ASSERT_NE(clux_context_is_none(ctx, none, NULL), nullptr);
   EXPECT_EQ(clux_context_assign(ctx, none, some, NULL), none);
   ASSERT_NE(clux_context_clone(ctx, some, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, some, some, NULL), nullptr);
   clux_cunion_member_t cunion_members[] = {
-      {"i", clux_context_get_i32_type(ctx)},
-      {"l", clux_context_get_i64_type(ctx)},
+      {"i", clux_context_builtin_type(ctx, CLUX_TYPE_I32)},
+      {"l", clux_context_builtin_type(ctx, CLUX_TYPE_I64)},
   };
   clux_type_t *cunion_type =
       clux_context_create_cunion_type(ctx, "Boxed", cunion_members, 2);
@@ -4774,8 +4871,8 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_clone(ctx, boxed, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, boxed, boxed, NULL), nullptr);
   clux_union_member_t union_members[] = {
-      {"i", clux_context_get_i32_type(ctx)},
-      {"l", clux_context_get_i64_type(ctx)},
+      {"i", clux_context_builtin_type(ctx, CLUX_TYPE_I32)},
+      {"l", clux_context_builtin_type(ctx, CLUX_TYPE_I64)},
   };
   clux_type_t *union_type =
       clux_context_create_union_type(ctx, "Tagged", union_members, 2);
@@ -4791,19 +4888,19 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, tagged, tagged, NULL),
             nullptr);
   clux_func_capture_t func_captures[] = {
-      {"a", clux_context_get_i32_type(ctx)},
-      {"b", clux_context_get_i64_type(ctx)},
+      {"a", clux_context_builtin_type(ctx, CLUX_TYPE_I32)},
+      {"b", clux_context_builtin_type(ctx, CLUX_TYPE_I64)},
   };
-  clux_type_t *func_params[] = {clux_context_get_i32_type(ctx),
-                                clux_context_get_i32_type(ctx)};
-  clux_type_t *func_type =
-      clux_context_create_func_type(ctx,
-                                    "func|a:i32,b:i64|(i32,i32)->i32",
-                                    func_captures,
-                                    2,
-                                    func_params,
-                                    2,
-                                    clux_context_get_i32_type(ctx));
+  clux_type_t *func_params[] = {clux_context_builtin_type(ctx, CLUX_TYPE_I32),
+                                clux_context_builtin_type(ctx, CLUX_TYPE_I32)};
+  clux_type_t *func_type = clux_context_create_func_type(
+      ctx,
+      "func|a:i32,b:i64|(i32,i32)->i32",
+      func_captures,
+      2,
+      func_params,
+      2,
+      clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   ASSERT_NE(func_type, nullptr);
   clux_value_t *func = clux_context_create_func(ctx, func_type, NULL, NULL);
   ASSERT_NE(func, nullptr);
@@ -4817,8 +4914,8 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_clone(ctx, func, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, func, func, NULL), nullptr);
   clux_struct_field_t struct_fields[] = {
-      {"a", clux_context_get_i32_type(ctx)},
-      {"b", clux_context_get_i64_type(ctx)},
+      {"a", clux_context_builtin_type(ctx, CLUX_TYPE_I32)},
+      {"b", clux_context_builtin_type(ctx, CLUX_TYPE_I64)},
   };
   clux_struct_decl_t struct_decl = {
       struct_fields, 2, NULL, 0, NULL, 0, NULL, 0};
@@ -4837,13 +4934,19 @@ TEST(EngineTest, NoLeak) {
        clux_context_create_func(
            ctx,
            clux_context_create_func_type(
-               ctx, "fn", NULL, 0, NULL, 0, clux_context_get_i32_type(ctx)),
+               ctx,
+               "fn",
+               NULL,
+               0,
+               NULL,
+               0,
+               clux_context_builtin_type(ctx, CLUX_TYPE_I32)),
            NULL,
            NULL)},
   };
   const char *membered_methods[] = {"m"};
   clux_struct_subtype_t membered_subtypes[] = {
-      {"T", clux_context_get_i32_type(ctx)}};
+      {"T", clux_context_builtin_type(ctx, CLUX_TYPE_I32)}};
   clux_struct_decl_t membered_decl = {struct_fields,
                                       2,
                                       membered_attrs,

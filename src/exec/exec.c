@@ -15,7 +15,6 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_LITERAL_NUMERIC*/ exec_literal_numeric,
     /*CLUX_NODE_LITERAL_BOOLEAN*/ exec_literal_boolean,
     /*CLUX_NODE_LITERAL_IDENTIFIER*/ exec_literal_identifier,
-    /*CLUX_NODE_LITERAL_TYPE*/ exec_literal_type,
     /*CLUX_NODE_SOURCE_TEXT*/ NULL,
     /*CLUX_NODE_EXPR_ASSIGN*/ NULL,
     /*CLUX_NODE_EXPR_TERNARY*/ NULL,
@@ -88,7 +87,6 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_STMT_STATIC_ASSERT*/ NULL,
     /*CLUX_NODE_STMT_ASSERT*/ NULL,
     /*CLUX_NODE_STMT_INTERFACE*/ NULL,
-    NULL,
 };
 
 static const char *node_kind_name(node_kind_t kind) {
@@ -109,8 +107,6 @@ static const char *node_kind_name(node_kind_t kind) {
     return "LITERAL_BOOLEAN";
   case CLUX_NODE_LITERAL_IDENTIFIER:
     return "LITERAL_IDENTIFIER";
-  case CLUX_NODE_LITERAL_TYPE:
-    return "LITERAL_TYPE";
   case CLUX_NODE_SOURCE_TEXT:
     return "SOURCE_TEXT";
   case CLUX_NODE_EXPR_ASSIGN:

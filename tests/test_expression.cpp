@@ -2987,14 +2987,14 @@ TEST(ExpressionSubscriptTest, NumericIndex) {
 }
 
 /* 下标与实例化同形：多个逗号分隔实参。
-   类型实参（如 i32）词法层是关键字，由 literal_type 读取。 */
+   类型实参（如 i32）与 identifier 合一，按标识符读取。 */
 TEST(ExpressionSubscriptTest, MultipleArguments) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "Vec[i32, 4]");
   expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 2);
   EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG)),
-            CLUX_NODE_LITERAL_TYPE);
+            CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -4244,12 +4244,12 @@ TEST(ExpressionConstructTest, TypeCanBeSubscript) {
   delete_allocator(&a);
 }
 
-/* 类型槽可以是内建类型名（literal_type）。 */
+/* 类型槽可以是内建类型名（按 identifier 读取）。 */
 TEST(ExpressionConstructTest, TypeCanBeBuiltinTypeName) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, ".i32{5}");
-  expect_construct(expr, true, CLUX_NODE_LITERAL_TYPE, 1);
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&expr);
   delete_parser(&p);
@@ -4566,7 +4566,7 @@ TEST(ExpressionValueTest, DispatchesEveryLiteralKind) {
   };
   const Case cases[] = {{"undefined", CLUX_NODE_LITERAL_UNDEFINED},
                         {"true", CLUX_NODE_LITERAL_BOOLEAN},
-                        {"i32", CLUX_NODE_LITERAL_TYPE},
+                        {"i32", CLUX_NODE_LITERAL_IDENTIFIER},
                         {"'a'", CLUX_NODE_LITERAL_CHARACTER},
                         {"\"s\"", CLUX_NODE_LITERAL_STRING},
                         {"foo", CLUX_NODE_LITERAL_IDENTIFIER},
@@ -5003,7 +5003,7 @@ TEST(ExpressionPointerTest, WrapsBuiltinTypeName) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "*i32");
-  expect_unary(expr, "*", CLUX_NODE_LITERAL_TYPE);
+  expect_unary(expr, "*", CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -5239,7 +5239,7 @@ TEST(ExpressionQualifierTest, WrapsBuiltinTypeName) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "const i32");
-  expect_qualifier(expr, "const", CLUX_NODE_LITERAL_TYPE);
+  expect_qualifier(expr, "const", CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -5491,7 +5491,7 @@ TEST(ExpressionSliceTypeTest, WrapsBuiltinTypeName) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "[]u8");
-  expect_slice_type(expr, CLUX_NODE_LITERAL_TYPE);
+  expect_slice_type(expr, CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -5556,7 +5556,7 @@ TEST(ExpressionSliceTypeTest, WrapsQualifier) {
   node_t *expr = parse_postfix(a, &p, "[]const u8");
   expect_slice_type(expr, CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_qualifier(operand, "const", CLUX_NODE_LITERAL_TYPE);
+  expect_qualifier(operand, "const", CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -5748,7 +5748,8 @@ TEST(ExpressionArrayTypeTest, NumericLength) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "[4]i32");
-  expect_array_type(expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  expect_array_type(
+      expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&expr);
@@ -5810,7 +5811,8 @@ TEST(ExpressionArrayTypeTest, NestedArrays) {
   node_t *expr = parse_postfix(a, &p, "[2][3]i32");
   expect_array_type(expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_EXPR_BINARY);
   node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_array_type(inner, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  expect_array_type(
+      inner, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -5836,7 +5838,8 @@ TEST(ExpressionArrayTypeTest, SliceOfArray) {
   node_t *expr = parse_postfix(a, &p, "[][4]u8");
   expect_slice_type(expr, CLUX_NODE_EXPR_BINARY);
   node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_array_type(elem, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  expect_array_type(
+      elem, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -5876,7 +5879,7 @@ TEST(ExpressionArrayTypeTest, ArrayOfQualified) {
   node_t *expr = parse_postfix(a, &p, "[4]const u8");
   expect_array_type(expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_EXPR_BINARY);
   node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_qualifier(elem, "const", CLUX_NODE_LITERAL_TYPE);
+  expect_qualifier(elem, "const", CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -6093,7 +6096,8 @@ TEST(ExpressionTupleTypeTest, SingleElement) {
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "<i32>");
   expect_tuple(expr, 1);
-  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -6104,9 +6108,12 @@ TEST(ExpressionTupleTypeTest, MultipleElements) {
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "<i32, str, bool>");
   expect_tuple(expr, 3);
-  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)), CLUX_NODE_LITERAL_TYPE);
-  EXPECT_EQ(node_get_kind(node_get_child(expr, 1)), CLUX_NODE_LITERAL_TYPE);
-  EXPECT_EQ(node_get_kind(node_get_child(expr, 2)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 1)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 2)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&expr);
   delete_parser(&p);
@@ -6146,9 +6153,11 @@ TEST(ExpressionTupleTypeTest, RestAmongElements) {
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "<i32, ...Ts, bool>");
   expect_tuple(expr, 3);
-  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(node_get_kind(node_get_child(expr, 1)), CLUX_NODE_EXPR_REST);
-  EXPECT_EQ(node_get_kind(node_get_child(expr, 2)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 2)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&expr);
   delete_parser(&p);
@@ -6194,9 +6203,10 @@ TEST(ExpressionTupleTypeTest, ElementsCanBeTypePrefixes) {
   node_t *ptr = node_get_child(expr, 0);
   expect_unary(ptr, "*", CLUX_NODE_LITERAL_IDENTIFIER);
   node_t *slice = node_get_child(expr, 1);
-  expect_slice_type(slice, CLUX_NODE_LITERAL_TYPE);
+  expect_slice_type(slice, CLUX_NODE_LITERAL_IDENTIFIER);
   node_t *array = node_get_child(expr, 2);
-  expect_array_type(array, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  expect_array_type(
+      array, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -6439,7 +6449,7 @@ TEST(ExpressionOptionalTypeTest, WrapsBuiltinTypeName) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "?i32");
-  expect_optional_type(expr, CLUX_NODE_LITERAL_TYPE);
+  expect_optional_type(expr, CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -6504,7 +6514,7 @@ TEST(ExpressionOptionalTypeTest, WrapsSlice) {
   node_t *expr = parse_postfix(a, &p, "?[]u8");
   expect_optional_type(expr, CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_slice_type(operand, CLUX_NODE_LITERAL_TYPE);
+  expect_slice_type(operand, CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -6517,7 +6527,7 @@ TEST(ExpressionOptionalTypeTest, WrapsQualifier) {
   node_t *expr = parse_postfix(a, &p, "?const u8");
   expect_optional_type(expr, CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_qualifier(operand, "const", CLUX_NODE_LITERAL_TYPE);
+  expect_qualifier(operand, "const", CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -6792,10 +6802,12 @@ TEST(ExpressionFuncTypeTest, BasicType) {
   expect_func_type(expr);
   node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_TYPE_PARAMS);
   EXPECT_EQ(vec_get_size(node_get_children(params)), 2u);
-  EXPECT_EQ(node_get_kind(node_get_child(params, 0)), CLUX_NODE_LITERAL_TYPE);
-  EXPECT_EQ(node_get_kind(node_get_child(params, 1)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(params, 0)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(params, 1)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_FUNC_TYPE_RETURN)),
-            CLUX_NODE_LITERAL_TYPE);
+            CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_TYPE_CAPTURES), nullptr);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&expr);
@@ -6902,7 +6914,8 @@ TEST(ExpressionFuncTypeTest, VariadicParameter) {
   expect_func_type(expr);
   node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_TYPE_PARAMS);
   ASSERT_EQ(vec_get_size(node_get_children(params)), 2u);
-  EXPECT_EQ(node_get_kind(node_get_child(params, 0)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(params, 0)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
   node_t *rest = node_get_child(params, 1);
   ASSERT_NE(rest, nullptr);
   EXPECT_EQ(node_get_kind(rest), CLUX_NODE_EXPR_REST);

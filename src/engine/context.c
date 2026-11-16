@@ -187,6 +187,32 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                        get_clux_func_template_vtable());
   ctx->builtin_types.type_void = create_clux_type(
       allocator, CLUX_TYPE_VOID, "void", 0, 1, get_clux_void_vtable());
+  /* 类型名与 identifier 合一（白皮书 §2.1）：内建类型作为 type value
+     按名注册进 global scope，script 层经 context_lookup 按名查找，
+     与用户类型/变量共用同一查找通道。机制上统一处理；遮蔽内建
+     类型名由 sema 阶段拒绝。 */
+  static const clux_type_kind_t named_kinds[] = {
+      CLUX_TYPE_I8,
+      CLUX_TYPE_I16,
+      CLUX_TYPE_I32,
+      CLUX_TYPE_I64,
+      CLUX_TYPE_U8,
+      CLUX_TYPE_U16,
+      CLUX_TYPE_U32,
+      CLUX_TYPE_U64,
+      CLUX_TYPE_ISIZE,
+      CLUX_TYPE_USIZE,
+      CLUX_TYPE_F32,
+      CLUX_TYPE_F64,
+      CLUX_TYPE_BOOL,
+      CLUX_TYPE_STR,
+      CLUX_TYPE_VOID,
+  };
+  for (size_t idx = 0; idx < sizeof(named_kinds) / sizeof(named_kinds[0]);
+       idx++) {
+    clux_type_t *type = clux_context_builtin_type(ctx, named_kinds[idx]);
+    clux_context_create_type_value(ctx, type, clux_type_get_name(type), NULL);
+  }
   return ctx;
 }
 static void strs_dispose(uintptr_t key, char *str, allocator_t *allocator) {
@@ -1714,50 +1740,53 @@ clux_context_clone(clux_context_t *self, clux_value_t *value, location_t *loc) {
   }
   return clux_context_create_value(self, type, data, NULL, NULL);
 }
-clux_type_t *clux_context_get_i8_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_i8;
-}
-clux_type_t *clux_context_get_i16_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_i16;
-}
-clux_type_t *clux_context_get_i32_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_i32;
-}
-clux_type_t *clux_context_get_i64_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_i64;
-}
-clux_type_t *clux_context_get_u8_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_u8;
-}
-clux_type_t *clux_context_get_u16_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_u16;
-}
-clux_type_t *clux_context_get_u32_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_u32;
-}
-clux_type_t *clux_context_get_u64_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_u64;
-}
-clux_type_t *clux_context_get_isize_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_isize;
-}
-clux_type_t *clux_context_get_usize_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_usize;
-}
-clux_type_t *clux_context_get_f32_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_f32;
-}
-clux_type_t *clux_context_get_f64_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_f64;
-}
-clux_type_t *clux_context_get_bool_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_bool;
-}
-clux_type_t *clux_context_get_str_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_str;
-}
-clux_type_t *clux_context_get_void_type(clux_context_t *ctx) {
-  return ctx->builtin_types.type_void;
+/* 内建类型按 kind 取回：引擎内部与测试的通用通道（非逐类型接口）。
+   script 层类型名与 identifier 合一——类型作为 type value 按名注册进
+   global scope，经 context_lookup 查找，见 register_builtin_type_values。 */
+clux_type_t *clux_context_builtin_type(clux_context_t *ctx,
+                                       clux_type_kind_t kind) {
+  switch (kind) {
+  case CLUX_TYPE_I8:
+    return ctx->builtin_types.type_i8;
+  case CLUX_TYPE_I16:
+    return ctx->builtin_types.type_i16;
+  case CLUX_TYPE_I32:
+    return ctx->builtin_types.type_i32;
+  case CLUX_TYPE_I64:
+    return ctx->builtin_types.type_i64;
+  case CLUX_TYPE_U8:
+    return ctx->builtin_types.type_u8;
+  case CLUX_TYPE_U16:
+    return ctx->builtin_types.type_u16;
+  case CLUX_TYPE_U32:
+    return ctx->builtin_types.type_u32;
+  case CLUX_TYPE_U64:
+    return ctx->builtin_types.type_u64;
+  case CLUX_TYPE_ISIZE:
+    return ctx->builtin_types.type_isize;
+  case CLUX_TYPE_USIZE:
+    return ctx->builtin_types.type_usize;
+  case CLUX_TYPE_F32:
+    return ctx->builtin_types.type_f32;
+  case CLUX_TYPE_F64:
+    return ctx->builtin_types.type_f64;
+  case CLUX_TYPE_BOOL:
+    return ctx->builtin_types.type_bool;
+  case CLUX_TYPE_STR:
+    return ctx->builtin_types.type_str;
+  case CLUX_TYPE_VOID:
+    return ctx->builtin_types.type_void;
+  case CLUX_TYPE_TYPE:
+    return ctx->builtin_types.type_type;
+  case CLUX_TYPE_TYPE_TEMPLATE:
+    return ctx->builtin_types.type_type_template;
+  case CLUX_TYPE_FUNC_TEMPLATE:
+    return ctx->builtin_types.type_func_template;
+  case CLUX_TYPE_ERROR:
+    return ctx->builtin_types.type_error;
+  default:
+    return NULL;
+  }
 }
 clux_type_t *clux_context_get_type_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_type;
