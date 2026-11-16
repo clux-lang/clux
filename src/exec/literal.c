@@ -10,6 +10,7 @@
 #include "engine/interface.h"
 #include "parser/node.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 clux_value_t *exec_literal_identifier(clux_context_t *ctx, node_t *node) {
@@ -98,8 +99,9 @@ static clux_value_t *make_int(clux_context_t *ctx,
   if (strcmp(suffix, "usize") == 0) {
     return clux_context_create_usize(ctx, (size_t)magnitude, NULL, where);
   }
-  return clux_context_create_error_message(
-      ctx, where, "invalid integer suffix '%s'", suffix);
+  /* suffix 只来自 strip_suffix 白名单，未知后缀是不可达的调用方违约 */
+  fprintf(stderr, "invalid integer suffix '%s'", suffix);
+  abort();
 }
 
 static clux_value_t *make_float(clux_context_t *ctx,
@@ -121,8 +123,9 @@ static clux_value_t *make_float(clux_context_t *ctx,
   if (strcmp(suffix, "f64") == 0) {
     return clux_context_create_f64(ctx, strtod(buffer, NULL), NULL, where);
   }
-  return clux_context_create_error_message(
-      ctx, where, "invalid float suffix '%s'", suffix);
+  /* 同上：f32/f64 已在调用方提前分流，未知后缀不可达 */
+  fprintf(stderr, "invalid float suffix '%s'", suffix);
+  abort();
 }
 
 static int digit_base(const char *digits, size_t len) {

@@ -262,7 +262,7 @@ clux_value_t *exec_node(clux_context_t *ctx, node_t *node) {
     const location_t *loc = node_get_location(node);
     return clux_context_create_error_message(ctx,
                                              (location_t *)loc,
-                                             "unsupport node kind: %s",
+                                             "unsupported node kind: %s",
                                              node_kind_name(kind));
   }
   return g_exec_callbacks[kind](ctx, node);
