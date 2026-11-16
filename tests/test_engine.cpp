@@ -12,6 +12,7 @@
 #include "engine/qualifier.h"
 #include "engine/slice.h"
 #include "engine/type.h"
+#include "engine/template.h"
 #include "engine/type_value.h"
 #include "engine/value.h"
 #include <cmath>
@@ -4598,6 +4599,83 @@ TEST(EngineTest, TypeValueVariableShareNamespace) {
   clux_value_t *after = clux_context_create_i32(ctx, 9, "T", NULL);
   ASSERT_NE(after, nullptr);
   EXPECT_STREQ(error_message_of(after), "duplicate declaration 'T'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, TemplateValueWrapsAst) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *type_tmpl = clux_context_get_type_template_type(ctx);
+  clux_type_t *func_tmpl = clux_context_get_func_template_type(ctx);
+
+  /* 两种内建模板类型：kind/size 正确，vtable 完全留空 */
+  EXPECT_EQ(clux_type_get_kind(type_tmpl), CLUX_TYPE_TYPE_TEMPLATE);
+  EXPECT_EQ(clux_type_get_kind(func_tmpl), CLUX_TYPE_FUNC_TEMPLATE);
+  EXPECT_STREQ(clux_type_get_name(type_tmpl), "type_template");
+  EXPECT_STREQ(clux_type_get_name(func_tmpl), "func_template");
+  EXPECT_EQ(clux_type_get_size(type_tmpl), sizeof(void *));
+  EXPECT_EQ(clux_type_get_size(func_tmpl), sizeof(void *));
+  clux_vtable_t *tvt = clux_type_get_vtable(type_tmpl);
+  clux_vtable_t *fvt = clux_type_get_vtable(func_tmpl);
+  ASSERT_NE(tvt, nullptr);
+  ASSERT_NE(fvt, nullptr);
+  EXPECT_EQ(tvt, get_clux_type_template_vtable());
+  EXPECT_EQ(fvt, get_clux_func_template_vtable());
+  EXPECT_NE(tvt, fvt);
+  EXPECT_EQ(tvt->add, nullptr);
+  EXPECT_EQ(tvt->eq, nullptr);
+  EXPECT_EQ(tvt->ne, nullptr);
+  EXPECT_EQ(tvt->safe_cast, nullptr);
+  EXPECT_EQ(tvt->deref, nullptr);
+  EXPECT_EQ(tvt->index, nullptr);
+  EXPECT_EQ(tvt->field, nullptr);
+  EXPECT_EQ(tvt->invoke, nullptr);
+  EXPECT_EQ(tvt->type_equal, nullptr);
+  EXPECT_EQ(tvt->type_extends, nullptr);
+  EXPECT_EQ(tvt->value_extends, nullptr);
+  EXPECT_EQ(fvt->eq, nullptr);
+  EXPECT_EQ(fvt->safe_cast, nullptr);
+
+  /* 模板值：data 只存 AST 指针，ast 非空是硬约束 */
+  int fake_ast = 0;
+  void *ast = &fake_ast;
+  clux_value_t *tt = clux_context_create_type_template(ctx, ast, "Box", NULL);
+  ASSERT_NE(tt, nullptr);
+  EXPECT_EQ(clux_value_get_type(tt), type_tmpl);
+  void *raw = ptr_to_raw(clux_value_get_data(tt), 0);
+  ASSERT_NE(raw, nullptr);
+  EXPECT_EQ(*(void **)raw, ast);
+  clux_value_t *ft = clux_context_create_func_template(ctx, ast, "pick", NULL);
+  ASSERT_NE(ft, nullptr);
+  EXPECT_EQ(clux_value_get_type(ft), func_tmpl);
+
+  /* 取回 AST（实例化通道）：两种模板都取回；shadow 与非法输入返回 NULL */
+  EXPECT_EQ(clux_context_template_ast(tt), ast);
+  EXPECT_EQ(clux_context_template_ast(ft), ast);
+  clux_value_t *shadow_tmpl = clux_context_create_shadow_value(ctx, type_tmpl);
+  ASSERT_NE(shadow_tmpl, nullptr);
+  EXPECT_EQ(clux_context_template_ast(shadow_tmpl), nullptr);
+  clux_value_t *not_template = clux_context_create_i32(ctx, 1, NULL, NULL);
+  ASSERT_NE(not_template, nullptr);
+  EXPECT_EQ(clux_context_template_ast(not_template), nullptr);
+  EXPECT_EQ(clux_context_template_ast(nullptr), nullptr);
+
+  /* ast 为空返回 error；两种模板共用词法命名空间（同层重名拒绝） */
+  clux_value_t *bad = clux_context_create_type_template(ctx, NULL, "Bad", NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_STREQ(error_message_of(bad), "template creation requires an AST node");
+  clux_value_t *dup = clux_context_create_func_template(ctx, ast, "Box", NULL);
+  ASSERT_NE(dup, nullptr);
+  EXPECT_STREQ(error_message_of(dup), "duplicate declaration 'Box'");
+
+  /* vtable 留空：eq 等运算走 context 兜底 */
+  clux_value_t *eq_result = clux_context_binary(ctx, CLUX_OP_EQ, tt, tt, NULL);
+  ASSERT_NE(eq_result, nullptr);
+  EXPECT_STREQ(error_message_of(eq_result),
+               "type 'type_template' does not support operator '=='");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

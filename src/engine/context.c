@@ -28,6 +28,7 @@
 #include "engine/slice.h"
 #include "engine/str.h"
 #include "engine/struct.h"
+#include "engine/template.h"
 #include "engine/type_value.h"
 #include "engine/union.h"
 
@@ -58,6 +59,8 @@ struct _clux_context_t {
     clux_type_t *type_bool;
     clux_type_t *type_str;
     clux_type_t *type_type;
+    clux_type_t *type_type_template;
+    clux_type_t *type_func_template;
   } builtin_types;
 };
 clux_context_t *create_clux_context(allocator_t *allocator) {
@@ -166,6 +169,20 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                                                   sizeof(clux_type_t *),
                                                   alignof(clux_type_t *),
                                                   get_clux_type_value_vtable());
+  ctx->builtin_types.type_type_template =
+      create_clux_type(allocator,
+                       CLUX_TYPE_TYPE_TEMPLATE,
+                       "type_template",
+                       sizeof(void *),
+                       alignof(void *),
+                       get_clux_type_template_vtable());
+  ctx->builtin_types.type_func_template =
+      create_clux_type(allocator,
+                       CLUX_TYPE_FUNC_TEMPLATE,
+                       "func_template",
+                       sizeof(void *),
+                       alignof(void *),
+                       get_clux_func_template_vtable());
   return ctx;
 }
 static void strs_dispose(uintptr_t key, char *str, allocator_t *allocator) {
@@ -192,6 +209,8 @@ void delete_clux_context(clux_context_t **self) {
   }
   delete_clux_type(&ctx->builtin_types.type_str);
   delete_clux_type(&ctx->builtin_types.type_type);
+  delete_clux_type(&ctx->builtin_types.type_type_template);
+  delete_clux_type(&ctx->builtin_types.type_func_template);
   delete_clux_type(&ctx->builtin_types.type_bool);
   delete_clux_type(&ctx->builtin_types.type_f64);
   delete_clux_type(&ctx->builtin_types.type_f32);
@@ -361,6 +380,35 @@ clux_value_t *clux_context_create_type_value(clux_context_t *self,
   }
   return create_integer_value(
       self, self->builtin_types.type_type, &type, name, loc);
+}
+/* 模板值（type_template / func_template）：data 只存原始 AST 指针
+   （定长平点位图），参数表不驻留——每次实例化时从 AST 重新计算。
+   ast 须非空，否则返回 error。与 type value 一样经 scope define
+   进词法命名空间。 */
+static clux_value_t *create_template_value(clux_context_t *self,
+                                           clux_type_t *type,
+                                           void *ast,
+                                           const char *name,
+                                           location_t *loc) {
+  if (!ast) {
+    return clux_context_create_error_message(
+        self, loc, "template creation requires an AST node");
+  }
+  return create_integer_value(self, type, &ast, name, loc);
+}
+clux_value_t *clux_context_create_type_template(clux_context_t *self,
+                                                void *ast,
+                                                const char *name,
+                                                location_t *loc) {
+  return create_template_value(
+      self, self->builtin_types.type_type_template, ast, name, loc);
+}
+clux_value_t *clux_context_create_func_template(clux_context_t *self,
+                                                void *ast,
+                                                const char *name,
+                                                location_t *loc) {
+  return create_template_value(
+      self, self->builtin_types.type_func_template, ast, name, loc);
 }
 char *clux_context_alloc_str(clux_context_t *self, size_t len) {
   char *str = allocator_alloc(self->allocator, len + 1);
@@ -1660,6 +1708,25 @@ clux_type_t *clux_context_get_str_type(clux_context_t *ctx) {
 }
 clux_type_t *clux_context_get_type_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_type;
+}
+clux_type_t *clux_context_get_type_template_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_type_template;
+}
+clux_type_t *clux_context_get_func_template_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_func_template;
+}
+/* 模板值取回原始 AST（两种模板通用）：非模板值返回 NULL。
+   实例化由上层取回 AST 后展开（对 Clux 是编译期通道）。 */
+void *clux_context_template_ast(clux_value_t *value) {
+  if (!value) {
+    return NULL;
+  }
+  clux_type_kind_t kind = clux_type_kind_unwrap(clux_value_get_type(value));
+  if (kind != CLUX_TYPE_TYPE_TEMPLATE && kind != CLUX_TYPE_FUNC_TEMPLATE) {
+    return NULL;
+  }
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(void **)raw : NULL;
 }
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_error;

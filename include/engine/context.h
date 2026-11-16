@@ -85,6 +85,20 @@ clux_value_t *clux_context_create_type_value(clux_context_t *self,
                                              clux_type_t *type,
                                              const char *name,
                                              location_t *loc);
+/* 模板值（type_template / func_template）：模板不是类型，是值——data 只存
+   原始 AST 指针，参数表每次实例化时从 AST 重新计算。ast 须非空，否则
+   返回 error。模板值经 scope define 进词法命名空间（与变量/类型共用，
+   遮罩规则自然生效）。 */
+clux_value_t *clux_context_create_type_template(clux_context_t *self,
+                                                void *ast,
+                                                const char *name,
+                                                location_t *loc);
+clux_value_t *clux_context_create_func_template(clux_context_t *self,
+                                                void *ast,
+                                                const char *name,
+                                                location_t *loc);
+/* 模板值取回原始 AST（两种模板通用）：非模板值返回 NULL。 */
+void *clux_context_template_ast(clux_value_t *value);
 char *clux_context_alloc_str(clux_context_t *self, size_t len);
 clux_value_t *clux_context_create_str(clux_context_t *self,
                                       const char *value,
@@ -357,6 +371,11 @@ clux_type_t *clux_context_get_bool_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_str_type(clux_context_t *ctx);
 /* "type" 内建类型：所有 type value 的类型（context 单例）。 */
 clux_type_t *clux_context_get_type_type(clux_context_t *ctx);
+/* "type_template" / "func_template" 内建类型：模板值的类型（context 单例）。
+   vtable 完全留空——模板是"参数表 + 原始 AST"的具名载体，实例化由上层
+   取回 AST 后展开，engine 不参与模板语义。 */
+clux_type_t *clux_context_get_type_template_type(clux_context_t *ctx);
+clux_type_t *clux_context_get_func_template_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx);
 #ifdef __cplusplus
 }
