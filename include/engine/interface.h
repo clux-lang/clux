@@ -72,6 +72,9 @@ typedef enum _clux_type_kind_t {
   /* void（枚举尾部追加，不打断既有序号）：只作为无返回值的返回类型，
      无值无运算——vtable 仅提供类型判等（白皮书 §2）。 */
   CLUX_TYPE_VOID,
+  /* opaque：无类型载荷（FFI / 显式类型擦除边界，白皮书 §2.1）。
+     布局等同裸指针。任何指针可隐式转为 opaque；反向转出必须显式 as。 */
+  CLUX_TYPE_OPAQUE,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

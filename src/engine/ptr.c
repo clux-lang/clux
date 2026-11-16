@@ -160,6 +160,23 @@ ptr_safe_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   }
   const char *source_name = clux_type_get_name(source);
   const char *target_name = clux_type_get_name(target);
+  /* 任何指针可隐式转为 opaque（白皮书 §2.1，类型擦除边界）：handle
+     位图不变，产出 opaque 值；反向转出必须显式 as（opaque 的 cast）。 */
+  if (clux_type_kind_unwrap(target) == CLUX_TYPE_OPAQUE) {
+    if (clux_value_is_shadow(value)) {
+      return clux_context_create_shadow_value(ctx, target);
+    }
+    ptr_handle_t handle = 0;
+    if (!ptr_read(value, &handle)) {
+      return clux_context_create_error_message(
+          ctx,
+          NULL,
+          "cannot safely cast '%s' to '%s'",
+          source_name ? source_name : "<unknown>",
+          target_name ? target_name : "<unknown>");
+    }
+    return clux_context_create_ptr(ctx, target, handle, NULL, NULL);
+  }
   if (clux_type_kind_unwrap(target) != CLUX_TYPE_PTR ||
       !clux_type_extends(source, target)) {
     return clux_context_create_error_message(

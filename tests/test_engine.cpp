@@ -2823,6 +2823,205 @@ TEST(EngineTest, DerefThroughVolatilePointer) {
   delete_allocator(&a);
 }
 
+/* ---- opaque：无类型载荷（FFI / 显式类型擦除边界，白皮书 §2.1）---- */
+
+TEST(EngineTest, OpaqueLayoutAndNameLookup) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  ASSERT_NE(opaque, nullptr);
+  EXPECT_STREQ(clux_type_get_name(opaque), "opaque");
+  EXPECT_EQ(clux_type_get_size(opaque), sizeof(ptr_handle_t));
+  EXPECT_EQ(clux_type_get_align(opaque), alignof(ptr_handle_t));
+
+  /* 类型名与 identifier 合一：opaque 作为 type value 按名注册进 global */
+  clux_value_t *found = clux_context_lookup(ctx, "opaque", NULL);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(clux_value_get_type(found), clux_context_get_type_type(ctx));
+  void *raw = ptr_to_raw(clux_value_get_data(found), 0);
+  ASSERT_NE(raw, nullptr);
+  EXPECT_EQ(*(clux_type_t **)raw, opaque);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OpaqueImplicitFromAnyPointer) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
+  clux_value_t *p =
+      clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
+  ASSERT_NE(p, nullptr);
+  clux_value_t *slot = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  ASSERT_NE(slot, nullptr);
+
+  /* 任何指针隐式转 opaque：assign 经 ptr 的 safe_cast 放行 */
+  clux_value_t *assigned = clux_context_assign(ctx, slot, p, NULL);
+  EXPECT_EQ(assigned, slot);
+  EXPECT_EQ(clux_value_get_type(slot), opaque);
+
+  /* 显式转回具体指针后 handle 未丢：可解引用读回原值 */
+  clux_value_t *back = clux_context_cast(ctx, slot, ptr_i32, NULL);
+  ASSERT_NE(back, nullptr);
+  EXPECT_EQ(clux_value_get_type(back), ptr_i32);
+  clux_value_t *read = clux_context_deref(ctx, back, NULL);
+  ASSERT_NE(read, nullptr);
+  EXPECT_EQ(read_i32(read), 10);
+
+  /* const 限定指针同样可隐式擦除 */
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_type_t *ptr_const = clux_context_get_ptr_type(ctx, const_i32);
+  clux_value_t *pcx = clux_context_create_ptr(
+      ctx, ptr_const, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *slot2 = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, slot2, pcx, NULL), slot2);
+
+  /* opaque 也可显式转成限定指针（unwrap 分派） */
+  clux_value_t *back_const = clux_context_cast(ctx, slot2, ptr_const, NULL);
+  ASSERT_NE(back_const, nullptr);
+  EXPECT_EQ(clux_value_get_type(back_const), ptr_const);
+  clux_value_t *read_const = clux_context_deref(ctx, back_const, NULL);
+  ASSERT_NE(read_const, nullptr);
+  EXPECT_EQ(read_i32(read_const), 10);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OpaqueCastRejectsNonPointer) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
+  clux_value_t *p =
+      clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *slot = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  ASSERT_EQ(clux_context_assign(ctx, slot, p, NULL), slot);
+
+  /* 显式 as 只放行指针族：转基础类型拒绝 */
+  clux_value_t *bad = clux_context_cast(ctx, slot, i32_type, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad), "cannot cast 'opaque' to 'i32'");
+
+  /* 隐式转出拒绝：opaque → *i32 赋值必须显式 as */
+  clux_value_t *ptr_slot = clux_context_create_ptr(ctx, ptr_i32, 0, NULL, NULL);
+  clux_value_t *bad2 = clux_context_assign(ctx, ptr_slot, slot, NULL);
+  ASSERT_NE(bad2, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad2)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad2), "cannot safely cast 'opaque' to '*i32'");
+
+  /* 转自身是恒等 */
+  EXPECT_EQ(clux_context_cast(ctx, slot, opaque, NULL), slot);
+
+  /* 非 opaque 源经 i32 的 safe_cast 走到 opaque 也不放行：
+     opaque 只从指针族隐式接收 */
+  clux_value_t *n = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *bad3 = clux_context_assign(ctx, slot, n, NULL);
+  ASSERT_NE(bad3, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad3)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad3), "cannot safely cast 'i32' to 'opaque'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OpaqueEqNe) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+
+  clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *y = clux_context_create_i32(ctx, 2, NULL, NULL);
+  clux_value_t *ox = clux_context_create_value(
+      ctx, opaque, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *ox2 = clux_context_create_value(
+      ctx, opaque, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *oy = clux_context_create_value(
+      ctx, opaque, clux_value_get_data(y), NULL, NULL);
+  ASSERT_NE(ox, nullptr);
+  ASSERT_NE(ox2, nullptr);
+  ASSERT_NE(oy, nullptr);
+
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, ox, ox2, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_EQ(read_bool(eq), true);
+  clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, ox, ox2, NULL);
+  ASSERT_NE(ne, nullptr);
+  EXPECT_EQ(read_bool(ne), false);
+  clux_value_t *eq2 = clux_context_binary(ctx, CLUX_OP_EQ, ox, oy, NULL);
+  ASSERT_NE(eq2, nullptr);
+  EXPECT_EQ(read_bool(eq2), false);
+  clux_value_t *ne2 = clux_context_binary(ctx, CLUX_OP_NE, ox, oy, NULL);
+  ASSERT_NE(ne2, nullptr);
+  EXPECT_EQ(read_bool(ne2), true);
+
+  /* 与指针比较拒绝：opaque 与 *T 不是同一类型 */
+  clux_value_t *p =
+      clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *bad = clux_context_binary(ctx, CLUX_OP_EQ, ox, p, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "operator '==' requires operands of the same type");
+
+  /* shadow 比较产出 shadow bool */
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, opaque);
+  clux_value_t *shadow_eq =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow, ox, NULL);
+  ASSERT_NE(shadow_eq, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_eq));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OpaqueShadowPassthrough) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+
+  /* shadow 指针隐式擦除：产出 shadow opaque，assign 静默返回目标 */
+  clux_value_t *shadow_ptr = clux_context_create_shadow_value(ctx, ptr_i32);
+  clux_value_t *slot = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, slot, shadow_ptr, NULL), slot);
+
+  /* shadow opaque 显式转出：产出目标类型的 shadow */
+  clux_value_t *shadow_opaque = clux_context_create_shadow_value(ctx, opaque);
+  clux_value_t *out = clux_context_cast(ctx, shadow_opaque, ptr_i32, NULL);
+  ASSERT_NE(out, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(out));
+  EXPECT_EQ(clux_value_get_type(out), ptr_i32);
+
+  /* shadow opaque 隐式转出依旧拒绝（shadow 不改变转换合法性） */
+  clux_value_t *ptr_slot = clux_context_create_ptr(ctx, ptr_i32, 0, NULL, NULL);
+  clux_value_t *bad = clux_context_assign(ctx, ptr_slot, shadow_opaque, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad), "cannot safely cast 'opaque' to '*i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, SliceTypeInterningAndMeta) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);

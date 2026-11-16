@@ -23,6 +23,7 @@
 #include "engine/floating.h"
 #include "engine/func.h"
 #include "engine/optional.h"
+#include "engine/opaque.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
 #include "engine/slice.h"
@@ -62,6 +63,7 @@ struct _clux_context_t {
     clux_type_t *type_type;
     clux_type_t *type_type_template;
     clux_type_t *type_void;
+    clux_type_t *type_opaque;
     clux_type_t *type_func_template;
   } builtin_types;
 };
@@ -187,6 +189,12 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                        get_clux_func_template_vtable());
   ctx->builtin_types.type_void = create_clux_type(
       allocator, CLUX_TYPE_VOID, "void", 0, 1, get_clux_void_vtable());
+  ctx->builtin_types.type_opaque = create_clux_type(allocator,
+                                                    CLUX_TYPE_OPAQUE,
+                                                    "opaque",
+                                                    sizeof(ptr_handle_t),
+                                                    alignof(ptr_handle_t),
+                                                    get_clux_opaque_vtable());
   /* 类型名与 identifier 合一（白皮书 §2.1）：内建类型作为 type value
      按名注册进 global scope，script 层经 context_lookup 按名查找，
      与用户类型/变量共用同一查找通道。机制上统一处理；遮蔽内建
@@ -207,6 +215,7 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
       CLUX_TYPE_BOOL,
       CLUX_TYPE_STR,
       CLUX_TYPE_VOID,
+      CLUX_TYPE_OPAQUE,
   };
   for (size_t idx = 0; idx < sizeof(named_kinds) / sizeof(named_kinds[0]);
        idx++) {
@@ -256,6 +265,7 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_i8);
   delete_clux_type(&ctx->builtin_types.type_error);
   delete_clux_type(&ctx->builtin_types.type_void);
+  delete_clux_type(&ctx->builtin_types.type_opaque);
   delete_vec(&ctx->errors);
   rbtree_foreach(ctx->strs, (rbtree_callback_t)strs_dispose, ctx->allocator);
   delete_rbtree(&ctx->strs);
@@ -1776,6 +1786,8 @@ clux_type_t *clux_context_builtin_type(clux_context_t *ctx,
     return ctx->builtin_types.type_str;
   case CLUX_TYPE_VOID:
     return ctx->builtin_types.type_void;
+  case CLUX_TYPE_OPAQUE:
+    return ctx->builtin_types.type_opaque;
   case CLUX_TYPE_TYPE:
     return ctx->builtin_types.type_type;
   case CLUX_TYPE_TYPE_TEMPLATE:
