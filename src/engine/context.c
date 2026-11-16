@@ -28,6 +28,7 @@
 #include "engine/slice.h"
 #include "engine/str.h"
 #include "engine/struct.h"
+#include "engine/void.h"
 #include "engine/template.h"
 #include "engine/type_value.h"
 #include "engine/union.h"
@@ -60,6 +61,7 @@ struct _clux_context_t {
     clux_type_t *type_str;
     clux_type_t *type_type;
     clux_type_t *type_type_template;
+    clux_type_t *type_void;
     clux_type_t *type_func_template;
   } builtin_types;
 };
@@ -183,6 +185,12 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                        sizeof(void *),
                        alignof(void *),
                        get_clux_func_template_vtable());
+  ctx->builtin_types.type_void = create_clux_type(allocator,
+                                                  CLUX_TYPE_VOID,
+                                                  "void",
+                                                  0,
+                                                  1,
+                                                  get_clux_void_vtable());
   return ctx;
 }
 static void strs_dispose(uintptr_t key, char *str, allocator_t *allocator) {
@@ -225,6 +233,7 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_i16);
   delete_clux_type(&ctx->builtin_types.type_i8);
   delete_clux_type(&ctx->builtin_types.type_error);
+  delete_clux_type(&ctx->builtin_types.type_void);
   delete_vec(&ctx->errors);
   rbtree_foreach(ctx->strs, (rbtree_callback_t)strs_dispose, ctx->allocator);
   delete_rbtree(&ctx->strs);
@@ -1734,6 +1743,9 @@ clux_type_t *clux_context_get_bool_type(clux_context_t *ctx) {
 }
 clux_type_t *clux_context_get_str_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_str;
+}
+clux_type_t *clux_context_get_void_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_void;
 }
 clux_type_t *clux_context_get_type_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_type;

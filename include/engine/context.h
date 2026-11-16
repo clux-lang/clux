@@ -380,6 +380,8 @@ clux_type_t *clux_context_get_f32_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_f64_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_bool_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_str_type(clux_context_t *ctx);
+/* "void" 内建类型：只作为无返回值的返回类型（context 单例，无值）。 */
+clux_type_t *clux_context_get_void_type(clux_context_t *ctx);
 /* "type" 内建类型：所有 type value 的类型（context 单例）。 */
 clux_type_t *clux_context_get_type_type(clux_context_t *ctx);
 /* "type_template" / "func_template" 内建类型：模板值的类型（context 单例）。

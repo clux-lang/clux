@@ -18,6 +18,7 @@ struct _clux_scope_t {
   vec_t *children;
   vec_t *values;          /* clux_slot_t*，按定义顺序持有所有值 */
   rbtree_t *named_values; /* hash -> vec_t*，桶内按名字精确匹配 */
+  vec_t *defers;          /* clux_value_t* 借用，LIFO 延期体，惰性创建 */
 };
 
 static char *copy_name(allocator_t *allocator, const char *name) {
@@ -60,6 +61,7 @@ clux_scope_t *create_clux_scope(allocator_t *allocator, clux_scope_t *parent) {
   scope->children = create_vec(allocator);
   scope->values = create_vec(allocator);
   scope->named_values = create_rbtree(allocator);
+  scope->defers = NULL;
   if (parent) {
     vec_push(parent->children, scope);
   }
@@ -88,6 +90,10 @@ void delete_clux_scope(clux_scope_t **self) {
   delete_rbtree(&scope->named_values);
   delete_vec(&scope->values);
   delete_vec(&scope->children);
+  /* defer 栈只存借用指针，func 值本体随 values 一并销毁。 */
+  if (scope->defers) {
+    delete_vec(&scope->defers);
+  }
   allocator_free(scope->allocator, (void **)&scope);
 }
 
@@ -142,6 +148,20 @@ clux_value_t *clux_scope_get(clux_scope_t *self, const char *name) {
 
 clux_scope_t *clux_scope_get_parent(clux_scope_t *self) {
   return self ? self->parent : NULL;
+}
+
+void clux_scope_add_defer(clux_scope_t *self, clux_value_t *defer) {
+  if (!self || !defer) {
+    return;
+  }
+  if (!self->defers) {
+    self->defers = create_vec(self->allocator);
+  }
+  vec_push(self->defers, defer);
+}
+
+vec_t *clux_scope_get_defers(clux_scope_t *self) {
+  return self ? self->defers : NULL;
 }
 
 clux_scope_name_result_t clux_scope_name_value(clux_scope_t *self,

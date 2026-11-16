@@ -69,6 +69,9 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_TYPE,
   CLUX_TYPE_TYPE_TEMPLATE,
   CLUX_TYPE_FUNC_TEMPLATE,
+  /* void（枚举尾部追加，不打断既有序号）：只作为无返回值的返回类型，
+     无值无运算——vtable 仅提供类型判等（白皮书 §2）。 */
+  CLUX_TYPE_VOID,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

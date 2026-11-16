@@ -1,6 +1,7 @@
 #ifndef _H_ENGINE_SCOPE_
 #define _H_ENGINE_SCOPE_
 #include "core/allocator.h"
+#include "core/vec.h"
 #include "engine/interface.h"
 #include <stdbool.h>
 #ifdef __cplusplus
@@ -27,6 +28,12 @@ typedef enum {
 clux_scope_name_result_t clux_scope_name_value(clux_scope_t *self,
                                                clux_value_t *value,
                                                const char *name);
+
+/* defer 栈：登记离开作用域时 LIFO 调用的延期体（func value 的借用
+   指针，值本体由本作用域 values 持有，栈本身只管顺序不管生命周期；
+   using 语法糖与 defer 共用本序列）。 */
+void clux_scope_add_defer(clux_scope_t *self, clux_value_t *defer);
+vec_t *clux_scope_get_defers(clux_scope_t *self);
 #ifdef __cplusplus
 }
 #endif
