@@ -1376,6 +1376,9 @@ void clux_context_pop_scope(clux_context_t *self) {
   delete_clux_scope(&self->current_scope);
   self->current_scope = parent;
 }
+clux_scope_t *clux_context_get_scope(clux_context_t *self) {
+  return self ? self->current_scope : NULL;
+}
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
                                                 location_t *loc,
                                                 const char *fmt,

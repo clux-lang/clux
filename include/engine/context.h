@@ -23,6 +23,9 @@ clux_value_t *clux_context_create_value(clux_context_t *self,
                                         location_t *loc);
 void clux_context_push_scope(clux_context_t *self);
 void clux_context_pop_scope(clux_context_t *self);
+/* 当前作用域（current scope，借用）：所有带名/匿名值的注册点。
+   供执行层做名称查找与作用域栈导航，只读使用。 */
+clux_scope_t *clux_context_get_scope(clux_context_t *self);
 clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error);
 clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
