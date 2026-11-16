@@ -66,6 +66,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_UNION,
   CLUX_TYPE_FUNC,
   CLUX_TYPE_STRUCT,
+  CLUX_TYPE_TYPE,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -123,6 +124,10 @@ typedef clux_value_t *(*clux_vt_cast_fn_t)(clux_context_t *,
    层知识（ptr 需要递归比较 base）。 */
 typedef bool (*clux_vt_type_equal_fn_t)(clux_type_t *self, clux_type_t *other);
 typedef bool (*clux_vt_type_extends_fn_t)(clux_type_t *self, clux_type_t *base);
+/* 值级 extends 是值的兼容判定（如 type value 之间的派生关系查询），
+   签名不带 context：这是纯数据层知识，由值 data 携带的内容回答。 */
+typedef bool (*clux_vt_value_extends_fn_t)(clux_value_t *self,
+                                           clux_value_t *base);
 struct _clux_vtable_t {
   clux_vt_binary_fn_t add;
   clux_vt_binary_fn_t sub;
@@ -155,6 +160,7 @@ struct _clux_vtable_t {
   clux_vt_invoke_fn_t invoke;
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
+  clux_vt_value_extends_fn_t value_extends;
 };
 #ifdef __cplusplus
 }

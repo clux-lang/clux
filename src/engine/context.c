@@ -28,6 +28,7 @@
 #include "engine/slice.h"
 #include "engine/str.h"
 #include "engine/struct.h"
+#include "engine/type_value.h"
 #include "engine/union.h"
 
 struct _clux_context_t {
@@ -56,6 +57,7 @@ struct _clux_context_t {
     clux_type_t *type_f64;
     clux_type_t *type_bool;
     clux_type_t *type_str;
+    clux_type_t *type_type;
   } builtin_types;
 };
 clux_context_t *create_clux_context(allocator_t *allocator) {
@@ -158,6 +160,12 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                                                  sizeof(char *),
                                                  alignof(char *),
                                                  get_clux_str_vtable());
+  ctx->builtin_types.type_type = create_clux_type(allocator,
+                                                  CLUX_TYPE_TYPE,
+                                                  "type",
+                                                  sizeof(clux_type_t *),
+                                                  alignof(clux_type_t *),
+                                                  get_clux_type_value_vtable());
   return ctx;
 }
 static void strs_dispose(uintptr_t key, char *str, allocator_t *allocator) {
@@ -183,6 +191,7 @@ void delete_clux_context(clux_context_t **self) {
     delete_error(&err);
   }
   delete_clux_type(&ctx->builtin_types.type_str);
+  delete_clux_type(&ctx->builtin_types.type_type);
   delete_clux_type(&ctx->builtin_types.type_bool);
   delete_clux_type(&ctx->builtin_types.type_f64);
   delete_clux_type(&ctx->builtin_types.type_f32);
@@ -339,6 +348,19 @@ clux_value_t *clux_context_create_bool(clux_context_t *self,
                                        location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_bool, &value, name, loc);
+}
+/* type value（值描述类型）：data 存被描述类型的指针，eq/value_extends
+   代理类型层的判等与派生关系（见 type_value.c）。 */
+clux_value_t *clux_context_create_type_value(clux_context_t *self,
+                                             clux_type_t *type,
+                                             const char *name,
+                                             location_t *loc) {
+  if (!type) {
+    return clux_context_create_error_message(
+        self, loc, "type value creation requires a type");
+  }
+  return create_integer_value(
+      self, self->builtin_types.type_type, &type, name, loc);
 }
 char *clux_context_alloc_str(clux_context_t *self, size_t len) {
   char *str = allocator_alloc(self->allocator, len + 1);
@@ -1635,6 +1657,9 @@ clux_type_t *clux_context_get_bool_type(clux_context_t *ctx) {
 }
 clux_type_t *clux_context_get_str_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_str;
+}
+clux_type_t *clux_context_get_type_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_type;
 }
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_error;

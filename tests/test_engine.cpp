@@ -12,6 +12,7 @@
 #include "engine/qualifier.h"
 #include "engine/slice.h"
 #include "engine/type.h"
+#include "engine/type_value.h"
 #include "engine/value.h"
 #include <cmath>
 #include <stdint.h>
@@ -4428,6 +4429,175 @@ TEST(EngineTest, StructDuckTypeImplicitCast) {
   clux_value_t *bad_kind = clux_context_safe_cast(ctx, p, i32_type, NULL);
   ASSERT_NE(bad_kind, nullptr);
   EXPECT_STREQ(error_message_of(bad_kind), "cannot safely cast 'P' to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, TypeValueWrapsType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+  clux_type_t *type_type = clux_context_get_type_type(ctx);
+
+  /* "type" 类型属性：vtable 只绑 eq 与 value_extends，其余槽位为空 */
+  EXPECT_EQ(clux_type_get_kind(type_type), CLUX_TYPE_TYPE);
+  EXPECT_STREQ(clux_type_get_name(type_type), "type");
+  EXPECT_EQ(clux_type_get_size(type_type), sizeof(clux_type_t *));
+  clux_vtable_t *vt = clux_type_get_vtable(type_type);
+  ASSERT_NE(vt, nullptr);
+  EXPECT_EQ(vt, get_clux_type_value_vtable());
+  EXPECT_NE(vt->eq, nullptr);
+  EXPECT_NE(vt->value_extends, nullptr);
+  EXPECT_EQ(vt->ne, nullptr);
+  EXPECT_EQ(vt->safe_cast, nullptr);
+  EXPECT_EQ(vt->deref, nullptr);
+
+  /* 创建：值类型是 "type"，data 指向被描述类型 */
+  clux_value_t *t_i32 =
+      clux_context_create_type_value(ctx, i32_type, "T", NULL);
+  ASSERT_NE(t_i32, nullptr);
+  EXPECT_EQ(clux_value_get_type(t_i32), type_type);
+  void *raw = ptr_to_raw(clux_value_get_data(t_i32), 0);
+  ASSERT_NE(raw, nullptr);
+  EXPECT_EQ(*(clux_type_t **)raw, i32_type);
+  clux_value_t *bad_type_value =
+      clux_context_create_type_value(ctx, NULL, "Bad", NULL);
+  ASSERT_NE(bad_type_value, nullptr);
+  EXPECT_STREQ(error_message_of(bad_type_value),
+               "type value creation requires a type");
+
+  /* eq 代理 clux_type_equal：语义判等（类型名与 attr 不参与） */
+  clux_value_t *t_i32b =
+      clux_context_create_type_value(ctx, i32_type, NULL, NULL);
+  ASSERT_NE(t_i32b, nullptr);
+  clux_value_t *t_i64 =
+      clux_context_create_type_value(ctx, i64_type, NULL, NULL);
+  ASSERT_NE(t_i64, nullptr);
+  clux_value_t *same =
+      clux_context_binary(ctx, CLUX_OP_EQ, t_i32, t_i32b, NULL);
+  ASSERT_NE(same, nullptr);
+  EXPECT_TRUE(*(bool *)ptr_to_raw(clux_value_get_data(same), 0));
+  clux_value_t *diff = clux_context_binary(ctx, CLUX_OP_EQ, t_i32, t_i64, NULL);
+  ASSERT_NE(diff, nullptr);
+  EXPECT_FALSE(*(bool *)ptr_to_raw(clux_value_get_data(diff), 0));
+  /* eq 代理的 type_equal 是四表判等：attr 声明不同即不同类型
+     （鸭子互赋是 safe_cast 的职责，不影响类型身份） */
+  clux_struct_field_t fields[] = {
+      {"x", i32_type},
+  };
+  clux_value_t *tag = clux_context_create_i32(ctx, 1, NULL, NULL);
+  ASSERT_NE(tag, nullptr);
+  clux_struct_attr_t attrs[] = {{"tag", tag}};
+  clux_struct_decl_t p_decl = {fields, 1, attrs, 1, NULL, 0, NULL, 0};
+  clux_type_t *p_type = clux_context_create_struct_type(ctx, "P", &p_decl);
+  ASSERT_NE(p_type, nullptr);
+  clux_struct_decl_t q_decl = {fields, 1, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *q_type = clux_context_create_struct_type(ctx, "Q", &q_decl);
+  ASSERT_NE(q_type, nullptr);
+  EXPECT_NE(p_type, q_type);
+  clux_value_t *t_p = clux_context_create_type_value(ctx, p_type, NULL, NULL);
+  clux_value_t *t_q = clux_context_create_type_value(ctx, q_type, NULL, NULL);
+  ASSERT_NE(t_p, nullptr);
+  ASSERT_NE(t_q, nullptr);
+  clux_value_t *duck_eq = clux_context_binary(ctx, CLUX_OP_EQ, t_p, t_q, NULL);
+  ASSERT_NE(duck_eq, nullptr);
+  EXPECT_FALSE(*(bool *)ptr_to_raw(clux_value_get_data(duck_eq), 0));
+  /* shadow 产出 bool shadow；right 非 type value 报错；ne 不支持 */
+  clux_value_t *shadow_t = clux_context_create_shadow_value(ctx, type_type);
+  ASSERT_NE(shadow_t, nullptr);
+  clux_value_t *shadow_eq =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow_t, t_i32, NULL);
+  ASSERT_NE(shadow_eq, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_eq));
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+  ASSERT_NE(one, nullptr);
+  clux_value_t *bad_right =
+      clux_context_binary(ctx, CLUX_OP_EQ, t_i32, one, NULL);
+  ASSERT_NE(bad_right, nullptr);
+  EXPECT_STREQ(error_message_of(bad_right),
+               "operator '==' requires operands of the same type");
+  clux_value_t *ne_result =
+      clux_context_binary(ctx, CLUX_OP_NE, t_i32, t_i32b, NULL);
+  ASSERT_NE(ne_result, nullptr);
+  EXPECT_STREQ(error_message_of(ne_result),
+               "type 'type' does not support operator '!='");
+
+  /* value_extends 代理 clux_type_extends：*Derived extends *Base 成立，
+     反向拒绝 */
+  clux_type_t *f32_type = clux_context_get_f32_type(ctx);
+  clux_struct_field_t base_fields[] = {
+      {"a", i32_type},
+      {"b", i64_type},
+  };
+  clux_struct_decl_t base_decl = {base_fields, 2, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *base_type =
+      clux_context_create_struct_type(ctx, "Base", &base_decl);
+  ASSERT_NE(base_type, nullptr);
+  clux_struct_field_t derived_fields[] = {
+      {"a", i32_type},
+      {"b", i64_type},
+      {"c", f32_type},
+  };
+  clux_struct_decl_t derived_decl = {
+      derived_fields, 3, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *derived_type =
+      clux_context_create_struct_type(ctx, "Derived", &derived_decl);
+  ASSERT_NE(derived_type, nullptr);
+  clux_value_t *t_base_ptr = clux_context_create_type_value(
+      ctx, clux_context_get_ptr_type(ctx, base_type), NULL, NULL);
+  clux_value_t *t_derived_ptr = clux_context_create_type_value(
+      ctx, clux_context_get_ptr_type(ctx, derived_type), NULL, NULL);
+  ASSERT_NE(t_base_ptr, nullptr);
+  ASSERT_NE(t_derived_ptr, nullptr);
+  EXPECT_TRUE(vt->value_extends(t_derived_ptr, t_base_ptr));
+  EXPECT_FALSE(vt->value_extends(t_base_ptr, t_derived_ptr));
+  EXPECT_TRUE(vt->value_extends(t_i32, t_i32b));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, TypeValueVariableShareNamespace) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+
+  /* 类型 T 以 type value 身份进词法作用域 */
+  clux_value_t *t = clux_context_create_type_value(ctx, i32_type, "T", NULL);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(clux_value_get_type(t), clux_context_get_type_type(ctx));
+
+  /* 变量与类型共用命名空间：同层变量 T 重名拒绝 */
+  clux_value_t *dup_var = clux_context_create_i32(ctx, 5, "T", NULL);
+  ASSERT_NE(dup_var, nullptr);
+  EXPECT_STREQ(error_message_of(dup_var), "duplicate declaration 'T'");
+  /* 同层类型 T 重名同样拒绝 */
+  clux_value_t *dup_type =
+      clux_context_create_type_value(ctx, i64_type, "T", NULL);
+  ASSERT_NE(dup_type, nullptr);
+  EXPECT_STREQ(error_message_of(dup_type), "duplicate declaration 'T'");
+
+  /* 子层定义同名变量 T 遮罩外层类型：共用命名空间的遮罩规则自然生效 */
+  clux_context_push_scope(ctx);
+  clux_value_t *var = clux_context_create_i32(ctx, 7, "T", NULL);
+  ASSERT_NE(var, nullptr);
+  EXPECT_NE(clux_value_get_type(var), clux_context_get_type_type(ctx));
+  /* 子层内再建类型 T：同层重名依旧拒绝 */
+  clux_value_t *inner_dup =
+      clux_context_create_type_value(ctx, i64_type, "T", NULL);
+  ASSERT_NE(inner_dup, nullptr);
+  EXPECT_STREQ(error_message_of(inner_dup), "duplicate declaration 'T'");
+  clux_context_pop_scope(ctx);
+
+  /* 弹出子层后外层类型 T 仍然存活：同名再定义依旧拒绝 */
+  clux_value_t *after = clux_context_create_i32(ctx, 9, "T", NULL);
+  ASSERT_NE(after, nullptr);
+  EXPECT_STREQ(error_message_of(after), "duplicate declaration 'T'");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

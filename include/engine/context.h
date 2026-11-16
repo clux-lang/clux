@@ -79,6 +79,12 @@ clux_value_t *clux_context_create_bool(clux_context_t *self,
                                        bool value,
                                        const char *name,
                                        location_t *loc);
+/* type value（值描述类型）：data 存被描述类型的指针；type 须非空，
+   否则返回 error。eq / value_extends 代理类型层（见 type_value.c）。 */
+clux_value_t *clux_context_create_type_value(clux_context_t *self,
+                                             clux_type_t *type,
+                                             const char *name,
+                                             location_t *loc);
 char *clux_context_alloc_str(clux_context_t *self, size_t len);
 clux_value_t *clux_context_create_str(clux_context_t *self,
                                       const char *value,
@@ -349,6 +355,8 @@ clux_type_t *clux_context_get_f32_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_f64_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_bool_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_str_type(clux_context_t *ctx);
+/* "type" 内建类型：所有 type value 的类型（context 单例）。 */
+clux_type_t *clux_context_get_type_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx);
 #ifdef __cplusplus
 }
