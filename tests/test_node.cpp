@@ -79,7 +79,7 @@ TEST(NodeTest, GetKind) {
   location_t loc = make_loc(src, 0, 1);
   node_kind_t kinds[] = {
       CLUX_NODE_PROGRAM,
-      CLUX_NODE_STATEMENT_EXPRESSION,
+      CLUX_NODE_STMT_EXPR,
       CLUX_NODE_LITERAL_UNDEFINED,
       CLUX_NODE_LITERAL_STRING,
       CLUX_NODE_LITERAL_CHARACTER,
@@ -220,7 +220,7 @@ TEST(NodeTest, NoLeakDeepNested) {
   location_t loc = make_loc(src, 0, 1);
   /* root -> mid -> leaf */
   node_t *root = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
-  node_t *mid = make_node(a, CLUX_NODE_STATEMENT_EXPRESSION, root, &loc);
+  node_t *mid = make_node(a, CLUX_NODE_STMT_EXPR, root, &loc);
   node_t *leaf = make_node(a, CLUX_NODE_LITERAL_NUMERIC, mid, &loc);
   vec_push(node_get_children(root), mid);
   vec_push(node_get_children(mid), leaf);
