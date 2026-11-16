@@ -26,6 +26,14 @@ void clux_context_pop_scope(clux_context_t *self);
 /* 当前作用域（current scope，借用）：所有带名/匿名值的注册点。
    供执行层做名称查找与作用域栈导航，只读使用。 */
 clux_scope_t *clux_context_get_scope(clux_context_t *self);
+/* 将匿名值具名化加入当前作用域（var 声明的落地通道）：
+   值是当前作用域的匿名持有时原地填名（声明即 move，零拷贝）；
+   值是借用（对既有变量的引用）时按值拷贝落地为独立存储；
+   本层已有同名值时返回 duplicate declaration 错误值。 */
+clux_value_t *clux_context_declare_value(clux_context_t *self,
+                                         clux_value_t *value,
+                                         const char *name,
+                                         location_t *loc);
 clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error);
 clux_value_t *clux_context_create_shadow_value(clux_context_t *self,

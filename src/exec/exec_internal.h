@@ -43,16 +43,14 @@ typedef exec_value_t (*exec_visit_fn)(clux_exec_t *self, node_t *node);
 #define EXEC_NODE_KIND_COUNT (CLUX_NODE_STMT_INTERFACE + 1)
 
 /* —— exec.c：生命周期与共享工具 —— */
-exec_value_t exec_ok(clux_value_t *value); /* value 可为 NULL（无值） */
+exec_value_t exec_ok(clux_value_t *value);  /* value 可为 NULL（无值） */
 exec_value_t exec_err(clux_value_t *error); /* error 值包装为硬错误 */
 exec_value_t exec_signal(exec_tag_t tag, clux_value_t *carrier);
 bool exec_is_error(exec_value_t result);
 bool exec_is_error_value(clux_value_t *value);
 /* 语义化 error 构造（clux_context_create_error_message 通道）。 */
-exec_value_t exec_errorf(clux_exec_t *self,
-                         const location_t *loc,
-                         const char *fmt,
-                         ...);
+exec_value_t
+exec_errorf(clux_exec_t *self, const location_t *loc, const char *fmt, ...);
 /* 整区间文本比较（location_is 通道，零分配）：node 须为名字/符号类
    叶子节点。 */
 bool exec_node_is(node_t *node, const char *text);
@@ -67,18 +65,15 @@ static inline location_t *exec_loc(node_t *node) {
 /* 类型工具：type value（CLUX_TYPE_TYPE）提取被描述类型指针；
    非 type value 返回 NULL。 */
 clux_type_t *exec_type_of_value(clux_value_t *value);
+/* 求类型表达式为 clux_type_t*（walk 后经 type value 提取）；
+   失败返回 NULL 且 *error 携带硬错误（求值错误原样透传，
+   非 type value 报语义化错误）。 */
+clux_type_t *
+exec_eval_type(clux_exec_t *self, node_t *node, exec_value_t *error);
 /* 条件转 bool：非 bool 值返回 error（脚本的 if/while 条件显式要求
    bool，与白皮书 §4.4/§4.6 一致）。loc 是条件表达式的出错定位。 */
-exec_value_t exec_cond_bool(clux_exec_t *self,
-                            clux_value_t *value,
-                            const location_t *loc);
-/* 值拷贝落地（safe_alloc 新 data + memcpy + 经 create_value 注册名字）：
-   声明初始化与函数返回逃逸共用。name 传 NULL 产出匿名值；
-   data 布局按 type 尺寸平铺，借用语义的字面量初值在此失去引用属性。 */
-exec_value_t exec_value_materialize(clux_exec_t *self,
-                                    clux_value_t *value,
-                                    const char *name,
-                                    const location_t *loc);
+exec_value_t
+exec_cond_bool(clux_exec_t *self, clux_value_t *value, const location_t *loc);
 
 /* —— exec_dispatch.c：kind 分派表（map，替代 switch） —— */
 exec_value_t exec_dispatch_expr(clux_exec_t *self, node_t *node);
@@ -112,4 +107,17 @@ exec_value_t exec_visit_while(clux_exec_t *self, node_t *node);
 
 /* —— exec_decl.c —— */
 exec_value_t exec_visit_var(clux_exec_t *self, node_t *node);
+
+/* —— exec_func.c —— */
+/* 函数语句（stmt 包装层）：取 FUNC_DECL 透传到声明体执行。 */
+exec_value_t exec_visit_func_stmt(clux_exec_t *self, node_t *node);
+/* 函数声明体（表达式位置共用：具名声明/匿名闭包）：
+   签名落地为 func value，闭包捕获按值拷贝，具名经 declare_value。 */
+exec_value_t exec_visit_func_decl(clux_exec_t *self, node_t *node);
+
+/* —— exec_type.c —— */
+exec_value_t exec_visit_type_stmt(clux_exec_t *self, node_t *node);
+exec_value_t exec_visit_struct_stmt(clux_exec_t *self, node_t *node);
+exec_value_t exec_visit_union_stmt(clux_exec_t *self, node_t *node);
+exec_value_t exec_visit_enum_stmt(clux_exec_t *self, node_t *node);
 #endif

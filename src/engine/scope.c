@@ -143,3 +143,41 @@ clux_value_t *clux_scope_get(clux_scope_t *self, const char *name) {
 clux_scope_t *clux_scope_get_parent(clux_scope_t *self) {
   return self ? self->parent : NULL;
 }
+
+clux_scope_name_result_t clux_scope_name_value(clux_scope_t *self,
+                                               clux_value_t *value,
+                                               const char *name) {
+  if (!self || !value || !name) {
+    return CLUX_SCOPE_NAME_BORROWED;
+  }
+  /* 本层桶内已有同名即冲突（不沿 parent：外层名字允许遮罩）。 */
+  uint32_t key = hash_sdb(name);
+  vec_t *bucket = rbtree_find(self->named_values, key);
+  if (bucket) {
+    for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+      clux_slot_t *existing = vec_get(bucket, idx);
+      if (strcmp(existing->name, name) == 0) {
+        return CLUX_SCOPE_NAME_CONFLICT;
+      }
+    }
+  }
+  for (size_t idx = 0; idx < vec_get_size(self->values); idx++) {
+    clux_slot_t *slot = vec_get(self->values, idx);
+    if (slot->value != value) {
+      continue;
+    }
+    if (slot->name) {
+      /* 已具名：调用方持有的是对既有变量的借用。 */
+      return CLUX_SCOPE_NAME_BORROWED;
+    }
+    slot->name = copy_name(self->allocator, name);
+    if (!bucket) {
+      bucket = create_vec(self->allocator);
+      rbtree_insert(self->named_values, key, bucket);
+    }
+    vec_push(bucket, slot);
+    return CLUX_SCOPE_NAME_OK;
+  }
+  /* 值不归本作用域持有（注册在外层），同样按借用处理。 */
+  return CLUX_SCOPE_NAME_BORROWED;
+}

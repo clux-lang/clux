@@ -1379,6 +1379,32 @@ void clux_context_pop_scope(clux_context_t *self) {
 clux_scope_t *clux_context_get_scope(clux_context_t *self) {
   return self ? self->current_scope : NULL;
 }
+clux_value_t *clux_context_declare_value(clux_context_t *self,
+                                         clux_value_t *value,
+                                         const char *name,
+                                         location_t *loc) {
+  if (!self || !value || !name) {
+    return clux_context_create_error_message(
+        self, loc, "declaration requires a value and a name");
+  }
+  clux_scope_name_result_t named =
+      clux_scope_name_value(self->current_scope, value, name);
+  if (named == CLUX_SCOPE_NAME_OK) {
+    return value;
+  }
+  if (named == CLUX_SCOPE_NAME_CONFLICT) {
+    clux_error_t *err =
+        create_error(self->allocator, loc, "duplicate declaration '%s'", name);
+    return clux_context_create_error(self, err);
+  }
+  /* 借用值：按值语义拷贝为独立存储（data 布局按 type 尺寸平铺，
+     借用/引用属性在声明处失去）。 */
+  clux_type_t *type = clux_value_get_type(value);
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memcpy(ptr_to_raw(data, 0), ptr_to_raw(clux_value_get_data(value), 0), size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
                                                 location_t *loc,
                                                 const char *fmt,

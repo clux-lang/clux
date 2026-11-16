@@ -37,6 +37,7 @@ static exec_visit_fn g_expr_table[EXEC_NODE_KIND_COUNT] = {
     [CLUX_NODE_EXPR_BINARY] = exec_visit_binary,
     [CLUX_NODE_EXPR_UNARY] = exec_visit_binary,
     [CLUX_NODE_EXPR_GROUP] = exec_visit_group,
+    [CLUX_NODE_EXPR_FUNC_DECL] = exec_visit_func_decl,
 };
 
 static exec_visit_fn g_stmt_table[EXEC_NODE_KIND_COUNT] = {
@@ -49,6 +50,11 @@ static exec_visit_fn g_stmt_table[EXEC_NODE_KIND_COUNT] = {
     [CLUX_NODE_STMT_IF] = exec_visit_if,
     [CLUX_NODE_STMT_WHILE] = exec_visit_while,
     [CLUX_NODE_STMT_VAR] = exec_visit_var,
+    [CLUX_NODE_STMT_FUNC] = exec_visit_func_stmt,
+    [CLUX_NODE_STMT_TYPE] = exec_visit_type_stmt,
+    [CLUX_NODE_STMT_ENUM] = exec_visit_enum_stmt,
+    [CLUX_NODE_STMT_UNION] = exec_visit_union_stmt,
+    [CLUX_NODE_STMT_STRUCT] = exec_visit_struct_stmt,
 };
 
 exec_value_t exec_dispatch_expr(clux_exec_t *self, node_t *node) {

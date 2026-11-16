@@ -229,3 +229,133 @@ TEST(ExecTest, BlockValueScoped) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* 借用初值按值拷贝：var y = x 后 y 是独立存储，改 y 不影响 x。 */
+TEST(ExecTest, VarFromIdentifierCopies) {
+  RUN_SCRIPT("var x = 1; var y = x; y = 5; x");
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(value_is_error(result));
+  EXPECT_EQ(read_i32(result), 1);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 函数声明落地：声明后名字可查，重复声明报错。 */
+TEST(ExecTest, FuncDeclaration) {
+  RUN_SCRIPT("func f(a: i32): i32 { return a + 1; }");
+  EXPECT_EQ(result, nullptr); /* 声明语句不产值 */
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 闭包捕获按值拷贝：声明后修改源变量不影响捕获快照（类型标注形态）。 */
+TEST(ExecTest, ClosureCaptureByValue) {
+  /* 捕获快照断言依赖 #33 调用帧（f 的执行），此处先验证带捕获声明可落地。 */
+  RUN_SCRIPT("var y = 10;"
+             "func |(y: i32)| f(): i32 { return y; }"
+             "y = 20;");
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(value_is_error(result));
+  EXPECT_EQ(read_i32(result), 20);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 空捕获列表 ||：无捕获项的函数声明可落地。 */
+TEST(ExecTest, EmptyCaptureList) {
+  RUN_SCRIPT("var x = 1; func || f(): i32 { return x; }; 5");
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(read_i32(result), 5);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* cfunc 无可执行体，脚本模式报语义化错误。 */
+TEST(ExecTest, CfuncNotExecutable) {
+  EXPECT_EXEC_ERROR("cfunc f(): void;", "cfunc");
+}
+
+/* 泛型函数声明在脚本模式不支持。 */
+TEST(ExecTest, GenericFuncNotSupported) {
+  EXPECT_EXEC_ERROR("func f[T](a: T): T { return a; }", "generic");
+}
+
+/* 捕获名字未定义（类型标注合法，但作用域无同名值可捕获）。 */
+TEST(ExecTest, CaptureUndefinedName) {
+  EXPECT_EXEC_ERROR("func |(y: i32)| f(): i32 { return y; }", "undefined name");
+}
+
+/* type alias：别名落为 type value，类型语境可用。 */
+TEST(ExecTest, TypeAlias) {
+  RUN_SCRIPT("type Int = i32; var x: Int = 5; x");
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(value_is_error(result));
+  EXPECT_EQ(read_i32(result), 5);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* type alias 右边必须是类型。 */
+TEST(ExecTest, TypeAliasNotAType) {
+  EXPECT_EXEC_ERROR("type Int = 5;", "requires a type");
+}
+
+/* 泛型类型别名走模板值落地。 */
+TEST(ExecTest, GenericTypeAliasTemplate) {
+  RUN_SCRIPT("type Pair[T] = struct { a: T; b: T; }; 7");
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(read_i32(result), 7);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* struct 声明落地：名字可用作类型标注（构造与成员访问走调用任务通道，
+   此处只验证声明落地）。 */
+TEST(ExecTest, StructDeclaration) {
+  RUN_SCRIPT("struct Point { x: i32; y: i32; }; 5");
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(value_is_error(result));
+  EXPECT_EQ(read_i32(result), 5);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* struct 重复字段名报错。 */
+TEST(ExecTest, StructDuplicateField) {
+  EXPECT_EXEC_ERROR("struct P { x: i32; x: i32; }", "invalid");
+}
+
+/* cunion 声明落地。 */
+TEST(ExecTest, CunionDeclaration) {
+  RUN_SCRIPT("cunion V { i: i32; f: f32; }; 1");
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(value_is_error(result));
+  EXPECT_EQ(read_i32(result), 1);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* tag union 声明落地。 */
+TEST(ExecTest, UnionDeclaration) {
+  RUN_SCRIPT("union Shape { circle: i32; rect: i32; }; 2");
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(value_is_error(result));
+  EXPECT_EQ(read_i32(result), 2);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* enum 声明落地：枚举名落为 underlying 的类型别名。 */
+TEST(ExecTest, EnumDeclaration) {
+  RUN_SCRIPT("enum Color: u8 { Red = 1, Green = 2, }; 9");
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(value_is_error(result));
+  EXPECT_EQ(read_i32(result), 9);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* enum underlying 必须是整数类型。 */
+TEST(ExecTest, EnumUnderlyingNotInteger) {
+  EXPECT_EXEC_ERROR("enum C: str { A = \"a\", }", "integer");
+}

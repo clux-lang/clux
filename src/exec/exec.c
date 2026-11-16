@@ -1,6 +1,5 @@
 /* 执行器生命周期与共享工具：值通道包装、错误构造、location 文本解码。 */
 #include "exec_internal.h"
-#include "core/safe_alloc.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,19 +42,15 @@ bool exec_is_error(exec_value_t result) {
          exec_is_error_value(result.value);
 }
 
-exec_value_t exec_errorf(clux_exec_t *self,
-                         const location_t *loc,
-                         const char *fmt,
-                         ...) {
+exec_value_t
+exec_errorf(clux_exec_t *self, const location_t *loc, const char *fmt, ...) {
   char message[512];
   va_list args;
   va_start(args, fmt);
   vsnprintf(message, sizeof(message), fmt, args);
   va_end(args);
-  return exec_err(clux_context_create_error_message(self->ctx,
-                                                    (location_t *)loc,
-                                                    "%s",
-                                                    message));
+  return exec_err(clux_context_create_error_message(
+      self->ctx, (location_t *)loc, "%s", message));
 }
 
 bool exec_node_is(node_t *node, const char *text) {
@@ -78,9 +73,28 @@ clux_type_t *exec_type_of_value(clux_value_t *value) {
   return raw ? *(clux_type_t **)raw : NULL;
 }
 
-exec_value_t exec_cond_bool(clux_exec_t *self,
-                            clux_value_t *value,
-                            const location_t *loc) {
+clux_type_t *exec_eval_type(clux_exec_t *self,
+                            node_t *node,
+                            exec_value_t *error) {
+  if (!node) {
+    *error = exec_errorf(self, NULL, "missing type expression");
+    return NULL;
+  }
+  exec_value_t value = exec_dispatch_expr(self, node);
+  if (exec_is_error(value)) {
+    *error = value;
+    return NULL;
+  }
+  clux_type_t *type = exec_type_of_value(value.value);
+  if (!type) {
+    *error = exec_errorf(self, exec_loc(node), "expected a type expression");
+    return NULL;
+  }
+  return type;
+}
+
+exec_value_t
+exec_cond_bool(clux_exec_t *self, clux_value_t *value, const location_t *loc) {
   clux_type_t *type = clux_value_get_type(value);
   if (clux_type_get_kind(type) != CLUX_TYPE_BOOL) {
     return exec_errorf(self,
@@ -90,24 +104,6 @@ exec_value_t exec_cond_bool(clux_exec_t *self,
   }
   bool cond = *(bool *)ptr_to_raw(clux_value_get_data(value), 0);
   return exec_ok(clux_context_create_bool(self->ctx, cond, NULL, NULL));
-}
-
-exec_value_t exec_value_materialize(clux_exec_t *self,
-                                    clux_value_t *value,
-                                    const char *name,
-                                    const location_t *loc) {
-  if (clux_value_is_shadow(value)) {
-    return exec_errorf(self, loc, "shadow values are not executable");
-  }
-  clux_type_t *type = clux_value_get_type(value);
-  size_t size = clux_type_get_size(type);
-  ptr_handle_t data = safe_alloc(clux_context_get_safe_allocator(self->ctx),
-                                 size,
-                                 loc);
-  memcpy(ptr_to_raw(data, 0), ptr_to_raw(clux_value_get_data(value), 0), size);
-  return exec_ok(
-      clux_context_create_value(self->ctx, type, data, name,
-                                (location_t *)loc));
 }
 
 clux_value_t *clux_exec_run(clux_exec_t *self, node_t *program) {
@@ -129,7 +125,9 @@ clux_value_t *clux_exec_run(clux_exec_t *self, node_t *program) {
     }
     if (result.tag != EXEC_VALUE_TAG) {
       static const char *outside[] = {
-          "return", "break", "continue",
+          "return",
+          "break",
+          "continue",
       };
       return clux_context_create_error_message(
           self->ctx,
