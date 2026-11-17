@@ -20,8 +20,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_SOURCE_TEXT*/ NULL,
     /*CLUX_NODE_EXPR_ASSIGN*/ exec_expr_assign,
     /*CLUX_NODE_EXPR_TERNARY*/ exec_expr_ternary,
-    /*CLUX_NODE_EXPR_BINARY*/ NULL,
-    /*CLUX_NODE_EXPR_UNARY*/ NULL,
+    /*CLUX_NODE_EXPR_BINARY*/ exec_expr_binary,
     /*CLUX_NODE_EXPR_SUBSCRIPT*/ NULL,
     /*CLUX_NODE_EXPR_SLICE*/ NULL,
     /*CLUX_NODE_EXPR_REST*/ NULL,
@@ -117,8 +116,6 @@ static const char *node_kind_name(node_kind_t kind) {
     return "EXPR_TERNARY";
   case CLUX_NODE_EXPR_BINARY:
     return "EXPR_BINARY";
-  case CLUX_NODE_EXPR_UNARY:
-    return "EXPR_UNARY";
   case CLUX_NODE_EXPR_SUBSCRIPT:
     return "EXPR_SUBSCRIPT";
   case CLUX_NODE_EXPR_SLICE:

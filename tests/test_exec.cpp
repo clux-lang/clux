@@ -17,6 +17,7 @@
 #include "exec/stmt.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
+#include "parser/node_binary.h"
 #include "parser/node_group.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_ternary.h"
@@ -677,14 +678,15 @@ TEST_F(ExecLiteralTest, ExecNodeDispatchesRegisteredKinds) {
   delete_node(&boolean);
 }
 
-/* 场景: 未注册 kind（EXPR_BINARY 无回调）
-   预期: 返回 error 值，消息 "unsupported node kind: EXPR_BINARY" */
+/* 场景: 未注册 kind（EXPR_SUBSCRIPT 无回调）
+   预期: 返回 error 值，消息 "unsupported node kind: EXPR_SUBSCRIPT" */
 TEST_F(ExecLiteralTest, ExecNodeUnsupportedKindError) {
-  node_t *node = make_node(CLUX_NODE_EXPR_BINARY, "a + b");
+  node_t *node = make_node(CLUX_NODE_EXPR_SUBSCRIPT, "a[0]");
   clux_value_t *value = exec_node(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: EXPR_BINARY");
+  EXPECT_STREQ(error_message_of(value),
+               "unsupported node kind: EXPR_SUBSCRIPT");
   delete_node(&node);
 }
 
@@ -727,7 +729,7 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_LITERAL_BOOLEAN ||
         kind == CLUX_NODE_LITERAL_IDENTIFIER || kind == CLUX_NODE_EXPR_GROUP ||
         kind == CLUX_NODE_EXPR_ASSIGN || kind == CLUX_NODE_EXPR_TERNARY ||
-        kind == CLUX_NODE_STMT_VAR;
+        kind == CLUX_NODE_EXPR_BINARY || kind == CLUX_NODE_STMT_VAR;
     if (synthetic_skip) {
       continue;
     }
@@ -1415,5 +1417,513 @@ TEST_F(ExecLiteralTest, TernaryDispatchesViaExecNode) {
   EXPECT_EQ(clux_value_get_type(result),
             clux_context_builtin_type(ctx, CLUX_TYPE_STR));
   EXPECT_STREQ(read_str(result), "ok");
+  delete_node(&node);
+}
+
+/* 合成二元表达式结点 left op right（三个子结点由调用方构造并保证齐全；
+   前缀一元形态传 left = NULL；delete 根结点时一并释放）。 */
+static node_t *make_binary_of(allocator_t *allocator,
+                              node_t *left,
+                              node_t *symbol,
+                              node_t *right) {
+  node_t *node = create_binary_node(allocator);
+  binary_node_set_left(node, left);
+  binary_node_set_symbol(node, symbol);
+  binary_node_set_right(node, right);
+  return node;
+}
+
+/* ---- exec_expr_binary：三元形态（前缀 / 短路 / 二元 / 未识别） ---- */
+
+/* 场景: 16 种二元运算符逐一验证（算术/位/移位产 i32，比较产 bool）
+   预期: 经 clux_context_binary 按运算符计算，结果类型与值精确匹配
+         （比较类结果类型为 bool，其余为 i32） */
+TEST_F(ExecLiteralTest, BinaryOperatorMatrix) {
+  struct {
+    const char *op;
+    const char *lhs;
+    const char *rhs;
+    bool result_is_bool;
+    int64_t expected;
+  } cases[] = {
+      {"+", "10", "3", false, 13},
+      {"-", "10", "3", false, 7},
+      {"*", "6", "7", false, 42},
+      {"/", "42", "6", false, 7},
+      {"%", "10", "3", false, 1},
+      {"&", "10", "3", false, 2},
+      {"|", "8", "3", false, 11},
+      {"^", "10", "3", false, 9},
+      {"<<", "1", "4", false, 16},
+      {">>", "256", "4", false, 16},
+      {"==", "10", "3", true, 0},
+      {"!=", "10", "3", true, 1},
+      {"<", "10", "3", true, 0},
+      {"<=", "10", "10", true, 1},
+      {">", "10", "3", true, 1},
+      {">=", "10", "10", true, 1},
+  };
+  for (const auto &c : cases) {
+    node_t *node = make_binary_of(a,
+                                  make_node(CLUX_NODE_LITERAL_NUMERIC, c.lhs),
+                                  make_node(CLUX_NODE_SYMBOL, c.op),
+                                  make_node(CLUX_NODE_LITERAL_NUMERIC, c.rhs));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << c.op;
+    EXPECT_EQ(clux_value_get_type(result),
+              clux_context_builtin_type(
+                  ctx, c.result_is_bool ? CLUX_TYPE_BOOL : CLUX_TYPE_I32))
+        << c.op;
+    if (c.result_is_bool) {
+      EXPECT_EQ(read_bool(result), (bool)c.expected) << c.op;
+    } else {
+      EXPECT_EQ(read_i32(result), (int32_t)c.expected) << c.op;
+    }
+    delete_node(&node);
+  }
+}
+
+/* 场景: i64 与 u32 宽度上的二元运算（带后缀字面量）
+   预期: 引擎按操作数类型分派，i64 减法与 u32 除法结果类型、值均正确 */
+TEST_F(ExecLiteralTest, BinaryOperatorsAcrossIntegerWidths) {
+  node_t *i64_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "20i64"),
+                     make_node(CLUX_NODE_SYMBOL, "-"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "8i64"));
+  clux_value_t *i64_result = exec_expr_binary(ctx, i64_node);
+  ASSERT_NE(i64_result, nullptr);
+  EXPECT_EQ(clux_value_get_type(i64_result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
+  EXPECT_EQ(read_i64(i64_result), 12);
+  delete_node(&i64_node);
+
+  node_t *u32_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "20u32"),
+                     make_node(CLUX_NODE_SYMBOL, "/"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3u32"));
+  clux_value_t *u32_result = exec_expr_binary(ctx, u32_node);
+  ASSERT_NE(u32_result, nullptr);
+  EXPECT_EQ(clux_value_get_type(u32_result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U32));
+  EXPECT_EQ(read_u32(u32_result), 6u);
+  delete_node(&u32_node);
+}
+
+/* 场景: 前缀一元 4 运算符（+ - ~ 作用于整数，! 作用于 bool）
+   预期: LEFT 为 NULL 时按 k_prefix_ops 分派引擎 prefix：
+         +5→5、-5→-5、~5→-6（按位取反）、!true→false、!false→true */
+TEST_F(ExecLiteralTest, PrefixOperatorMatrix) {
+  struct {
+    const char *op;
+    const char *operand;
+    node_kind_t operand_kind;
+    bool result_is_bool;
+    int64_t expected;
+  } cases[] = {
+      {"+", "5", CLUX_NODE_LITERAL_NUMERIC, false, 5},
+      {"-", "5", CLUX_NODE_LITERAL_NUMERIC, false, -5},
+      {"~", "5", CLUX_NODE_LITERAL_NUMERIC, false, -6},
+      {"!", "true", CLUX_NODE_LITERAL_BOOLEAN, true, 0},
+      {"!", "false", CLUX_NODE_LITERAL_BOOLEAN, true, 1},
+  };
+  for (const auto &c : cases) {
+    node_t *node = make_binary_of(a,
+                                  NULL,
+                                  make_node(CLUX_NODE_SYMBOL, c.op),
+                                  make_node(c.operand_kind, c.operand));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << c.op;
+    EXPECT_EQ(clux_value_get_type(result),
+              clux_context_builtin_type(
+                  ctx, c.result_is_bool ? CLUX_TYPE_BOOL : CLUX_TYPE_I32))
+        << c.op;
+    if (c.result_is_bool) {
+      EXPECT_EQ(read_bool(result), (bool)c.expected) << c.op;
+    } else {
+      EXPECT_EQ(read_i32(result), (int32_t)c.expected) << c.op;
+    }
+    delete_node(&node);
+  }
+}
+
+/* 场景: 前缀一元右操作数求值出错（- <超长数字>）
+   预期: 右值经 exec_operand 求值，error 优先传播——
+         "numeric literal too long" */
+TEST_F(ExecLiteralTest, PrefixPropagatesOperandError) {
+  node_t *node =
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "-"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "numeric literal too long");
+  delete_node(&node);
+}
+
+/* 场景: 前缀一元右操作数为 shadow 值（具名 shadow 变量的 identifier 引用）
+   预期: exec_operand 拒绝——"shadow value is not allowed in execution" */
+TEST_F(ExecLiteralTest, PrefixRejectsShadowOperand) {
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, bool_type);
+  ASSERT_NE(shadow, nullptr);
+  clux_value_t *declared = clux_context_declare_value(ctx, shadow, "psh", NULL);
+  ASSERT_EQ(declared, shadow);
+
+  node_t *node = make_binary_of(a,
+                                NULL,
+                                make_node(CLUX_NODE_SYMBOL, "!"),
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "psh"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "shadow value is not allowed in execution");
+  delete_node(&node);
+}
+
+/* 场景: 未识别的一元前缀符号（"++" 与 ".&"，不在 k_prefix_ops 表中）
+   预期: 报 "unsupported unary operator '<原文>'" */
+TEST_F(ExecLiteralTest, PrefixUnsupportedOperatorError) {
+  const char *ops[] = {"++", ".&"};
+  for (const char *op : ops) {
+    node_t *node = make_binary_of(a,
+                                  NULL,
+                                  make_node(CLUX_NODE_SYMBOL, op),
+                                  make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << op;
+    ASSERT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR)
+        << op << ": expected an error value for unknown prefix operator";
+    char expected[64];
+    snprintf(expected, sizeof(expected), "unsupported unary operator '%s'", op);
+    EXPECT_STREQ(error_message_of(result), expected) << op;
+    delete_node(&node);
+  }
+}
+
+/* 场景: && 短路——左值为 false、右值为超长数字（求值必错）
+   预期: 不求值右值直接返回左值本身：result 即 scope 中的左值指针、
+         类型 bool、值为 false，无 error */
+TEST_F(ExecLiteralTest, LogicalAndShortCircuitsWhenLeftFalse) {
+  clux_value_t *left = clux_context_create_bool(ctx, false, "laf", NULL);
+  ASSERT_NE(left, nullptr);
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "laf"),
+                     make_node(CLUX_NODE_SYMBOL, "&&"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result, left) << "short-circuit must return the left value itself";
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
+  EXPECT_FALSE(read_bool(result));
+  delete_node(&node);
+}
+
+/* 场景: || 短路——左值为 true、右值为超长数字（求值必错）
+   预期: 不求值右值直接返回左值本身：result 即左值指针、值为 true */
+TEST_F(ExecLiteralTest, LogicalOrShortCircuitsWhenLeftTrue) {
+  clux_value_t *left = clux_context_create_bool(ctx, true, "lot", NULL);
+  ASSERT_NE(left, nullptr);
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "lot"),
+                     make_node(CLUX_NODE_SYMBOL, "||"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result, left) << "short-circuit must return the left value itself";
+  EXPECT_TRUE(read_bool(result));
+  delete_node(&node);
+}
+
+/* 场景: 非短路时求值右值（true && 右 / false || 右）
+   预期: 返回右值本身（scope 中的右值指针）：true&&false→false、
+         false||true→true */
+TEST_F(ExecLiteralTest, LogicalEvaluatesRightWhenNotShortCircuit) {
+  clux_value_t *and_right = clux_context_create_bool(ctx, false, "raf", NULL);
+  ASSERT_NE(and_right, nullptr);
+  node_t *and_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                     make_node(CLUX_NODE_SYMBOL, "&&"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "raf"));
+  clux_value_t *and_result = exec_expr_binary(ctx, and_node);
+  ASSERT_NE(and_result, nullptr);
+  EXPECT_EQ(and_result, and_right)
+      << "non-short-circuit must return the right value itself";
+  EXPECT_FALSE(read_bool(and_result));
+  delete_node(&and_node);
+
+  clux_value_t *or_right = clux_context_create_bool(ctx, true, "rot", NULL);
+  ASSERT_NE(or_right, nullptr);
+  node_t *or_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_BOOLEAN, "false"),
+                     make_node(CLUX_NODE_SYMBOL, "||"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "rot"));
+  clux_value_t *or_result = exec_expr_binary(ctx, or_node);
+  ASSERT_NE(or_result, nullptr);
+  EXPECT_EQ(or_result, or_right)
+      << "non-short-circuit must return the right value itself";
+  EXPECT_TRUE(read_bool(or_result));
+  delete_node(&or_node);
+}
+
+/* 场景: &&/|| 的左操作数非 bool（i32 数字与 str 字符串，表驱动）
+   预期: 拒绝 "type 'i32'/'str' does not support operator '&&'/'||'" */
+TEST_F(ExecLiteralTest, LogicalRejectsNonBoolLeftOperand) {
+  struct {
+    node_kind_t kind;
+    const char *text;
+    const char *type_name;
+  } operands[] = {
+      {CLUX_NODE_LITERAL_NUMERIC, "5", "i32"},
+      {CLUX_NODE_LITERAL_STRING, "\"s\"", "str"},
+  };
+  const char *ops[] = {"&&", "||"};
+  for (const char *op : ops) {
+    for (const auto &c : operands) {
+      node_t *node =
+          make_binary_of(a,
+                         make_node(c.kind, c.text),
+                         make_node(CLUX_NODE_SYMBOL, op),
+                         make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"));
+      clux_value_t *result = exec_expr_binary(ctx, node);
+      ASSERT_NE(result, nullptr) << op << " " << c.type_name;
+      ASSERT_EQ(clux_type_get_kind(clux_value_get_type(result)),
+                CLUX_TYPE_ERROR)
+          << op << " " << c.type_name
+          << ": expected an error value for non-bool left operand";
+      char expected[64];
+      snprintf(expected,
+               sizeof(expected),
+               "type '%s' does not support operator '%s'",
+               c.type_name,
+               op);
+      EXPECT_STREQ(error_message_of(result), expected)
+          << op << " " << c.type_name;
+      delete_node(&node);
+    }
+  }
+}
+
+/* 场景: &&/|| 求值右操作数时非 bool（true&&非bool / false||非bool，
+   i32 与 str 表驱动）
+   预期: 拒绝 "type 'i32'/'str' does not support operator '&&'/'||'" */
+TEST_F(ExecLiteralTest, LogicalRejectsNonBoolRightOperand) {
+  struct {
+    node_kind_t kind;
+    const char *text;
+    const char *type_name;
+  } operands[] = {
+      {CLUX_NODE_LITERAL_NUMERIC, "5", "i32"},
+      {CLUX_NODE_LITERAL_STRING, "\"s\"", "str"},
+  };
+  struct {
+    const char *op;
+    const char *left_text;
+  } paths[] = {
+      {"&&", "true"},
+      {"||", "false"},
+  };
+  for (const auto &p : paths) {
+    for (const auto &c : operands) {
+      node_t *node =
+          make_binary_of(a,
+                         make_node(CLUX_NODE_LITERAL_BOOLEAN, p.left_text),
+                         make_node(CLUX_NODE_SYMBOL, p.op),
+                         make_node(c.kind, c.text));
+      clux_value_t *result = exec_expr_binary(ctx, node);
+      ASSERT_NE(result, nullptr) << p.op << " " << c.type_name;
+      ASSERT_EQ(clux_type_get_kind(clux_value_get_type(result)),
+                CLUX_TYPE_ERROR)
+          << p.op << " " << c.type_name
+          << ": expected an error value for non-bool right operand";
+      char expected[64];
+      snprintf(expected,
+               sizeof(expected),
+               "type '%s' does not support operator '%s'",
+               c.type_name,
+               p.op);
+      EXPECT_STREQ(error_message_of(result), expected)
+          << p.op << " " << c.type_name;
+      delete_node(&node);
+    }
+  }
+}
+
+/* 场景: &&/|| 操作数求值出错（左值为超长数字；或非短路路径上右值为
+   超长数字）
+   预期: error 优先传播——"numeric literal too long" */
+TEST_F(ExecLiteralTest, LogicalPropagatesOperandError) {
+  /* 左值 error：不求值右值直接返回 */
+  node_t *left_err_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric),
+                     make_node(CLUX_NODE_SYMBOL, "&&"),
+                     make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *left_err_result = exec_expr_binary(ctx, left_err_node);
+  ASSERT_NE(left_err_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(left_err_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(left_err_result), "numeric literal too long");
+  delete_node(&left_err_node);
+
+  /* 右值 error：true && <超长数字> 不短路，右值 error 传播 */
+  node_t *right_err_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                     make_node(CLUX_NODE_SYMBOL, "&&"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+  clux_value_t *right_err_result = exec_expr_binary(ctx, right_err_node);
+  ASSERT_NE(right_err_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(right_err_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(right_err_result), "numeric literal too long");
+  delete_node(&right_err_node);
+}
+
+/* 场景: &&/|| 操作数为 shadow 值（具名 shadow 变量的 identifier 引用）
+   预期: 左/右操作数均拒绝——"shadow value is not allowed in execution" */
+TEST_F(ExecLiteralTest, LogicalRejectsShadowOperands) {
+  const char *kShadowMsg = "shadow value is not allowed in execution";
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, bool_type);
+  ASSERT_NE(shadow, nullptr);
+  clux_value_t *declared = clux_context_declare_value(ctx, shadow, "bsh", NULL);
+  ASSERT_EQ(declared, shadow);
+
+  /* shadow 左操作数 */
+  node_t *left_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "bsh"),
+                     make_node(CLUX_NODE_SYMBOL, "&&"),
+                     make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *left_result = exec_expr_binary(ctx, left_node);
+  ASSERT_NE(left_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(left_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(left_result), kShadowMsg);
+  delete_node(&left_node);
+
+  /* shadow 右操作数：true && shadow 不短路进入右值求值 */
+  node_t *right_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                     make_node(CLUX_NODE_SYMBOL, "&&"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "bsh"));
+  clux_value_t *right_result = exec_expr_binary(ctx, right_node);
+  ASSERT_NE(right_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(right_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(right_result), kShadowMsg);
+  delete_node(&right_node);
+}
+
+/* 场景: 二元形态操作数求值出错（+ 的左/右值为超长数字）
+   预期: 任一操作数 error 优先传播——"numeric literal too long" */
+TEST_F(ExecLiteralTest, BinaryPropagatesOperandError) {
+  /* 左值 error */
+  node_t *left_err_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *left_err_result = exec_expr_binary(ctx, left_err_node);
+  ASSERT_NE(left_err_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(left_err_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(left_err_result), "numeric literal too long");
+  delete_node(&left_err_node);
+
+  /* 右值 error */
+  node_t *right_err_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+  clux_value_t *right_err_result = exec_expr_binary(ctx, right_err_node);
+  ASSERT_NE(right_err_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(right_err_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(right_err_result), "numeric literal too long");
+  delete_node(&right_err_node);
+}
+
+/* 场景: 二元形态操作数为 shadow 值（+ 的左/右为具名 shadow 引用）
+   预期: 均拒绝——"shadow value is not allowed in execution" */
+TEST_F(ExecLiteralTest, BinaryRejectsShadowOperands) {
+  const char *kShadowMsg = "shadow value is not allowed in execution";
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, i32_type);
+  ASSERT_NE(shadow, nullptr);
+  clux_value_t *declared = clux_context_declare_value(ctx, shadow, "nsh", NULL);
+  ASSERT_EQ(declared, shadow);
+
+  node_t *left_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nsh"),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *left_result = exec_expr_binary(ctx, left_node);
+  ASSERT_NE(left_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(left_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(left_result), kShadowMsg);
+  delete_node(&left_node);
+
+  node_t *right_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nsh"));
+  clux_value_t *right_result = exec_expr_binary(ctx, right_node);
+  ASSERT_NE(right_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(right_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(right_result), kShadowMsg);
+  delete_node(&right_node);
+}
+
+/* 场景: 未识别的二元符号（后缀形态与成员访问，本批未实现）
+   预期: 报 "unsupported binary operator '<原文>'"（含 ".&" ".*" ".!" ".?"
+         "." "::" "++"） */
+TEST_F(ExecLiteralTest, BinaryUnsupportedOperatorError) {
+  const char *ops[] = {".&", ".*", ".!", ".?", ".", "::", "++"};
+  for (const char *op : ops) {
+    node_t *node = make_binary_of(a,
+                                  make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
+                                  make_node(CLUX_NODE_SYMBOL, op),
+                                  make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << op;
+    ASSERT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR)
+        << op << ": expected an error value for unknown binary operator";
+    char expected[64];
+    snprintf(
+        expected, sizeof(expected), "unsupported binary operator '%s'", op);
+    EXPECT_STREQ(error_message_of(result), expected) << op;
+    delete_node(&node);
+  }
+}
+
+/* 场景: exec_node 按 CLUX_NODE_EXPR_BINARY 分派到 exec_expr_binary
+   预期: 2 + 3 经 exec_node 分派产出 i32 5 */
+TEST_F(ExecLiteralTest, BinaryDispatchesViaExecNode) {
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "2"),
+                                make_node(CLUX_NODE_SYMBOL, "+"),
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *result = exec_node(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_EQ(read_i32(result), 5);
   delete_node(&node);
 }

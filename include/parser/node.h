@@ -25,7 +25,6 @@ enum _node_kind_t {
   CLUX_NODE_EXPR_ASSIGN,
   CLUX_NODE_EXPR_TERNARY,
   CLUX_NODE_EXPR_BINARY,
-  CLUX_NODE_EXPR_UNARY,
   /* 下标与实例化语法同形（base[expr, ...]），语法阶段无法区分，统一为此类型。 */
   CLUX_NODE_EXPR_SUBSCRIPT,
   /* 切片 base[lo?:hi?]，冒号使其在语法阶段即可区分。 */

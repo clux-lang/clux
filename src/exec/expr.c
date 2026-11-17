@@ -9,6 +9,7 @@
 #include "exec/exec.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
+#include "parser/node_binary.h"
 #include "parser/node_group.h"
 #include "parser/node_ternary.h"
 #include <stdbool.h>
@@ -23,6 +24,144 @@ clux_value_t *exec_expr_group(clux_context_t *ctx, node_t *node) {
         "shadow value is not allowed in execution");
   }
   return value;
+}
+
+/* 操作数求值统一通道：error 优先传播，shadow 拒绝（exec 禁止 shadow）。 */
+static clux_value_t *exec_operand(clux_context_t *ctx, node_t *node) {
+  clux_value_t *value = exec_node(ctx, node);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "shadow value is not allowed in execution");
+  }
+  return value;
+}
+
+/* 二元运算符文本→引擎槽位；逻辑 &&/|| 无槽位由 exec_expr_binary 自管短路。 */
+static const struct {
+  const char *text;
+  clux_binary_op_t op;
+} k_binary_ops[] = {
+    {"+", CLUX_OP_ADD},
+    {"-", CLUX_OP_SUB},
+    {"*", CLUX_OP_MUL},
+    {"/", CLUX_OP_DIV},
+    {"%", CLUX_OP_MOD},
+    {"&", CLUX_OP_AND},
+    {"|", CLUX_OP_OR},
+    {"^", CLUX_OP_XOR},
+    {"<<", CLUX_OP_SHL},
+    {">>", CLUX_OP_SHR},
+    {"==", CLUX_OP_EQ},
+    {"!=", CLUX_OP_NE},
+    {"<", CLUX_OP_LT},
+    {"<=", CLUX_OP_LE},
+    {">", CLUX_OP_GT},
+    {">=", CLUX_OP_GE},
+};
+
+/* 前缀一元运算符文本→引擎槽位。 */
+static const struct {
+  const char *text;
+  clux_prefix_op_t op;
+} k_prefix_ops[] = {
+    {"+", CLUX_OP_PLUS},
+    {"-", CLUX_OP_NEGATIVE},
+    {"~", CLUX_OP_NOT},
+    {"!", CLUX_OP_LNOT},
+};
+
+clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
+  node_t *left_node = binary_node_get_left(node);
+  node_t *symbol_node = binary_node_get_symbol(node);
+  node_t *right_node = binary_node_get_right(node);
+  const location_t *op_loc = node_get_location(symbol_node);
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  /* 前缀一元形态：LEFT 缺失，运算符作用于 RIGHT。
+     后缀形态与成员访问留待后续批次，落入 unsupported。 */
+  if (!left_node) {
+    for (size_t i = 0; i < sizeof(k_prefix_ops) / sizeof(k_prefix_ops[0]);
+         i++) {
+      if (!location_is(op_loc, k_prefix_ops[i].text)) {
+        continue;
+      }
+      clux_value_t *operand = exec_operand(ctx, right_node);
+      if (clux_value_is_error(operand)) {
+        return operand;
+      }
+      return clux_context_prefix(ctx, k_prefix_ops[i].op, operand, op_loc);
+    }
+    char *op = location_get(op_loc, allocator);
+    clux_value_t *err = clux_context_create_error_message(
+        ctx, op_loc, "unsupported unary operator '%s'", op);
+    allocator_free(allocator, (void **)&op);
+    return err;
+  }
+  /* && / || 短路：左值已定结果（&& 为 false / || 为 true）时直接返回左值，
+     否则求值右值并要求 bool；两侧类型均须为 bool。 */
+  bool is_and = location_is(op_loc, "&&");
+  bool is_or = location_is(op_loc, "||");
+  if (is_and || is_or) {
+    const char *op_name = is_and ? "&&" : "||";
+    clux_value_t *left = exec_operand(ctx, left_node);
+    if (clux_value_is_error(left)) {
+      return left;
+    }
+    clux_type_t *ltype = clux_value_get_type(left);
+    if (clux_type_get_kind(ltype) != CLUX_TYPE_BOOL) {
+      const char *ltype_name = clux_type_get_name(ltype);
+      return clux_context_create_error_message(
+          ctx,
+          op_loc,
+          "type '%s' does not support operator '%s'",
+          ltype_name ? ltype_name : "<unknown>",
+          op_name);
+    }
+    /* && 左值为 false 已定结果短路；|| 左值为 true 已定结果短路 */
+    bool lval = *(bool *)clux_value_get_raw(left, 0);
+    if (is_and ? !lval : lval) {
+      return left;
+    }
+    clux_value_t *right = exec_operand(ctx, right_node);
+    if (clux_value_is_error(right)) {
+      return right;
+    }
+    clux_type_t *rtype = clux_value_get_type(right);
+    if (clux_type_get_kind(rtype) != CLUX_TYPE_BOOL) {
+      const char *rtype_name = clux_type_get_name(rtype);
+      return clux_context_create_error_message(
+          ctx,
+          op_loc,
+          "type '%s' does not support operator '%s'",
+          rtype_name ? rtype_name : "<unknown>",
+          op_name);
+    }
+    return right;
+  }
+  /* 二元形态：文本映射引擎槽位后交 clux_context_binary 分派。 */
+  for (size_t i = 0; i < sizeof(k_binary_ops) / sizeof(k_binary_ops[0]); i++) {
+    if (!location_is(op_loc, k_binary_ops[i].text)) {
+      continue;
+    }
+    clux_value_t *left = exec_operand(ctx, left_node);
+    if (clux_value_is_error(left)) {
+      return left;
+    }
+    clux_value_t *right = exec_operand(ctx, right_node);
+    if (clux_value_is_error(right)) {
+      return right;
+    }
+    return clux_context_binary(ctx, k_binary_ops[i].op, left, right, op_loc);
+  }
+  char *op = location_get(op_loc, allocator);
+  clux_value_t *err = clux_context_create_error_message(
+      ctx, op_loc, "unsupported binary operator '%s'", op);
+  allocator_free(allocator, (void **)&op);
+  return err;
 }
 
 /* &&= / ||= 短路复合赋值：左值已是结果时跳过右值求值直接返回目标；

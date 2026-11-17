@@ -1393,7 +1393,6 @@ void expr_to_json(json_writer_t *writer, node_t *node) {
     ternary_node_to_json(writer, node);
     break;
   case CLUX_NODE_EXPR_BINARY:
-  case CLUX_NODE_EXPR_UNARY:
     binary_node_to_json(writer, node);
     break;
   case CLUX_NODE_EXPR_SUBSCRIPT:
