@@ -2225,3 +2225,164 @@ TEST_F(ExecLiteralTest, AssignEqualsThenCompoundAfterTdzClearSucceeds) {
       << "scope variable must reflect the compound write";
   delete_node(&inc);
 }
+
+/* ---- exec_stmt_var：var x: T = undefined → TDZ 变量声明 ---- */
+
+/* 持久 undefined 字面量文本（节点 location 与 error location 断言共用）。 */
+static const char kUndefinedText[] = "undefined";
+
+/* 场景: var tu: i32 = undefined（右值是 undefined 字面量 + 类型标注）
+   预期: 走 TDZ 分支跳过初值求值，返回 is_tdz=true 的 i32 值（真实存储、
+         零初始化），scope 按名可查到同一指针 */
+TEST_F(ExecLiteralTest, VarUndefinedCreatesTdzVariable) {
+  node_t *node = make_stmt_var("tu",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               "i32",
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_TRUE(clux_value_is_tdz(result))
+      << "undefined initializer must produce a TDZ-marked variable";
+  EXPECT_NE(clux_value_get_data(result), (ptr_handle_t)0)
+      << "TDZ variable must own real (non-shadow) storage";
+  EXPECT_EQ(read_i32(result), 0) << "TDZ storage is zero-initialized";
+  EXPECT_EQ(clux_context_lookup(ctx, "tu", NULL), result);
+  delete_node(&node);
+}
+
+/* 场景: TDZ 变量生命周期（var tu: i32 = undefined 后读取/赋值/再读取）
+   预期: identifier 读取被拒（"use of a value before initialization"）；
+         首次 "=" 赋值成功并清除 TDZ；随后 identifier 读取放行且值为 5 */
+TEST_F(ExecLiteralTest, VarUndefinedTdzLifecycleAssignThenRead) {
+  node_t *decl = make_stmt_var("tu",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               "i32",
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  clux_value_t *declared = exec_stmt_var(ctx, decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_TRUE(clux_value_is_tdz(declared));
+  delete_node(&decl);
+
+  /* TDZ 期间 identifier 读取被拒 */
+  node_t *read = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tu");
+  clux_value_t *early = exec_operand(ctx, read);
+  ASSERT_NE(early, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(early)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(early), "use of a value before initialization");
+
+  /* 首次 "=" 赋值写入并清除 TDZ */
+  node_t *assign = make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "tu", "5");
+  clux_value_t *assigned = exec_expr_assign(ctx, assign);
+  ASSERT_NE(assigned, nullptr);
+  EXPECT_EQ(assigned, declared)
+      << "first assignment must return the declared target";
+  EXPECT_EQ(read_i32(declared), 5);
+  EXPECT_FALSE(clux_value_is_tdz(declared));
+  delete_node(&assign);
+
+  /* TDZ 清除后读取放行且值正确 */
+  clux_value_t *after = exec_operand(ctx, read);
+  EXPECT_EQ(after, declared);
+  EXPECT_EQ(read_i32(after), 5);
+  delete_node(&read);
+}
+
+/* 场景: var 无类型标注 + undefined 右值（var nu = undefined）
+   预期: 报 "undefined initializer requires a type annotation"，
+         error 位置为 value 节点（begin.offset 指向 undefined 文本） */
+TEST_F(ExecLiteralTest, VarUndefinedWithoutAnnotationErrorsAtValueNode) {
+  node_t *node = make_stmt_var("nu",
+                               CLUX_NODE_SYMBOL /* type omitted */,
+                               NULL,
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "undefined initializer requires a type annotation");
+  clux_error_t *err =
+      *(clux_error_t **)ptr_to_raw(clux_value_get_data(result), 0);
+  ASSERT_NE(err, nullptr);
+  EXPECT_EQ(error_get_location(err)->begin.offset, kUndefinedText)
+      << "error location must point at the undefined value node";
+  delete_node(&node);
+}
+
+/* 场景: 类型标注不是 type value（var nu: <普通 i32 值> = undefined）
+   预期: 仍报 "expected type expression in var declaration" */
+TEST_F(ExecLiteralTest, VarUndefinedAnnotationNotTypeValueErrors) {
+  clux_value_t *plain = clux_context_create_i32(ctx, 3, "plain_i32", NULL);
+  ASSERT_NE(plain, nullptr);
+  node_t *node = make_stmt_var("nu",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               "plain_i32",
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected type expression in var declaration");
+  delete_node(&node);
+}
+
+/* 场景: 类型标注求值出错（kTooLongNumeric 探针作标注）
+   预期: 标注 error 优先传播——"numeric literal too long" */
+TEST_F(ExecLiteralTest, VarUndefinedAnnotationErrorPropagates) {
+  node_t *node = make_stmt_var("ne",
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               kTooLongNumeric,
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "numeric literal too long");
+  delete_node(&node);
+}
+
+/* 场景: 重复声明 TDZ 变量（两次 var td: i32 = undefined）
+   预期: 第二次报 "duplicate declaration 'td'"，首个 TDZ 变量保持原状 */
+TEST_F(ExecLiteralTest, VarUndefinedDuplicateDeclarationErrors) {
+  node_t *first = make_stmt_var("td",
+                                CLUX_NODE_LITERAL_IDENTIFIER,
+                                "i32",
+                                CLUX_NODE_LITERAL_UNDEFINED,
+                                kUndefinedText);
+  clux_value_t *first_result = exec_stmt_var(ctx, first);
+  ASSERT_NE(first_result, nullptr);
+  ASSERT_TRUE(clux_value_is_tdz(first_result));
+  delete_node(&first);
+
+  node_t *second = make_stmt_var("td",
+                                 CLUX_NODE_LITERAL_IDENTIFIER,
+                                 "i32",
+                                 CLUX_NODE_LITERAL_UNDEFINED,
+                                 kUndefinedText);
+  clux_value_t *second_result = exec_stmt_var(ctx, second);
+  ASSERT_NE(second_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(second_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(second_result), "duplicate declaration 'td'");
+  EXPECT_TRUE(clux_value_is_tdz(first_result))
+      << "duplicate must not clear the first variable's TDZ flag";
+  delete_node(&second);
+}
+
+/* 场景: 单独执行 undefined 字面量节点（不经 var 声明包装）
+   预期: exec 分派表中该 kind 为 NULL 槽，报
+         "unsupported node kind: LITERAL_UNDEFINED"（预期行为回归保护） */
+TEST_F(ExecLiteralTest, StandaloneUndefinedLiteralUnsupported) {
+  node_t *node = make_node(CLUX_NODE_LITERAL_UNDEFINED, kUndefinedText);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value),
+               "unsupported node kind: LITERAL_UNDEFINED");
+  delete_node(&node);
+}

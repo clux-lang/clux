@@ -5308,3 +5308,104 @@ TEST(EngineTest, AssignTdzNonConstTargetClearsFlag) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* ---- create_tdz_value：TDZ 变量构造 ---- */
+
+/* 场景: create_tdz_value 基本属性（i32 类型）
+   预期: 值创建成功且 is_tdz=true、类型正确、data 非 0（真实存储）、
+         存储清零（确定性）、scope 可按名 lookup 到同一指针 */
+TEST(EngineTest, CreateTdzValueBasics) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *value =
+      clux_context_create_tdz_value(ctx, i32_type, "tdz_new", NULL);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_tdz(value)) << "TDZ creation must set the flag";
+  EXPECT_EQ(clux_value_get_type(value), i32_type);
+  EXPECT_NE(clux_value_get_data(value), (ptr_handle_t)0)
+      << "TDZ value must own real (non-shadow) storage";
+  EXPECT_EQ(read_i32(value), 0) << "TDZ storage is zero-initialized";
+  EXPECT_EQ(clux_context_lookup(ctx, "tdz_new", NULL), value)
+      << "TDZ value must be declared into the current scope";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: type 为 NULL
+   预期: 返回 error 值，消息精确为 "TDZ value creation requires a type" */
+TEST(EngineTest, CreateTdzValueRequiresType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *value =
+      clux_context_create_tdz_value(ctx, NULL, "tdz_notype", NULL);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value), "TDZ value creation requires a type");
+  /* 错误值不标 TDZ */
+  EXPECT_FALSE(clux_value_is_tdz(value));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 同名冲突（先创建具名 i32 值，再以同名 create_tdz_value）
+   预期: 第二次返回 "duplicate declaration '<name>'" 错误值且不标 TDZ；
+         原值不受影响（仍非 TDZ、可正常消费） */
+TEST(EngineTest, CreateTdzValueDuplicateNameErrorsUnmarked) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *original = clux_context_create_i32(ctx, 7, "tdz_dup", NULL);
+  ASSERT_NE(original, nullptr);
+  clux_value_t *conflict = clux_context_create_tdz_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), "tdz_dup", NULL);
+  ASSERT_NE(conflict, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(conflict)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(conflict), "duplicate declaration 'tdz_dup'");
+  EXPECT_FALSE(clux_value_is_tdz(conflict))
+      << "error value returned on conflict must not be TDZ-marked";
+
+  /* 原值未被标记、未被覆盖 */
+  EXPECT_FALSE(clux_value_is_tdz(original));
+  EXPECT_EQ(read_i32(original), 7);
+  EXPECT_EQ(clux_context_consume_value(ctx, original, NULL), original);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: TDZ 生命周期闭环（create → consume 拒绝 → assign 首赋值 → 消费放行）
+   预期: consume 报 "use of a value before initialization"；首次 assign 写入
+         成功、TDZ 清除；随后 consume 放行且读到写入值 */
+TEST(EngineTest, CreateTdzValueLifecycleConsumeAssignRead) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *value = clux_context_create_tdz_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), "tdz_cycle", NULL);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_tdz(value));
+
+  clux_value_t *early = clux_context_consume_value(ctx, value, NULL);
+  ASSERT_NE(early, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(early)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(early), "use of a value before initialization");
+
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  clux_value_t *assigned = clux_context_assign(ctx, value, five, NULL);
+  EXPECT_EQ(assigned, value)
+      << "first assignment must return the target itself";
+  EXPECT_EQ(read_i32(value), 5);
+  EXPECT_FALSE(clux_value_is_tdz(value))
+      << "successful first assignment must clear the TDZ flag";
+  EXPECT_EQ(clux_context_consume_value(ctx, value, NULL), value)
+      << "after first assignment the value becomes consumable";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

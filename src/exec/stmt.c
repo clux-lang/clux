@@ -15,9 +15,23 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
   node_t *node_type = stmt_var_node_get_type(node);
   node_t *node_name = stmt_var_node_get_name(node);
   node_t *node_value = stmt_var_node_get_value(node);
-  clux_value_t *value = exec_operand(ctx, node_value);
-  if (clux_value_is_error(value)) {
-    return value;
+  /* var x: T = undefined：右值是 undefined 字面量时创建 TDZ 变量——
+     分配 T 的未初始化存储并标记（首赋值清除、消费拒绝）。
+     类型标注必填：无标注无法确定存储类型。 */
+  bool is_undefined =
+      node_value && node_get_kind(node_value) == CLUX_NODE_LITERAL_UNDEFINED;
+  if (is_undefined && !node_type) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node_value),
+        "undefined initializer requires a type annotation");
+  }
+  clux_value_t *value = NULL;
+  if (!is_undefined) {
+    value = exec_operand(ctx, node_value);
+    if (clux_value_is_error(value)) {
+      return value;
+    }
   }
   // TODO: 待call完成后实现装饰器
   /* 类型标注可省略（var x = 10 按初值自身类型落地）。
@@ -38,15 +52,22 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
     /* shadow 已在上方拒绝，raw 必有真实存储 */
     type = *(clux_type_t **)clux_value_get_raw(vtype, 0);
   }
-  const location_t *loc = node_get_location(node_value);
-  if (type) {
-    value = clux_context_safe_cast(ctx, value, type, loc);
-    if (clux_value_is_error(value)) {
-      return value;
-    }
-  }
   char *name = location_get(node_get_location(node_name), allocator);
-  value = clux_context_declare_value(ctx, value, name, loc);
+  if (is_undefined) {
+    /* 类型标注已由上方的必填检查保证存在 */
+    value = clux_context_create_tdz_value(
+        ctx, type, name, node_get_location(node_value));
+  } else {
+    const location_t *loc = node_get_location(node_value);
+    if (type) {
+      value = clux_context_safe_cast(ctx, value, type, loc);
+      if (clux_value_is_error(value)) {
+        allocator_free(allocator, (void **)&name);
+        return value;
+      }
+    }
+    value = clux_context_declare_value(ctx, value, name, loc);
+  }
   allocator_free(allocator, (void **)&name);
   return value;
 }

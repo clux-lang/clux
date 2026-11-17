@@ -1471,6 +1471,28 @@ clux_value_t *clux_context_consume_value(clux_context_t *self,
   }
   return value;
 }
+clux_value_t *clux_context_create_tdz_value(clux_context_t *self,
+                                            clux_type_t *type,
+                                            const char *name,
+                                            const location_t *loc) {
+  if (!type) {
+    return clux_context_create_error_message(
+        self, loc, "TDZ value creation requires a type");
+  }
+  size_t size = clux_type_get_size(type);
+  /* 存储清零保证确定性：TDZ 期间不读取，首赋值整体覆写。 */
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  void *raw = ptr_to_raw(data, 0);
+  if (raw) {
+    memset(raw, 0, size);
+  }
+  clux_value_t *value = clux_context_create_value(self, type, data, name, loc);
+  /* 同名冲突时 create_value 已删除新值并返回 error，不标 TDZ。 */
+  if (clux_type_get_kind(clux_value_get_type(value)) != CLUX_TYPE_ERROR) {
+    clux_value_set_tdz(value, true);
+  }
+  return value;
+}
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
                                                 const location_t *loc,
                                                 const char *fmt,

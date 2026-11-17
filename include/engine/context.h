@@ -43,6 +43,13 @@ clux_value_t *clux_context_lookup(clux_context_t *self,
 clux_value_t *clux_context_consume_value(clux_context_t *self,
                                          clux_value_t *value,
                                          const location_t *loc);
+/* TDZ 变量声明（var x: T = undefined）：分配 T 的未初始化存储（清零）
+   并标记 TDZ。首赋值经 clux_context_assign 清除标记（绕过 mutable
+   检查），首赋值前消费报错。同名冲突返回 duplicate declaration 错误。 */
+clux_value_t *clux_context_create_tdz_value(clux_context_t *self,
+                                            clux_type_t *type,
+                                            const char *name,
+                                            const location_t *loc);
 clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error);
 clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
