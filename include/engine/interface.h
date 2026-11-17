@@ -118,6 +118,9 @@ typedef clux_value_t *(*clux_vt_invoke_fn_t)(clux_context_t *,
                                              size_t,
                                              clux_value_t *[]);
 typedef clux_value_t *(*clux_vt_get_len_fn_t)(clux_context_t *, clux_value_t *);
+/* slice 是数组/切片的切片原语（a[lo:hi]）：lo/hi 为 NULL 表示开放端点
+   （缺省 0 / 长度），返回元素类型的切片值（[]T 胖指针，借用 base 内存）。
+   只有数组与切片绑定该槽位，其余类型由 context 兜底报不支持。 */
 typedef clux_value_t *(*clux_vt_slice_fn_t)(clux_context_t *,
                                             clux_value_t *,
                                             clux_value_t *,
@@ -161,6 +164,7 @@ struct _clux_vtable_t {
   clux_vt_cast_fn_t cast;
   clux_vt_deref_fn_t deref;
   clux_vt_index_fn_t index;
+  clux_vt_slice_fn_t slice;
   clux_vt_is_none_fn_t is_none;
   clux_vt_take_fn_t take;
   clux_vt_field_fn_t field;

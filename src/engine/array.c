@@ -67,6 +67,89 @@ array_index(clux_context_t *ctx, clux_value_t *array, clux_value_t *index) {
   return clux_context_create_value(ctx, base, view, NULL, NULL);
 }
 
+/* 切片 a[lo:hi]：lo/hi 为 NULL 表示开放端点（缺省 0 / 数组长度）。
+   借用数组内联块生成元素类型的切片值（胖指针，不拥有内存）。
+   负数、越界、lo > hi 报 error；shadow 操作数产出切片类型的 shadow。 */
+static clux_value_t *array_slice(clux_context_t *ctx,
+                                 clux_value_t *array,
+                                 clux_value_t *lo,
+                                 clux_value_t *hi) {
+  clux_array_meta_t *meta = array_meta(clux_value_get_type(array));
+  clux_type_t *base = meta->base;
+  clux_type_t *slice_type = clux_context_get_slice_type(ctx, base);
+  if (clux_value_is_shadow(array) || (lo && clux_value_is_shadow(lo)) ||
+      (hi && clux_value_is_shadow(hi))) {
+    return clux_context_create_shadow_value(ctx, slice_type);
+  }
+  int64_t start = 0;
+  int64_t end = (int64_t)meta->len;
+  if (lo) {
+    clux_value_t *err = clux_context_index_to_i64(ctx, lo, &start);
+    if (err) {
+      return err;
+    }
+    if (start < 0) {
+      return clux_context_create_error_message(
+          ctx, NULL, "slice index must not be negative");
+    }
+    if ((uint64_t)start > meta->len) {
+      return clux_context_create_error_message(ctx,
+                                               NULL,
+                                               "slice index %lld is out of "
+                                               "bounds for array of length %zu",
+                                               (long long)start,
+                                               meta->len);
+    }
+  }
+  if (hi) {
+    clux_value_t *err = clux_context_index_to_i64(ctx, hi, &end);
+    if (err) {
+      return err;
+    }
+    if (end < 0) {
+      return clux_context_create_error_message(
+          ctx, NULL, "slice index must not be negative");
+    }
+    if ((uint64_t)end > meta->len) {
+      return clux_context_create_error_message(ctx,
+                                               NULL,
+                                               "slice index %lld is out of "
+                                               "bounds for array of length %zu",
+                                               (long long)end,
+                                               meta->len);
+    }
+  }
+  if (start > end) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "slice start %lld exceeds end %lld",
+        (long long)start,
+        (long long)end);
+  }
+  size_t elem_size = clux_type_get_size(base);
+  size_t new_len = (size_t)(end - start);
+  ptr_handle_t target = clux_value_get_data(array);
+  if (!ptr_is_valid(target)) {
+    return clux_context_create_error_message(
+        ctx, NULL, "cannot slice an invalid array");
+  }
+  if (new_len > 0 && ptr_get_size(target) < end * elem_size) {
+    return clux_context_create_error_message(
+        ctx, NULL, "cannot slice an invalid array");
+  }
+  ptr_handle_t new_ptr = target;
+  if (start > 0 && (size_t)start < meta->len) {
+    new_ptr = ptr_offset(target, (size_t)start * elem_size);
+    if (!new_ptr) {
+      return clux_context_create_error_message(
+          ctx, NULL, "cannot slice an invalid array");
+    }
+  }
+  return clux_context_create_slice(
+      ctx, slice_type, new_ptr, new_len, NULL, NULL);
+}
+
 static clux_value_t *array_compare(clux_context_t *ctx,
                                    clux_value_t *left,
                                    clux_value_t *right,
@@ -146,6 +229,7 @@ static clux_vtable_t g_array_vtable = {
     .eq = array_eq,
     .ne = array_ne,
     .index = array_index,
+    .slice = array_slice,
     .type_equal = array_type_equal,
     .type_extends = array_type_extends,
 };

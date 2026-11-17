@@ -87,6 +87,89 @@ slice_index(clux_context_t *ctx, clux_value_t *slice, clux_value_t *index) {
   return clux_context_create_value(ctx, base, view, NULL, NULL);
 }
 
+/* 再切片 a[lo:hi]：lo/hi 为 NULL 表示开放端点（缺省 0 / 存储长度）。
+   以存储的 {ptr, len} 为界偏移出新的胖指针（不拥有内存）。
+   负数、越界、lo > hi 报 error；shadow 操作数产出切片类型的 shadow。 */
+static clux_value_t *slice_slice(clux_context_t *ctx,
+                                 clux_value_t *slice,
+                                 clux_value_t *lo,
+                                 clux_value_t *hi) {
+  clux_type_t *base = slice_meta(clux_value_get_type(slice))->base;
+  clux_type_t *slice_type = clux_context_get_slice_type(ctx, base);
+  if (clux_value_is_shadow(slice) || (lo && clux_value_is_shadow(lo)) ||
+      (hi && clux_value_is_shadow(hi))) {
+    return clux_context_create_shadow_value(ctx, slice_type);
+  }
+  ptr_handle_t target = 0;
+  size_t len = 0;
+  if (!slice_read(slice, &target, &len) || !ptr_is_valid(target)) {
+    return clux_context_create_error_message(
+        ctx, NULL, "cannot slice an invalid slice");
+  }
+  int64_t start = 0;
+  int64_t end = (int64_t)len;
+  if (lo) {
+    clux_value_t *err = clux_context_index_to_i64(ctx, lo, &start);
+    if (err) {
+      return err;
+    }
+    if (start < 0) {
+      return clux_context_create_error_message(
+          ctx, NULL, "slice index must not be negative");
+    }
+    if ((uint64_t)start > len) {
+      return clux_context_create_error_message(ctx,
+                                               NULL,
+                                               "slice index %lld is out of "
+                                               "bounds for slice of length %zu",
+                                               (long long)start,
+                                               len);
+    }
+  }
+  if (hi) {
+    clux_value_t *err = clux_context_index_to_i64(ctx, hi, &end);
+    if (err) {
+      return err;
+    }
+    if (end < 0) {
+      return clux_context_create_error_message(
+          ctx, NULL, "slice index must not be negative");
+    }
+    if ((uint64_t)end > len) {
+      return clux_context_create_error_message(ctx,
+                                               NULL,
+                                               "slice index %lld is out of "
+                                               "bounds for slice of length %zu",
+                                               (long long)end,
+                                               len);
+    }
+  }
+  if (start > end) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "slice start %lld exceeds end %lld",
+        (long long)start,
+        (long long)end);
+  }
+  size_t elem_size = clux_type_get_size(base);
+  size_t new_len = (size_t)(end - start);
+  if (new_len > 0 && ptr_get_size(target) < end * elem_size) {
+    return clux_context_create_error_message(
+        ctx, NULL, "cannot slice an invalid slice");
+  }
+  ptr_handle_t new_ptr = target;
+  if (start > 0 && (size_t)start < len) {
+    new_ptr = ptr_offset(target, (size_t)start * elem_size);
+    if (!new_ptr) {
+      return clux_context_create_error_message(
+          ctx, NULL, "cannot slice an invalid slice");
+    }
+  }
+  return clux_context_create_slice(
+      ctx, slice_type, new_ptr, new_len, NULL, NULL);
+}
+
 static clux_value_t *slice_compare(clux_context_t *ctx,
                                    clux_value_t *left,
                                    clux_value_t *right,
@@ -161,6 +244,7 @@ static clux_vtable_t g_slice_vtable = {
     .eq = slice_eq,
     .ne = slice_ne,
     .index = slice_index,
+    .slice = slice_slice,
     .type_equal = slice_type_equal,
     .type_extends = slice_type_extends,
 };

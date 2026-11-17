@@ -24,7 +24,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_EXPR_TERNARY*/ exec_expr_ternary,
     /*CLUX_NODE_EXPR_BINARY*/ exec_expr_binary,
     /*CLUX_NODE_EXPR_SUBSCRIPT*/ exec_expr_subscript,
-    /*CLUX_NODE_EXPR_SLICE*/ NULL,
+    /*CLUX_NODE_EXPR_SLICE*/ exec_expr_slice,
     /*CLUX_NODE_EXPR_REST*/ NULL,
     /*CLUX_NODE_EXPR_CALL*/ NULL,
     /*CLUX_NODE_EXPR_BUILTIN*/ NULL,

@@ -21,6 +21,7 @@
 #include "parser/node_binary.h"
 #include "parser/node_group.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_slice.h"
 #include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
 #include <cstdio>
@@ -202,6 +203,27 @@ protected:
     if (arg) {
       subscript_node_add_arg(node, arg);
     }
+    return node;
+  }
+
+  /* 合成完整切片节点 base[lo:hi]：location 覆盖 text 区间（错误值定位
+     用），lo/hi 为 NULL 表示省略该端（开放端点），delete 根节点时递归
+     释放全部子节点。 */
+  node_t *
+  make_slice_of(const char *text, node_t *base, node_t *lo, node_t *hi) {
+    node_t *node = create_slice_node(a);
+    location_t loc;
+    loc.filename = "test.clux";
+    loc.begin.offset = text;
+    loc.begin.column = 1;
+    loc.begin.line = 1;
+    loc.end.offset = text + strlen(text);
+    loc.end.column = 1;
+    loc.end.line = 1;
+    node_set_location(node, &loc);
+    slice_node_set_base(node, base);
+    slice_node_set_lo(node, lo);
+    slice_node_set_hi(node, hi);
     return node;
   }
 
@@ -734,14 +756,14 @@ TEST_F(ExecLiteralTest, ExecNodeDispatchesRegisteredKinds) {
   delete_node(&boolean);
 }
 
-/* 场景: 未注册 kind（EXPR_SLICE 无回调）
-   预期: 返回 error 值，消息 "unsupported node kind: EXPR_SLICE" */
+/* 场景: 未注册 kind（EXPR_REST 无回调）
+   预期: 返回 error 值，消息 "unsupported node kind: EXPR_REST" */
 TEST_F(ExecLiteralTest, ExecNodeUnsupportedKindError) {
-  node_t *node = make_node(CLUX_NODE_EXPR_SLICE, "a[1:2]");
+  node_t *node = make_node(CLUX_NODE_EXPR_REST, "a[1:2]");
   clux_value_t *value = exec_node(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: EXPR_SLICE");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: EXPR_REST");
   delete_node(&node);
 }
 
@@ -785,7 +807,7 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_LITERAL_IDENTIFIER || kind == CLUX_NODE_EXPR_GROUP ||
         kind == CLUX_NODE_EXPR_ASSIGN || kind == CLUX_NODE_EXPR_TERNARY ||
         kind == CLUX_NODE_EXPR_BINARY || kind == CLUX_NODE_EXPR_SUBSCRIPT ||
-        kind == CLUX_NODE_STMT_VAR;
+        kind == CLUX_NODE_EXPR_SLICE || kind == CLUX_NODE_STMT_VAR;
     if (synthetic_skip) {
       continue;
     }
@@ -2660,4 +2682,189 @@ TEST_F(ExecLiteralTest, SubscriptRejectsTdzBaseAndIndex) {
   EXPECT_STREQ(error_message_of(idx_value),
                "use of a value before initialization");
   delete_node(&idx_node);
+}
+
+/* ---- exec_expr_slice ---- */
+
+/* 场景: AST 数组切片 a[1:3]（base=identifier lo=numeral hi=numeral）
+   预期: 产出 []i32 切片值，len 为 2，s[0]==11、s[1]==12（ptr 偏移正确） */
+TEST_F(ExecLiteralTest, SliceReadsArrayRange) {
+  ASSERT_NE(make_i32_array("arr_sl", 4), nullptr);
+
+  node_t *node =
+      make_slice_of("arr_sl[1:3]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_sl"),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *s = exec_expr_slice(ctx, node);
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(clux_value_get_type(s),
+            clux_context_get_slice_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32)));
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, s, NULL)), 2u);
+  EXPECT_EQ(read_i32(clux_context_index(
+                ctx, s, clux_context_create_usize(ctx, 0, NULL, NULL), NULL)),
+            11);
+  EXPECT_EQ(read_i32(clux_context_index(
+                ctx, s, clux_context_create_usize(ctx, 1, NULL, NULL), NULL)),
+            12);
+  delete_node(&node);
+}
+
+/* 场景: 开放端点 AST（lo 子节点 NULL 的 a[:2]、hi NULL 的 a[1:]、
+         双 NULL 的 a[:]）
+   预期: exec 走 NULL 端点 → engine 缺省 0 / 数组长度，读回首末元素值 */
+TEST_F(ExecLiteralTest, SliceOpenEndpoints) {
+  ASSERT_NE(make_i32_array("arr_op", 4), nullptr);
+
+  node_t *front =
+      make_slice_of("arr_op[:2]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_op"),
+                    nullptr,
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *front_value = exec_expr_slice(ctx, front);
+  ASSERT_NE(front_value, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, front_value, NULL)), 2u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(ctx,
+                                  front_value,
+                                  clux_context_create_usize(ctx, 1, NULL, NULL),
+                                  NULL)),
+      11);
+  delete_node(&front);
+
+  node_t *tail =
+      make_slice_of("arr_op[1:]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_op"),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
+                    nullptr);
+  clux_value_t *tail_value = exec_expr_slice(ctx, tail);
+  ASSERT_NE(tail_value, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, tail_value, NULL)), 3u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(ctx,
+                                  tail_value,
+                                  clux_context_create_usize(ctx, 2, NULL, NULL),
+                                  NULL)),
+      13);
+  delete_node(&tail);
+
+  node_t *whole =
+      make_slice_of("arr_op[:]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_op"),
+                    nullptr,
+                    nullptr);
+  clux_value_t *whole_value = exec_expr_slice(ctx, whole);
+  ASSERT_NE(whole_value, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, whole_value, NULL)), 4u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(ctx,
+                                  whole_value,
+                                  clux_context_create_usize(ctx, 0, NULL, NULL),
+                                  NULL)),
+      10);
+  delete_node(&whole);
+}
+
+/* 场景: base 子节点求值为 error（未注册 kind STMT_BLOCK）
+   预期: error 透传——"unsupported node kind: STMT_BLOCK" */
+TEST_F(ExecLiteralTest, SlicePropagatesBaseError) {
+  node_t *node = make_slice_of("bad[1:3]",
+                               make_node(CLUX_NODE_STMT_BLOCK, "..."),
+                               make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
+                               make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *value = exec_expr_slice(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_BLOCK");
+  delete_node(&node);
+}
+
+/* 场景: lo/hi 子节点求值为 error（未注册 kind STMT_BLOCK），base 正常
+   预期: 端点 error 透传——"unsupported node kind: STMT_BLOCK"。
+         base 成功在先，lo 先于 hi 求值 */
+TEST_F(ExecLiteralTest, SlicePropagatesEndpointErrors) {
+  ASSERT_NE(make_i32_array("arr_pe", 4), nullptr);
+
+  node_t *lo_node =
+      make_slice_of("arr_pe[bad:3]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_pe"),
+                    make_node(CLUX_NODE_STMT_BLOCK, "..."),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *lo_value = exec_expr_slice(ctx, lo_node);
+  ASSERT_NE(lo_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(lo_value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(lo_value), "unsupported node kind: STMT_BLOCK");
+  delete_node(&lo_node);
+
+  node_t *hi_node =
+      make_slice_of("arr_pe[1:bad]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_pe"),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
+                    make_node(CLUX_NODE_STMT_BLOCK, "..."));
+  clux_value_t *hi_value = exec_expr_slice(ctx, hi_node);
+  ASSERT_NE(hi_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(hi_value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(hi_value), "unsupported node kind: STMT_BLOCK");
+  delete_node(&hi_node);
+}
+
+/* 场景: TDZ 拒绝——TDZ 数组作 base（经 exec_operand 消费通道）
+   预期: 报 "use of a value before initialization" */
+TEST_F(ExecLiteralTest, SliceRejectsTdzBase) {
+  clux_value_t *tdz_arr = make_i32_array("tz_sarr", 2);
+  ASSERT_NE(tdz_arr, nullptr);
+  clux_value_set_tdz(tdz_arr, true);
+
+  node_t *node =
+      make_slice_of("tz_sarr[:]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_sarr"),
+                    nullptr,
+                    nullptr);
+  clux_value_t *value = exec_expr_slice(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value), "use of a value before initialization");
+  delete_node(&node);
+}
+
+/* 场景: engine 层范围错误在 exec 层的传播（lo>hi / 越界 / 负数）
+   预期: 消息与 engine 精确一致 */
+TEST_F(ExecLiteralTest, SlicePropagatesRangeErrors) {
+  ASSERT_NE(make_i32_array("arr_re", 4), nullptr);
+
+  node_t *reversed =
+      make_slice_of("arr_re[3:1]",
+                    make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_re"),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "3"),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *reversed_value = exec_expr_slice(ctx, reversed);
+  ASSERT_NE(reversed_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(reversed_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(reversed_value), "slice start 3 exceeds end 1");
+  delete_node(&reversed);
+
+  node_t *oob = make_slice_of("arr_re[5:]",
+                              make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_re"),
+                              make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
+                              nullptr);
+  clux_value_t *oob_value = exec_expr_slice(ctx, oob);
+  ASSERT_NE(oob_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(oob_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(oob_value),
+               "slice index 5 is out of bounds for array of length 4");
+  delete_node(&oob);
+
+  node_t *neg = make_slice_of("arr_re[-1:]",
+                              make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_re"),
+                              make_node(CLUX_NODE_LITERAL_NUMERIC, "-1"),
+                              nullptr);
+  clux_value_t *neg_value = exec_expr_slice(ctx, neg);
+  ASSERT_NE(neg_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(neg_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(neg_value), "slice index must not be negative");
+  delete_node(&neg);
 }

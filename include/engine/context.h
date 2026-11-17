@@ -338,6 +338,14 @@ clux_value_t *clux_context_index(clux_context_t *self,
                                  clux_value_t *aggregate,
                                  clux_value_t *index,
                                  const location_t *loc);
+/* 切片取段 base[lo?:hi?]：lo/hi 为 NULL 表示开放端点（缺省 0 / 长度）。
+   返回元素类型的切片值（[]T 胖指针，借用 base 内存）；负数、越界、
+   lo > hi 报 error，任一操作数为 shadow 产出切片类型的 shadow。 */
+clux_value_t *clux_context_slice(clux_context_t *self,
+                                 clux_value_t *aggregate,
+                                 clux_value_t *lo,
+                                 clux_value_t *hi,
+                                 const location_t *loc);
 /* 下标值归一化为 int64：仅做整数类校验（负数与越界由调用方判定）。
    成功返回 NULL 并写入 *out，否则返回 error 值。 */
 clux_value_t *clux_context_index_to_i64(clux_context_t *self,

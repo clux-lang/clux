@@ -1329,6 +1329,38 @@ clux_value_t *clux_context_index(clux_context_t *self,
       "type '%s' does not support indexing",
       type_name ? type_name : "<unknown>");
 }
+/* 切片取段 base[lo?:hi?]：lo/hi 为 NULL 表示开放端点（缺省 0 / 长度）。
+   数组/切片经 vtable 偏移出新切片值（[]T 胖指针借用内存），负数、越界、
+   lo > hi 报 error，shadow 操作数产出切片类型的 shadow。 */
+clux_value_t *clux_context_slice(clux_context_t *self,
+                                 clux_value_t *aggregate,
+                                 clux_value_t *lo,
+                                 clux_value_t *hi,
+                                 const location_t *loc) {
+  if (!aggregate) {
+    return clux_context_create_error_message(
+        self, loc, "slice requires an aggregate");
+  }
+  if (clux_type_get_kind(clux_value_get_type(aggregate)) == CLUX_TYPE_ERROR) {
+    return aggregate;
+  }
+  if (lo && clux_type_get_kind(clux_value_get_type(lo)) == CLUX_TYPE_ERROR) {
+    return lo;
+  }
+  if (hi && clux_type_get_kind(clux_value_get_type(hi)) == CLUX_TYPE_ERROR) {
+    return hi;
+  }
+  clux_type_t *type = clux_value_get_type(aggregate);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->slice) {
+    return vt->slice(self, aggregate, lo, hi);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(self,
+                                           loc,
+                                           "type '%s' does not support slicing",
+                                           type_name ? type_name : "<unknown>");
+}
 clux_value_t *clux_context_index_to_i64(clux_context_t *self,
                                         clux_value_t *index,
                                         int64_t *out) {

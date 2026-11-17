@@ -12,6 +12,7 @@
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
 #include "parser/node_group.h"
+#include "parser/node_slice.h"
 #include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
 #include <stdbool.h>
@@ -178,6 +179,32 @@ clux_value_t *exec_expr_subscript(clux_context_t *ctx, node_t *node) {
   }
   /* 下标取项：返回 base 类型 view，写穿由通用 assign 完成。 */
   return clux_context_index(ctx, base, index, node_get_location(node));
+}
+
+/* 切片 base[lo?:hi?]：parser 允许两端省略（开放端点为 NULL 子节点），
+   结果是借用 base 内存的 []base 胖指针（不拥有内存）。 */
+clux_value_t *exec_expr_slice(clux_context_t *ctx, node_t *node) {
+  clux_value_t *base = exec_operand(ctx, slice_node_get_base(node));
+  if (clux_value_is_error(base)) {
+    return base;
+  }
+  clux_value_t *lo = NULL;
+  node_t *lo_node = slice_node_get_lo(node);
+  if (lo_node) {
+    lo = exec_operand(ctx, lo_node);
+    if (clux_value_is_error(lo)) {
+      return lo;
+    }
+  }
+  clux_value_t *hi = NULL;
+  node_t *hi_node = slice_node_get_hi(node);
+  if (hi_node) {
+    hi = exec_operand(ctx, hi_node);
+    if (clux_value_is_error(hi)) {
+      return hi;
+    }
+  }
+  return clux_context_slice(ctx, base, lo, hi, node_get_location(node));
 }
 
 /* &&= / ||= 短路复合赋值：左值已是结果时跳过右值求值直接返回目标；

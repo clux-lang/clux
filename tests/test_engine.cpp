@@ -3164,6 +3164,674 @@ TEST(EngineTest, SliceCompareAndCloneAssign) {
   delete_allocator(&a);
 }
 
+/* ---- clux_context_slice / array_slice / slice_slice / qual_slice ---- */
+
+/* 构造 [len]i32 数组，元素预填非零互异值 10+i（经 engine index/assign），
+   供切片测试复用。失败返回 NULL 由调用方 ASSERT。 */
+static clux_value_t *make_filled_i32_array(clux_context_t *ctx, size_t len) {
+  clux_type_t *arr_type = clux_context_get_array_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), len);
+  clux_value_t *arr = clux_context_create_array(ctx, arr_type, NULL, NULL);
+  if (!arr) {
+    return nullptr;
+  }
+  for (size_t i = 0; i < len; i++) {
+    clux_value_t *view = clux_context_index(
+        ctx, arr, clux_context_create_usize(ctx, i, NULL, NULL), NULL);
+    if (!view ||
+        clux_type_get_kind(clux_value_get_type(view)) == CLUX_TYPE_ERROR) {
+      return nullptr;
+    }
+    clux_value_t *init =
+        clux_context_create_i32(ctx, (int32_t)(10 + i), NULL, NULL);
+    if (!init || clux_context_assign(ctx, view, init, NULL) != view) {
+      return nullptr;
+    }
+  }
+  return arr;
+}
+
+/* 场景: [4]i32 数组 a[1:3] → []i32 切片值，slice_len 读长度，
+         经 clux_context_index 对切片下标读取验证 ptr 偏移正确
+   预期: 类型为 []i32，len 为 2，s[0]==11、s[1]==12（对应数组 elem 1/2） */
+TEST(EngineTest, ArraySliceRangeAndIndex) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *lo = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *hi = clux_context_create_i32(ctx, 3, NULL, NULL);
+  clux_value_t *s = clux_context_slice(ctx, arr, lo, hi, NULL);
+  ASSERT_NE(s, nullptr);
+  clux_type_t *slice_i32 = clux_context_get_slice_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_EQ(clux_value_get_type(s), slice_i32);
+
+  clux_value_t *len = clux_context_slice_len(ctx, s, NULL);
+  ASSERT_NE(len, nullptr);
+  EXPECT_EQ(read_usize(len), 2u);
+
+  /* a[1:3][0] 读出数组 elem 1 的值（11），证明切片 ptr 偏移正确 */
+  clux_value_t *first = clux_context_index(
+      ctx, s, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(read_i32(first), 11);
+  clux_value_t *second = clux_context_index(
+      ctx, s, clux_context_create_usize(ctx, 1, NULL, NULL), NULL);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(read_i32(second), 12);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 开放端点 a[:]、a[1:]、a[:2]（lo/hi 传 NULL）
+   预期: 缺省端点取 0 / 数组长度，首末元素值验证缺省方向正确 */
+TEST(EngineTest, ArraySliceOpenEndpoints) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *two = clux_context_create_i32(ctx, 2, NULL, NULL);
+
+  /* a[:]：双开放端点 → 整段 */
+  clux_value_t *whole = clux_context_slice(ctx, arr, NULL, NULL, NULL);
+  ASSERT_NE(whole, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, whole, NULL)), 4u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(
+          ctx, whole, clux_context_create_usize(ctx, 0, NULL, NULL), NULL)),
+      10);
+  EXPECT_EQ(
+      read_i32(clux_context_index(
+          ctx, whole, clux_context_create_usize(ctx, 3, NULL, NULL), NULL)),
+      13);
+
+  /* a[:2]：hi 开放省略 lo 缺省 0 */
+  clux_value_t *front = clux_context_slice(ctx, arr, NULL, two, NULL);
+  ASSERT_NE(front, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, front, NULL)), 2u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(
+          ctx, front, clux_context_create_usize(ctx, 1, NULL, NULL), NULL)),
+      11);
+
+  /* a[1:]：lo 开放省略 hi 缺省长度 */
+  clux_value_t *tail = clux_context_slice(ctx, arr, one, NULL, NULL);
+  ASSERT_NE(tail, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, tail, NULL)), 3u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(
+          ctx, tail, clux_context_create_usize(ctx, 0, NULL, NULL), NULL)),
+      11);
+  EXPECT_EQ(
+      read_i32(clux_context_index(
+          ctx, tail, clux_context_create_usize(ctx, 2, NULL, NULL), NULL)),
+      13);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 切片再切片（先 a[1:4] 再 s[0:2]）
+   预期: 双重偏移后 s2[0]==11、s2[1]==12（数组 elem 1/2），len 为 2 */
+TEST(EngineTest, SliceOfSliceDoubleOffset) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *four = clux_context_create_i32(ctx, 4, NULL, NULL);
+  clux_value_t *s1 = clux_context_slice(ctx, arr, one, four, NULL);
+  ASSERT_NE(s1, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, s1, NULL)), 3u);
+
+  clux_value_t *zero = clux_context_create_i32(ctx, 0, NULL, NULL);
+  clux_value_t *two = clux_context_create_i32(ctx, 2, NULL, NULL);
+  clux_value_t *s2 = clux_context_slice(ctx, s1, zero, two, NULL);
+  ASSERT_NE(s2, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, s2, NULL)), 2u);
+  EXPECT_EQ(read_i32(clux_context_index(
+                ctx, s2, clux_context_create_usize(ctx, 0, NULL, NULL), NULL)),
+            11);
+  EXPECT_EQ(read_i32(clux_context_index(
+                ctx, s2, clux_context_create_usize(ctx, 1, NULL, NULL), NULL)),
+            12);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 切片写穿——对切片 s=a[1:3] 的 s[1] view 赋值
+   预期: 写入经借用内存直达数组本体，数组 elem 2 可见变化 */
+TEST(EngineTest, ArraySliceViewWriteThrough) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *lo = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *hi = clux_context_create_i32(ctx, 3, NULL, NULL);
+  clux_value_t *s = clux_context_slice(ctx, arr, lo, hi, NULL);
+  ASSERT_NE(s, nullptr);
+
+  clux_value_t *view = clux_context_index(
+      ctx, s, clux_context_create_usize(ctx, 1, NULL, NULL), NULL);
+  ASSERT_NE(view, nullptr);
+  EXPECT_EQ(read_i32(view), 12);
+  clux_value_t *v42 = clux_context_create_i32(ctx, 42, NULL, NULL);
+  ASSERT_NE(v42, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, view, v42, NULL), view);
+
+  /* 数组本体 elem 2 经独立通道读取可见变化 */
+  clux_value_t *check = clux_context_index(
+      ctx, arr, clux_context_create_usize(ctx, 2, NULL, NULL), NULL);
+  ASSERT_NE(check, nullptr);
+  EXPECT_EQ(read_i32(check), 42);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 负数端点（数组与切片的 lo=-1 / hi=-1）
+   预期: 均报 error，消息精确为 "slice index must not be negative" */
+TEST(EngineTest, SliceNegativeEndpointErrors) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *neg = clux_context_create_i32(ctx, -1, NULL, NULL);
+  clux_value_t *two = clux_context_create_i32(ctx, 2, NULL, NULL);
+
+  clux_value_t *bad_lo = clux_context_slice(ctx, arr, neg, two, NULL);
+  ASSERT_NE(bad_lo, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_lo)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_lo), "slice index must not be negative");
+
+  clux_value_t *bad_hi = clux_context_slice(ctx, arr, NULL, neg, NULL);
+  ASSERT_NE(bad_hi, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_hi)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_hi), "slice index must not be negative");
+
+  /* 切片再切片的负数端点同样拒绝 */
+  clux_value_t *s = clux_context_slice(ctx, arr, two, NULL, NULL);
+  ASSERT_NE(s, nullptr);
+  clux_value_t *slice_bad = clux_context_slice(ctx, s, neg, NULL, NULL);
+  ASSERT_NE(slice_bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(slice_bad)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(slice_bad), "slice index must not be negative");
+
+  /* 切片再切片的负数 hi 端点（end < 0 分支） */
+  clux_value_t *slice_bad_hi = clux_context_slice(ctx, s, NULL, neg, NULL);
+  ASSERT_NE(slice_bad_hi, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(slice_bad_hi)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(slice_bad_hi),
+               "slice index must not be negative");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 越界端点（数组 len 4 取 lo/hi=5；切片 len 3 取 lo/hi=4）
+   预期: 精确消息 "slice index %lld is out of bounds for array of length 4"
+         与 "slice index %lld is out of bounds for slice of length 3" */
+TEST(EngineTest, SliceOutOfBoundsEndpointErrors) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+
+  clux_value_t *bad_lo = clux_context_slice(ctx, arr, five, NULL, NULL);
+  ASSERT_NE(bad_lo, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_lo)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_lo),
+               "slice index 5 is out of bounds for array of length 4");
+
+  clux_value_t *bad_hi = clux_context_slice(ctx, arr, NULL, five, NULL);
+  ASSERT_NE(bad_hi, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_hi)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_hi),
+               "slice index 5 is out of bounds for array of length 4");
+
+  /* 切片（len 3）的越界端点消息用 "for slice of length" */
+  clux_value_t *s = clux_context_slice(
+      ctx, arr, one, clux_context_create_i32(ctx, 4, NULL, NULL), NULL);
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, s, NULL)), 3u);
+  clux_value_t *four = clux_context_create_i32(ctx, 4, NULL, NULL);
+  clux_value_t *slice_bad_lo = clux_context_slice(ctx, s, four, NULL, NULL);
+  ASSERT_NE(slice_bad_lo, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(slice_bad_lo)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(slice_bad_lo),
+               "slice index 4 is out of bounds for slice of length 3");
+
+  clux_value_t *slice_bad_hi = clux_context_slice(ctx, s, NULL, four, NULL);
+  ASSERT_NE(slice_bad_hi, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(slice_bad_hi)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(slice_bad_hi),
+               "slice index 4 is out of bounds for slice of length 3");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: lo > hi（数组 a[3:1] 与切片 s[2:1]）
+   预期: 精确消息 "slice start %lld exceeds end %lld" */
+TEST(EngineTest, SliceStartExceedsEndErrors) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *two = clux_context_create_i32(ctx, 2, NULL, NULL);
+  clux_value_t *three = clux_context_create_i32(ctx, 3, NULL, NULL);
+
+  clux_value_t *bad = clux_context_slice(ctx, arr, three, one, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad), "slice start 3 exceeds end 1");
+
+  clux_value_t *s = clux_context_slice(ctx, arr, one, NULL, NULL);
+  ASSERT_NE(s, nullptr);
+  clux_value_t *slice_bad = clux_context_slice(ctx, s, two, one, NULL);
+  ASSERT_NE(slice_bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(slice_bad)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(slice_bad), "slice start 2 exceeds end 1");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 非整数端点（bool true 作 lo 与 str "s" 作 hi，数组与切片各一）
+   预期: index_to_i64 既有错误消息 "index must be an integer, got 'bool'" /
+         "index must be an integer, got 'str'" */
+TEST(EngineTest, SliceNonIntegerEndpointErrors) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *b = clux_context_create_bool(ctx, true, NULL, NULL);
+  clux_value_t *str = clux_context_create_str(ctx, "s", NULL, NULL);
+
+  clux_value_t *bad_lo = clux_context_slice(ctx, arr, b, NULL, NULL);
+  ASSERT_NE(bad_lo, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_lo)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_lo),
+               "index must be an integer, got 'bool'");
+
+  clux_value_t *bad_hi = clux_context_slice(ctx, arr, NULL, str, NULL);
+  ASSERT_NE(bad_hi, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_hi)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_hi), "index must be an integer, got 'str'");
+
+  /* 切片再切片的非整数端点走同一 index_to_i64 通道 */
+  clux_value_t *s = clux_context_slice(
+      ctx, arr, NULL, clux_context_create_i32(ctx, 2, NULL, NULL), NULL);
+  ASSERT_NE(s, nullptr);
+  clux_value_t *slice_bad = clux_context_slice(ctx, s, b, NULL, NULL);
+  ASSERT_NE(slice_bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(slice_bad)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(slice_bad),
+               "index must be an integer, got 'bool'");
+
+  /* 切片再切片的非整数 hi 端点（end 的 index_to_i64 错误通道） */
+  clux_value_t *slice_bad_hi = clux_context_slice(ctx, s, NULL, str, NULL);
+  ASSERT_NE(slice_bad_hi, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(slice_bad_hi)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(slice_bad_hi),
+               "index must be an integer, got 'str'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 非数组/切片类型作聚合（i32 值）
+   预期: vtable 无 slice 槽，报 "type 'i32' does not support slicing" */
+TEST(EngineTest, SliceUnsupportedAggregateType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 42, NULL, NULL);
+  clux_value_t *bad = clux_context_slice(ctx, x, NULL, NULL, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad), "type 'i32' does not support slicing");
+
+  /* vtable 为 NULL 的自定义类型同样落入兜底（clux_context_slice 的
+     vt==NULL 分支），错误消息用类型名 */
+  clux_type_t *bare = create_clux_type(
+      a, CLUX_TYPE_PTR /* 任意非 error/聚合 kind */, "bare", 8, 8, NULL);
+  clux_value_t *bare_val = clux_context_create_value(ctx, bare, 0, NULL, NULL);
+  ASSERT_NE(bare_val, nullptr);
+  clux_value_t *bare_bad = clux_context_slice(ctx, bare_val, NULL, NULL, NULL);
+  ASSERT_NE(bare_bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bare_bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bare_bad),
+               "type 'bare' does not support slicing");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: NULL 聚合
+   预期: 报 "slice requires an aggregate" */
+TEST(EngineTest, SliceRequiresAggregate) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *bad = clux_context_slice(ctx, NULL, NULL, NULL, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad), "slice requires an aggregate");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: shadow 操作数（shadow 数组 / shadow 切片作聚合，shadow lo/hi）
+   预期: 均产出切片类型的 shadow 值，不做真实越界检查 */
+TEST(EngineTest, SliceShadowOperandsProduceShadowSlice) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32_type, 4);
+  clux_type_t *slice_i32 = clux_context_get_slice_type(ctx, i32_type);
+
+  clux_value_t *shadow_arr = clux_context_create_shadow_value(ctx, arr_type);
+  clux_value_t *from_arr =
+      clux_context_slice(ctx, shadow_arr, NULL, NULL, NULL);
+  ASSERT_NE(from_arr, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(from_arr));
+  EXPECT_EQ(clux_value_get_type(from_arr), slice_i32);
+
+  clux_value_t *shadow_slice = clux_context_create_shadow_value(ctx, slice_i32);
+  clux_value_t *from_slice =
+      clux_context_slice(ctx, shadow_slice, NULL, NULL, NULL);
+  ASSERT_NE(from_slice, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(from_slice));
+  EXPECT_EQ(clux_value_get_type(from_slice), slice_i32);
+
+  /* 真实数组 + shadow 端点仍产出 shadow 切片 */
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *shadow_lo = clux_context_create_shadow_value(ctx, i32_type);
+  clux_value_t *shadow_from_lo =
+      clux_context_slice(ctx, arr, shadow_lo, NULL, NULL);
+  ASSERT_NE(shadow_from_lo, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_from_lo));
+  EXPECT_EQ(clux_value_get_type(shadow_from_lo), slice_i32);
+  clux_value_t *shadow_hi = clux_context_create_shadow_value(ctx, i32_type);
+  clux_value_t *shadow_from_hi =
+      clux_context_slice(ctx, arr, NULL, shadow_hi, NULL);
+  ASSERT_NE(shadow_from_hi, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_from_hi));
+  EXPECT_EQ(clux_value_get_type(shadow_from_hi), slice_i32);
+
+  /* 真实切片 + shadow lo / shadow hi（slice_slice 的短路边）同样产出
+     shadow 切片 */
+  clux_value_t *s = clux_context_slice(ctx, arr, NULL, NULL, NULL);
+  ASSERT_NE(s, nullptr);
+  clux_value_t *slice_shadow_lo =
+      clux_context_slice(ctx, s, shadow_lo, NULL, NULL);
+  ASSERT_NE(slice_shadow_lo, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(slice_shadow_lo));
+  EXPECT_EQ(clux_value_get_type(slice_shadow_lo), slice_i32);
+  clux_value_t *one_v = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *slice_shadow_hi =
+      clux_context_slice(ctx, s, one_v, shadow_hi, NULL);
+  ASSERT_NE(slice_shadow_hi, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(slice_shadow_hi));
+  EXPECT_EQ(clux_value_get_type(slice_shadow_hi), slice_i32);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 空切角点 a[2:2]（len 4）与 a[4:4]，及切片上的 s[3:3]
+   预期: len 0 切片可正常创建，slice_len 读出 0 */
+TEST(EngineTest, SliceEmptyCornerPoints) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *two = clux_context_create_i32(ctx, 2, NULL, NULL);
+  clux_value_t *four = clux_context_create_i32(ctx, 4, NULL, NULL);
+
+  clux_value_t *mid = clux_context_slice(ctx, arr, two, two, NULL);
+  ASSERT_NE(mid, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, mid, NULL)), 0u);
+
+  clux_value_t *end = clux_context_slice(ctx, arr, four, four, NULL);
+  ASSERT_NE(end, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, end, NULL)), 0u);
+
+  /* 切片（len 3）末端空切同样可创建 */
+  clux_value_t *three = clux_context_create_i32(ctx, 3, NULL, NULL);
+  clux_value_t *s = clux_context_slice(ctx, arr, NULL, four, NULL);
+  ASSERT_NE(s, nullptr);
+  clux_value_t *empty = clux_context_slice(ctx, s, three, three, NULL);
+  ASSERT_NE(empty, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, empty, NULL)), 0u);
+
+  /* start == len 的末端空切：start>0 但 start<len 为假，跳过偏移 */
+  clux_value_t *empty_end = clux_context_slice(ctx, s, four, four, NULL);
+  ASSERT_NE(empty_end, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, empty_end, NULL)), 0u);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: const 限定数组/切片经 qualifier 静态委托转发切片
+   预期: qualified_view 解包后走 array_slice/slice_slice，值语义与
+         裸类型一致（偏移读值正确） */
+TEST(EngineTest, SliceQualifiedAggregateForwards) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *slice_i32 = clux_context_get_slice_type(ctx, i32_type);
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_type_t *arr_type = clux_value_get_type(arr);
+
+  /* const [4]i32 值（借用数组内存）→ qual_slice → array_slice */
+  clux_type_t *const_arr =
+      clux_type_get_qualified_type(arr_type, CLUX_TYPE_CONST);
+  ASSERT_NE(const_arr, nullptr);
+  clux_value_t *carr = clux_context_create_value(
+      ctx, const_arr, clux_value_get_data(arr), NULL, NULL);
+  ASSERT_NE(carr, nullptr);
+  clux_value_t *from_const_arr =
+      clux_context_slice(ctx,
+                         carr,
+                         clux_context_create_i32(ctx, 1, NULL, NULL),
+                         clux_context_create_i32(ctx, 3, NULL, NULL),
+                         NULL);
+  ASSERT_NE(from_const_arr, nullptr);
+  EXPECT_EQ(clux_value_get_type(from_const_arr), slice_i32);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, from_const_arr, NULL)), 2u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(ctx,
+                                  from_const_arr,
+                                  clux_context_create_usize(ctx, 0, NULL, NULL),
+                                  NULL)),
+      11);
+
+  /* 先取得真切片再包 const 限定 → qual_slice → slice_slice */
+  clux_type_t *const_slice =
+      clux_type_get_qualified_type(slice_i32, CLUX_TYPE_CONST);
+  ASSERT_NE(const_slice, nullptr);
+  clux_value_t *cslice = clux_context_create_value(
+      ctx, const_slice, clux_value_get_data(from_const_arr), NULL, NULL);
+  ASSERT_NE(cslice, nullptr);
+  clux_value_t *from_const_slice =
+      clux_context_slice(ctx,
+                         cslice,
+                         clux_context_create_i32(ctx, 1, NULL, NULL),
+                         clux_context_create_i32(ctx, 2, NULL, NULL),
+                         NULL);
+  ASSERT_NE(from_const_slice, nullptr);
+  EXPECT_EQ(clux_value_get_type(from_const_slice), slice_i32);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, from_const_slice, NULL)),
+            1u);
+  EXPECT_EQ(
+      read_i32(clux_context_index(ctx,
+                                  from_const_slice,
+                                  clux_context_create_usize(ctx, 0, NULL, NULL),
+                                  NULL)),
+      12);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: error 操作数透传（error 作聚合 / lo / hi）
+   预期: 原错误值直接返回（identity），消息保持 "probe" */
+TEST(EngineTest, SliceErrorOperandPassthrough) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *arr = make_filled_i32_array(ctx, 4);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "probe");
+  ASSERT_NE(err, nullptr);
+
+  clux_value_t *as_aggregate = clux_context_slice(ctx, err, NULL, NULL, NULL);
+  EXPECT_EQ(as_aggregate, err);
+  EXPECT_STREQ(error_message_of(as_aggregate), "probe");
+
+  clux_value_t *as_lo = clux_context_slice(ctx, arr, err, NULL, NULL);
+  EXPECT_EQ(as_lo, err);
+
+  clux_value_t *as_hi = clux_context_slice(ctx, arr, NULL, err, NULL);
+  EXPECT_EQ(as_hi, err);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 无效聚合切片（悬垂句柄的数组/切片、ptr=0 的切片、短内存块越出
+         块尾、短块上的空切角点使 ptr_offset 偏移失败）
+   预期: 数组报 "cannot slice an invalid array"，切片报
+         "cannot slice an invalid slice"（data=0 是 shadow 语义会提前
+         返回 shadow 切片，故无效句柄用「分配后释放」的悬垂句柄构造） */
+TEST(EngineTest, SliceInvalidAggregateErrors) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32_type, 4);
+  clux_type_t *slice_i32 = clux_context_get_slice_type(ctx, i32_type);
+
+  /* 悬垂句柄：分配后立即释放，ptr_is_valid / slice_read 均失效 */
+  ptr_handle_t dead =
+      safe_alloc(clux_context_get_safe_allocator(ctx), 16, NULL);
+  ASSERT_NE(dead, (ptr_handle_t)0);
+  ASSERT_TRUE(safe_free(dead));
+
+  clux_value_t *bad_arr =
+      clux_context_create_value(ctx, arr_type, dead, NULL, NULL);
+  ASSERT_NE(bad_arr, nullptr);
+  clux_value_t *from_bad_arr =
+      clux_context_slice(ctx, bad_arr, NULL, NULL, NULL);
+  ASSERT_NE(from_bad_arr, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(from_bad_arr)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(from_bad_arr), "cannot slice an invalid array");
+
+  clux_value_t *bad_slice =
+      clux_context_create_value(ctx, slice_i32, dead, NULL, NULL);
+  ASSERT_NE(bad_slice, nullptr);
+  clux_value_t *from_bad_slice =
+      clux_context_slice(ctx, bad_slice, NULL, NULL, NULL);
+  ASSERT_NE(from_bad_slice, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(from_bad_slice)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(from_bad_slice),
+               "cannot slice an invalid slice");
+
+  /* ptr=0 但 len>0 的切片：块有效而目标句柄无效 */
+  clux_value_t *null_target =
+      clux_context_create_slice(ctx, slice_i32, 0, 4, NULL, NULL);
+  ASSERT_NE(null_target, nullptr);
+  clux_value_t *from_null_target =
+      clux_context_slice(ctx, null_target, NULL, NULL, NULL);
+  ASSERT_NE(from_null_target, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(from_null_target)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(from_null_target),
+               "cannot slice an invalid slice");
+
+  /* [4]i32 类型但底层块只有 4 字节：整段越出块尾 */
+  clux_value_t *x = clux_context_create_i32(ctx, 0, NULL, NULL);
+  ASSERT_NE(x, nullptr);
+  clux_value_t *short_arr = clux_context_create_value(
+      ctx, arr_type, clux_value_get_data(x), NULL, NULL);
+  ASSERT_NE(short_arr, nullptr);
+  clux_value_t *from_short_arr =
+      clux_context_slice(ctx, short_arr, NULL, NULL, NULL);
+  ASSERT_NE(from_short_arr, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(from_short_arr)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(from_short_arr),
+               "cannot slice an invalid array");
+
+  /* 短块上的空切角点 a[2:2]：new_len 0 跳过尺寸检查，ptr_offset 越
+     出 4 字节块失败 */
+  clux_value_t *two = clux_context_create_i32(ctx, 2, NULL, NULL);
+  clux_value_t *bad_offset_arr =
+      clux_context_slice(ctx, short_arr, two, two, NULL);
+  ASSERT_NE(bad_offset_arr, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_offset_arr)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_offset_arr),
+               "cannot slice an invalid array");
+
+  /* ptr 指向 4 字节块但 len=4（需 16 字节）：尺寸不足 */
+  clux_value_t *short_slice = clux_context_create_slice(
+      ctx, slice_i32, clux_value_get_data(x), 4, NULL, NULL);
+  ASSERT_NE(short_slice, nullptr);
+  clux_value_t *from_short_slice =
+      clux_context_slice(ctx, short_slice, NULL, NULL, NULL);
+  ASSERT_NE(from_short_slice, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(from_short_slice)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(from_short_slice),
+               "cannot slice an invalid slice");
+
+  /* 短块切片上的空切角点 s[2:2]：ptr_offset 偏移失败 */
+  clux_value_t *bad_offset_slice =
+      clux_context_slice(ctx, short_slice, two, two, NULL);
+  ASSERT_NE(bad_offset_slice, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_offset_slice)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_offset_slice),
+               "cannot slice an invalid slice");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, ArrayTypeInterningAndMeta) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);

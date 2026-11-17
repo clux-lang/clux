@@ -167,6 +167,12 @@ static clux_value_t *
 qual_index(clux_context_t *ctx, clux_value_t *aggregate, clux_value_t *index) {
   return clux_context_index(ctx, qualified_view(ctx, aggregate), index, NULL);
 }
+static clux_value_t *qual_slice(clux_context_t *ctx,
+                                clux_value_t *aggregate,
+                                clux_value_t *lo,
+                                clux_value_t *hi) {
+  return clux_context_slice(ctx, qualified_view(ctx, aggregate), lo, hi, NULL);
+}
 
 static clux_vtable_t g_qualifier_vtable = {
     .add = qual_add,
@@ -193,6 +199,7 @@ static clux_vtable_t g_qualifier_vtable = {
     .cast = qual_cast,
     .deref = qual_deref,
     .index = qual_index,
+    .slice = qual_slice,
     .type_equal = qualifier_type_equal,
     .type_extends = qualifier_type_extends,
 };
