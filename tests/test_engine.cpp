@@ -5167,3 +5167,144 @@ TEST(EngineTest, NoLeak) {
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);
 }
+
+/* ---- TDZ（temporal dead zone）：value 标记 + consume + assign 清除 ---- */
+
+/* 场景: 新值构造恒非 TDZ；set_tdz 置位/复位生命周期（含 shadow 与 error 值）
+   预期: create 后 is_tdz 为 false，set true 后为 true，set false 复位 */
+TEST(EngineTest, TdzFlagLifecycleOnValues) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *i32v = clux_context_create_i32(ctx, 10, NULL, NULL);
+  ASSERT_NE(i32v, nullptr);
+  EXPECT_FALSE(clux_value_is_tdz(i32v)) << "new value must not start in TDZ";
+  clux_value_set_tdz(i32v, true);
+  EXPECT_TRUE(clux_value_is_tdz(i32v));
+  clux_value_set_tdz(i32v, false);
+  EXPECT_FALSE(clux_value_is_tdz(i32v));
+
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  ASSERT_NE(shadow, nullptr);
+  EXPECT_FALSE(clux_value_is_tdz(shadow));
+  clux_value_set_tdz(shadow, true);
+  EXPECT_TRUE(clux_value_is_tdz(shadow));
+
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "probe");
+  ASSERT_NE(err, nullptr);
+  EXPECT_FALSE(clux_value_is_tdz(err));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: consume_value 消费 TDZ 值
+   预期: 返回 error 值，消息精确为 "use of a value before initialization" */
+TEST(EngineTest, ConsumeValueRejectsTdzWithExactMessage) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 1, "tdz_x", NULL);
+  ASSERT_NE(x, nullptr);
+  clux_value_set_tdz(x, true);
+  clux_value_t *out = clux_context_consume_value(ctx, x, NULL);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(out)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(out), "use of a value before initialization");
+
+  /* TDZ 标记不被 consume 破坏：重复消费仍拒绝 */
+  clux_value_t *again = clux_context_consume_value(ctx, x, NULL);
+  ASSERT_NE(again, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(again)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(again), "use of a value before initialization");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: consume_value 对非 TDZ 值（整数/bool/error/shadow）原值放行
+   预期: 返回指针与入参同一（零拷贝透传） */
+TEST(EngineTest, ConsumeValuePassesNonTdzThroughByIdentity) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *i32v = clux_context_create_i32(ctx, 42, NULL, NULL);
+  ASSERT_NE(i32v, nullptr);
+  EXPECT_EQ(clux_context_consume_value(ctx, i32v, NULL), i32v);
+
+  clux_value_t *bv = clux_context_create_bool(ctx, true, NULL, NULL);
+  ASSERT_NE(bv, nullptr);
+  EXPECT_EQ(clux_context_consume_value(ctx, bv, NULL), bv);
+
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "probe");
+  ASSERT_NE(err, nullptr);
+  EXPECT_EQ(clux_context_consume_value(ctx, err, NULL), err);
+
+  clux_value_t *shadow = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  ASSERT_NE(shadow, nullptr);
+  EXPECT_EQ(clux_context_consume_value(ctx, shadow, NULL), shadow);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: TDZ 的 const 目标首次赋值（TDZ 旁路 mutable 检查）
+   预期: "=" 写入成功、TDZ 清除、值正确；清除后 const 恢复不可写
+         （"cannot assign to a value of type 'const i32'"，回归保护） */
+TEST(EngineTest, AssignTdzConstTargetFirstAssignmentBypassesConst) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *const_i32 = clux_type_get_qualified_type(
+      clux_context_builtin_type(ctx, CLUX_TYPE_I32), CLUX_TYPE_CONST);
+  ptr_handle_t data =
+      safe_alloc(clux_context_get_safe_allocator(ctx), sizeof(int32_t), NULL);
+  ASSERT_NE(data, (ptr_handle_t)0);
+  clux_value_t *target =
+      clux_context_create_value(ctx, const_i32, data, "ct", NULL);
+  ASSERT_NE(target, nullptr);
+  clux_value_set_tdz(target, true);
+
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  clux_value_t *res = clux_context_assign(ctx, target, five, NULL);
+  EXPECT_EQ(res, target) << "first assignment must return the target itself";
+  EXPECT_EQ(read_i32(target), 5);
+  EXPECT_FALSE(clux_value_is_tdz(target))
+      << "successful assignment must clear the TDZ flag";
+  EXPECT_EQ(clux_context_consume_value(ctx, target, NULL), target)
+      << "after first assignment the value becomes consumable";
+
+  clux_value_t *bad = clux_context_assign(ctx, target, five, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "cannot assign to a value of type 'const i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: TDZ 的非 const（裸 i32）目标赋值
+   预期: 写入成功、TDZ 清除，随后 consume 放行 */
+TEST(EngineTest, AssignTdzNonConstTargetClearsFlag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *target = clux_context_create_i32(ctx, 0, "nt", NULL);
+  ASSERT_NE(target, nullptr);
+  clux_value_set_tdz(target, true);
+  clux_value_t *forty_two = clux_context_create_i32(ctx, 42, NULL, NULL);
+  ASSERT_NE(forty_two, nullptr);
+
+  clux_value_t *res = clux_context_assign(ctx, target, forty_two, NULL);
+  EXPECT_EQ(res, target);
+  EXPECT_EQ(read_i32(target), 42);
+  EXPECT_FALSE(clux_value_is_tdz(target));
+  EXPECT_EQ(clux_context_consume_value(ctx, target, NULL), target);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

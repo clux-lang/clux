@@ -283,7 +283,7 @@ clux_value_t *clux_context_create_value(clux_context_t *self,
                                         clux_type_t *type,
                                         ptr_handle_t data,
                                         const char *name,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   clux_value_t *value = create_clux_value(self->allocator, type, data);
   clux_value_t *previous = clux_scope_define(self->current_scope, name, value);
   if (previous != NULL) {
@@ -311,7 +311,7 @@ static clux_value_t *create_integer_value(clux_context_t *self,
                                           clux_type_t *type,
                                           const void *value,
                                           const char *name,
-                                         const location_t *loc) {
+                                          const location_t *loc) {
   size_t size = clux_type_get_size(type);
   ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
   void *raw = ptr_to_raw(data, 0);
@@ -325,91 +325,91 @@ clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
 clux_value_t *clux_context_create_i8(clux_context_t *self,
                                      int8_t value,
                                      const char *name,
-                                    const location_t *loc) {
+                                     const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_i8, &value, name, loc);
 }
 clux_value_t *clux_context_create_i16(clux_context_t *self,
                                       int16_t value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_i16, &value, name, loc);
 }
 clux_value_t *clux_context_create_i32(clux_context_t *self,
                                       int32_t value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_i32, &value, name, loc);
 }
 clux_value_t *clux_context_create_i64(clux_context_t *self,
                                       int64_t value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_i64, &value, name, loc);
 }
 clux_value_t *clux_context_create_u8(clux_context_t *self,
                                      uint8_t value,
                                      const char *name,
-                                    const location_t *loc) {
+                                     const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_u8, &value, name, loc);
 }
 clux_value_t *clux_context_create_u16(clux_context_t *self,
                                       uint16_t value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_u16, &value, name, loc);
 }
 clux_value_t *clux_context_create_u32(clux_context_t *self,
                                       uint32_t value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_u32, &value, name, loc);
 }
 clux_value_t *clux_context_create_u64(clux_context_t *self,
                                       uint64_t value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_u64, &value, name, loc);
 }
 clux_value_t *clux_context_create_isize(clux_context_t *self,
                                         intptr_t value,
                                         const char *name,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_isize, &value, name, loc);
 }
 clux_value_t *clux_context_create_usize(clux_context_t *self,
                                         size_t value,
                                         const char *name,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_usize, &value, name, loc);
 }
 clux_value_t *clux_context_create_f32(clux_context_t *self,
                                       float value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_f32, &value, name, loc);
 }
 clux_value_t *clux_context_create_f64(clux_context_t *self,
                                       double value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_f64, &value, name, loc);
 }
 clux_value_t *clux_context_create_bool(clux_context_t *self,
                                        bool value,
                                        const char *name,
-                                      const location_t *loc) {
+                                       const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_bool, &value, name, loc);
 }
@@ -418,7 +418,7 @@ clux_value_t *clux_context_create_bool(clux_context_t *self,
 clux_value_t *clux_context_create_type_value(clux_context_t *self,
                                              clux_type_t *type,
                                              const char *name,
-                                            const location_t *loc) {
+                                             const location_t *loc) {
   if (!type) {
     return clux_context_create_error_message(
         self, loc, "type value creation requires a type");
@@ -434,7 +434,7 @@ static clux_value_t *create_template_value(clux_context_t *self,
                                            clux_type_t *type,
                                            void *ast,
                                            const char *name,
-                                          const location_t *loc) {
+                                           const location_t *loc) {
   if (!ast) {
     return clux_context_create_error_message(
         self, loc, "template creation requires an AST node");
@@ -444,14 +444,14 @@ static clux_value_t *create_template_value(clux_context_t *self,
 clux_value_t *clux_context_create_type_template(clux_context_t *self,
                                                 void *ast,
                                                 const char *name,
-                                               const location_t *loc) {
+                                                const location_t *loc) {
   return create_template_value(
       self, self->builtin_types.type_type_template, ast, name, loc);
 }
 clux_value_t *clux_context_create_func_template(clux_context_t *self,
                                                 void *ast,
                                                 const char *name,
-                                               const location_t *loc) {
+                                                const location_t *loc) {
   return create_template_value(
       self, self->builtin_types.type_func_template, ast, name, loc);
 }
@@ -464,7 +464,7 @@ char *clux_context_alloc_str(clux_context_t *self, size_t len) {
 clux_value_t *clux_context_create_str(clux_context_t *self,
                                       const char *value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   size_t len = value ? strlen(value) : 0;
   char *str = clux_context_alloc_str(self, len);
   if (value) {
@@ -477,7 +477,7 @@ clux_value_t *clux_context_create_ptr(clux_context_t *self,
                                       clux_type_t *type,
                                       ptr_handle_t value,
                                       const char *name,
-                                     const location_t *loc) {
+                                      const location_t *loc) {
   ptr_handle_t data =
       safe_alloc(self->safe_allocator, sizeof(ptr_handle_t), loc);
   ptr_handle_t *raw = ptr_to_raw(data, 0);
@@ -499,7 +499,7 @@ clux_value_t *clux_context_create_slice(clux_context_t *self,
                                         ptr_handle_t ptr,
                                         size_t len,
                                         const char *name,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   size_t size = clux_type_get_size(type);
   ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
   void *raw = ptr_to_raw(data, 0);
@@ -508,7 +508,7 @@ clux_value_t *clux_context_create_slice(clux_context_t *self,
 }
 clux_value_t *clux_context_slice_len(clux_context_t *self,
                                      clux_value_t *slice,
-                                    const location_t *loc) {
+                                     const location_t *loc) {
   if (!slice) {
     return clux_context_create_error_message(
         self, loc, "slice length requires a slice");
@@ -546,7 +546,7 @@ clux_type_t *clux_context_get_array_type(clux_context_t *self,
 clux_value_t *clux_context_create_array(clux_context_t *self,
                                         clux_type_t *type,
                                         const char *name,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   size_t size = clux_type_get_size(type);
   ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
   memset(ptr_to_raw(data, 0), 0, size);
@@ -563,7 +563,7 @@ clux_value_t *clux_context_create_optional_some(clux_context_t *self,
                                                 clux_type_t *base,
                                                 clux_value_t *value,
                                                 const char *name,
-                                               const location_t *loc) {
+                                                const location_t *loc) {
   if (!base || !value) {
     return clux_context_create_error_message(
         self, loc, "#some requires a type and a value");
@@ -597,7 +597,7 @@ clux_value_t *clux_context_create_optional_some(clux_context_t *self,
 clux_value_t *clux_context_create_optional_none(clux_context_t *self,
                                                 clux_type_t *base,
                                                 const char *name,
-                                               const location_t *loc) {
+                                                const location_t *loc) {
   if (!base) {
     return clux_context_create_error_message(
         self, loc, "#none requires a type");
@@ -610,7 +610,7 @@ clux_value_t *clux_context_create_optional_none(clux_context_t *self,
 }
 clux_value_t *clux_context_is_none(clux_context_t *self,
                                    clux_value_t *value,
-                                  const location_t *loc) {
+                                   const location_t *loc) {
   if (!value) {
     return clux_context_create_error_message(
         self, loc, "#is_none requires an optional value");
@@ -706,7 +706,7 @@ clux_context_create_cunion_type(clux_context_t *self,
 clux_value_t *clux_context_create_cunion(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
-                                        const location_t *loc) {
+                                         const location_t *loc) {
   if (!type || clux_type_get_kind(type) != CLUX_TYPE_CUNION) {
     return clux_context_create_error_message(
         self, loc, "cunion value creation requires a cunion type");
@@ -770,7 +770,7 @@ clux_type_t *clux_context_create_union_type(clux_context_t *self,
 clux_value_t *clux_context_create_union(clux_context_t *self,
                                         clux_type_t *type,
                                         const char *name,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   if (!type || clux_type_get_kind(type) != CLUX_TYPE_UNION) {
     return clux_context_create_error_message(
         self, loc, "union value creation requires a union type");
@@ -783,7 +783,7 @@ clux_value_t *clux_context_create_union(clux_context_t *self,
 clux_value_t *clux_context_union_set_member(clux_context_t *self,
                                             clux_value_t *value,
                                             const char *member,
-                                           const location_t *loc) {
+                                            const location_t *loc) {
   if (!value || !member) {
     return clux_context_create_error_message(
         self, loc, "member activation requires a value and a member name");
@@ -807,7 +807,7 @@ clux_value_t *clux_context_union_set_member(clux_context_t *self,
 clux_value_t *clux_context_is_member(clux_context_t *self,
                                      clux_value_t *value,
                                      const char *member,
-                                    const location_t *loc) {
+                                     const location_t *loc) {
   if (!value || !member) {
     return clux_context_create_error_message(
         self, loc, "operator 'is' requires a value and a member name");
@@ -830,7 +830,7 @@ clux_value_t *clux_context_is_member(clux_context_t *self,
 clux_value_t *clux_context_field(clux_context_t *self,
                                  clux_value_t *value,
                                  const char *field,
-                                const location_t *loc) {
+                                 const location_t *loc) {
   if (!value || !field) {
     return clux_context_create_error_message(
         self, loc, "field access requires a value and a field name");
@@ -927,7 +927,7 @@ clux_type_t *clux_context_create_func_type(clux_context_t *self,
 clux_value_t *clux_context_create_func(clux_context_t *self,
                                        clux_type_t *type,
                                        const char *name,
-                                      const location_t *loc) {
+                                       const location_t *loc) {
   if (!type || clux_type_get_kind(type) != CLUX_TYPE_FUNC) {
     return clux_context_create_error_message(
         self, loc, "function value creation requires a func type");
@@ -940,7 +940,7 @@ clux_value_t *clux_context_create_func(clux_context_t *self,
 clux_value_t *clux_context_func_set_ast(clux_context_t *self,
                                         clux_value_t *value,
                                         void *ast,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   if (!value) {
     return clux_context_create_error_message(
         self, loc, "setting a function body requires a function value");
@@ -965,7 +965,7 @@ clux_value_t *clux_context_func_set_ast(clux_context_t *self,
 clux_value_t *clux_context_func_capture(clux_context_t *self,
                                         clux_value_t *value,
                                         const char *capture,
-                                       const location_t *loc) {
+                                        const location_t *loc) {
   if (!value || !capture) {
     return clux_context_create_error_message(
         self, loc, "capture access requires a value and a capture name");
@@ -1013,7 +1013,7 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
                                   clux_value_t *value,
                                   size_t argc,
                                   clux_value_t *argv[],
-                                 const location_t *loc) {
+                                  const location_t *loc) {
   if (!value) {
     return clux_context_create_error_message(
         self, loc, "invoke requires a function value");
@@ -1211,7 +1211,7 @@ clux_type_t *clux_context_create_struct_type(clux_context_t *self,
 clux_value_t *clux_context_create_struct(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
-                                        const location_t *loc) {
+                                         const location_t *loc) {
   if (!type || clux_type_get_kind(type) != CLUX_TYPE_STRUCT) {
     return clux_context_create_error_message(
         self, loc, "struct value creation requires a struct type");
@@ -1224,7 +1224,7 @@ clux_value_t *clux_context_create_struct(clux_context_t *self,
 clux_value_t *clux_context_struct_attr(clux_context_t *self,
                                        clux_type_t *type,
                                        const char *name,
-                                      const location_t *loc) {
+                                       const location_t *loc) {
   if (!type || !name) {
     return clux_context_create_error_message(
         self, loc, "attribute access requires a struct type and a name");
@@ -1255,7 +1255,7 @@ clux_value_t *clux_context_struct_attr(clux_context_t *self,
 clux_type_t *clux_context_struct_subtype(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
-                                        const location_t *loc) {
+                                         const location_t *loc) {
   if (!type || !name) {
     (void)clux_context_create_error_message(
         self, loc, "subtype access requires a struct type and a name");
@@ -1306,7 +1306,7 @@ clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc) {
 clux_value_t *clux_context_index(clux_context_t *self,
                                  clux_value_t *aggregate,
                                  clux_value_t *index,
-                                const location_t *loc) {
+                                 const location_t *loc) {
   if (!aggregate || !index) {
     return clux_context_create_error_message(
         self, loc, "index requires an aggregate and an index");
@@ -1405,7 +1405,7 @@ clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc) {
 clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             char *str,
                                             const char *name,
-                                           const location_t *loc) {
+                                            const location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_str, &str, name, loc);
 }
@@ -1427,7 +1427,7 @@ clux_scope_t *clux_context_get_scope(clux_context_t *self) {
 clux_value_t *clux_context_declare_value(clux_context_t *self,
                                          clux_value_t *value,
                                          const char *name,
-                                        const location_t *loc) {
+                                         const location_t *loc) {
   if (!self || !value || !name) {
     return clux_context_create_error_message(
         self, loc, "declaration requires a value and a name");
@@ -1461,6 +1461,15 @@ clux_value_t *clux_context_lookup(clux_context_t *self,
   }
   return clux_context_create_error_message(
       self, loc, "use of undeclared identifier '%s'", name);
+}
+clux_value_t *clux_context_consume_value(clux_context_t *self,
+                                         clux_value_t *value,
+                                         const location_t *loc) {
+  if (clux_value_is_tdz(value)) {
+    return clux_context_create_error_message(
+        self, loc, "use of a value before initialization");
+  }
+  return value;
 }
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
                                                 const location_t *loc,
@@ -1605,7 +1614,7 @@ clux_value_t *clux_context_safe_cast(clux_context_t *self,
 clux_value_t *clux_context_cast(clux_context_t *self,
                                 clux_value_t *value,
                                 clux_type_t *target,
-                               const location_t *loc) {
+                                const location_t *loc) {
   if (!value || !target) {
     return clux_context_create_error_message(
         self, loc, "cast requires a value and a target type");
@@ -1628,7 +1637,7 @@ clux_value_t *clux_context_binary(clux_context_t *self,
                                   clux_binary_op_t op,
                                   clux_value_t *left,
                                   clux_value_t *right,
-                                 const location_t *loc) {
+                                  const location_t *loc) {
   const char *op_name = binary_op_name(op);
   if (!left || !right) {
     return clux_context_create_error_message(
@@ -1652,7 +1661,7 @@ clux_value_t *clux_context_binary(clux_context_t *self,
 clux_value_t *clux_context_prefix(clux_context_t *self,
                                   clux_prefix_op_t op,
                                   clux_value_t *value,
-                                 const location_t *loc) {
+                                  const location_t *loc) {
   const char *op_name = prefix_op_name(op);
   if (!value) {
     return clux_context_create_error_message(
@@ -1676,13 +1685,13 @@ clux_value_t *clux_context_prefix(clux_context_t *self,
 clux_value_t *clux_context_add(clux_context_t *self,
                                clux_value_t *left,
                                clux_value_t *right,
-                              const location_t *loc) {
+                               const location_t *loc) {
   return clux_context_binary(self, CLUX_OP_ADD, left, right, loc);
 }
 clux_value_t *clux_context_assign(clux_context_t *self,
                                   clux_value_t *target,
                                   clux_value_t *value,
-                                 const location_t *loc) {
+                                  const location_t *loc) {
   if (!target || !value) {
     return clux_context_create_error_message(
         self, loc, "assignment requires a target and a value");
@@ -1694,8 +1703,11 @@ clux_value_t *clux_context_assign(clux_context_t *self,
   if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
     return value;
   }
-  /* const 是静态性质：目标限定链含 const 即拒绝写入（volatile 放行） */
-  if (clux_type_is_const(target_type)) {
+  /* const 是静态性质：目标限定链含 const 即拒绝写入（volatile 放行）；
+     TDZ 例外——尚未完成首次赋值的目标绕过 mutable 检查（const 的
+     TDZ 变量支持第一次赋值），赋值成功后清除标记。 */
+  bool target_tdz = clux_value_is_tdz(target);
+  if (!target_tdz && clux_type_is_const(target_type)) {
     const char *target_name = clux_type_get_name(target_type);
     return clux_context_create_error_message(
         self,
@@ -1725,6 +1737,7 @@ clux_value_t *clux_context_assign(clux_context_t *self,
   if (dst && src) {
     (void)memcpy(dst, src, size);
   }
+  clux_value_set_tdz(target, false);
   return target;
 }
 clux_value_t *

@@ -1,7 +1,9 @@
 #include "exec/exec.h"
 #include "core/location.h"
 #include "engine/context.h"
+#include "engine/error.h"
 #include "engine/interface.h"
+#include "engine/value.h"
 #include "exec/stmt.h"
 #include "parser/node.h"
 #include "exec/literal.h"
@@ -269,4 +271,21 @@ clux_value_t *exec_node(clux_context_t *ctx, node_t *node) {
                                              node_kind_name(kind));
   }
   return g_exec_callbacks[kind](ctx, node);
+}
+
+/* 操作数求值统一通道（exec 的消费点）：error 优先传播，shadow 拒绝
+   （shadow 只存在于 sema 的影子执行），TDZ 消费校验
+   （声明后未经首次赋值，报 use of a value before initialization）。 */
+clux_value_t *exec_operand(clux_context_t *ctx, node_t *node) {
+  clux_value_t *value = exec_node(ctx, node);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "shadow value is not allowed in execution");
+  }
+  return clux_context_consume_value(ctx, value, node_get_location(node));
 }

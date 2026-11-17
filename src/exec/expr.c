@@ -26,21 +26,6 @@ clux_value_t *exec_expr_group(clux_context_t *ctx, node_t *node) {
   return value;
 }
 
-/* 操作数求值统一通道：error 优先传播，shadow 拒绝（exec 禁止 shadow）。 */
-static clux_value_t *exec_operand(clux_context_t *ctx, node_t *node) {
-  clux_value_t *value = exec_node(ctx, node);
-  if (clux_value_is_error(value)) {
-    return value;
-  }
-  if (clux_value_is_shadow(value)) {
-    return clux_context_create_error_message(
-        ctx,
-        node_get_location(node),
-        "shadow value is not allowed in execution");
-  }
-  return value;
-}
-
 /* 二元运算符文本→引擎槽位；逻辑 &&/|| 无槽位由 exec_expr_binary 自管短路。 */
 static const struct {
   const char *text;
@@ -178,15 +163,9 @@ static clux_value_t *exec_assign_logical(clux_context_t *ctx,
   if (is_and ? !lval : lval) {
     return target;
   }
-  clux_value_t *value = exec_node(ctx, value_node);
+  clux_value_t *value = exec_operand(ctx, value_node);
   if (clux_value_is_error(value)) {
     return value;
-  }
-  if (clux_value_is_shadow(value)) {
-    return clux_context_create_error_message(
-        ctx,
-        node_get_location(value_node),
-        "shadow value is not allowed in execution");
   }
   clux_type_t *rtype = clux_value_get_type(value);
   if (clux_type_get_kind(rtype) != CLUX_TYPE_BOOL) {
@@ -225,6 +204,15 @@ clux_value_t *exec_expr_assign(clux_context_t *ctx, node_t *node) {
         node_get_location(target_node),
         "shadow value is not allowed in execution");
   }
+  /* 复合赋值（含 &&= / ||=）读取目标当前值：TDZ 拒绝；
+     纯 "=" 是首次赋值通道，TDZ 合法（由 clux_context_assign 旁路
+     mutable 检查并在写入后清除标记）。 */
+  if (!location_is(op_loc, "=") && clux_value_is_tdz(target)) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(target_node),
+        "use of a value before initialization");
+  }
   clux_type_t *type = clux_value_get_type(target);
   if (location_is(op_loc, "&&=")) {
     if (clux_type_get_kind(type) != CLUX_TYPE_BOOL) {
@@ -246,15 +234,9 @@ clux_value_t *exec_expr_assign(clux_context_t *ctx, node_t *node) {
     }
     return exec_assign_logical(ctx, target, value_node, op_loc, "||=", false);
   }
-  clux_value_t *value = exec_node(ctx, value_node);
+  clux_value_t *value = exec_operand(ctx, value_node);
   if (clux_value_is_error(value)) {
     return value;
-  }
-  if (clux_value_is_shadow(value)) {
-    return clux_context_create_error_message(
-        ctx,
-        node_get_location(value_node),
-        "shadow value is not allowed in execution");
   }
   if (location_is(op_loc, "=")) {
     value =
@@ -293,15 +275,9 @@ clux_value_t *exec_expr_ternary(clux_context_t *ctx, node_t *node) {
   node_t *cond_node = ternary_node_get_condition(node);
   node_t *then_node = ternary_node_get_then(node);
   node_t *else_node = ternary_node_get_else(node);
-  clux_value_t *cond = exec_node(ctx, cond_node);
+  clux_value_t *cond = exec_operand(ctx, cond_node);
   if (clux_value_is_error(cond)) {
     return cond;
-  }
-  if (clux_value_is_shadow(cond)) {
-    return clux_context_create_error_message(
-        ctx,
-        node_get_location(cond_node),
-        "shadow value is not allowed in execution");
   }
   clux_type_t *type = clux_value_get_type(cond);
   if (clux_type_get_kind(type) != CLUX_TYPE_BOOL) {
@@ -314,22 +290,7 @@ clux_value_t *exec_expr_ternary(clux_context_t *ctx, node_t *node) {
   }
   bool cond_bl = *(bool *)clux_value_get_raw(cond, 0);
   if (cond_bl) {
-    clux_value_t *value = exec_node(ctx, then_node);
-    if (clux_value_is_shadow(value)) {
-      return clux_context_create_error_message(
-          ctx,
-          node_get_location(then_node),
-          "shadow value is not allowed in execution");
-    }
-    return value;
-  } else {
-    clux_value_t *value = exec_node(ctx, else_node);
-    if (clux_value_is_shadow(value)) {
-      return clux_context_create_error_message(
-          ctx,
-          node_get_location(else_node),
-          "shadow value is not allowed in execution");
-    }
-    return value;
+    return exec_operand(ctx, then_node);
   }
+  return exec_operand(ctx, else_node);
 }

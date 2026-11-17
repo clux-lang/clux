@@ -9,6 +9,7 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include "exec/exec.h"
@@ -1926,4 +1927,301 @@ TEST_F(ExecLiteralTest, BinaryDispatchesViaExecNode) {
             clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_EQ(read_i32(result), 5);
   delete_node(&node);
+}
+
+/* ---- TDZ（temporal dead zone）：exec_operand 统一消费通道 ---- */
+
+/* 场景: exec_operand 消费 TDZ identifier
+   预期: 返回 error 值，消息精确为 "use of a value before initialization" */
+TEST_F(ExecLiteralTest, ExecOperandRejectsTdzIdentifier) {
+  clux_value_t *x = clux_context_create_i32(ctx, 1, "tz_x", NULL);
+  ASSERT_NE(x, nullptr);
+  clux_value_set_tdz(x, true);
+
+  node_t *node = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_x");
+  clux_value_t *value = exec_operand(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value), "use of a value before initialization");
+  delete_node(&node);
+}
+
+/* 场景: 二元表达式左右操作数均为 TDZ 变量（消费位置覆盖）
+   预期: exec_operand 在 binary 通道中拒绝，消息为 TDZ 精确错误 */
+TEST_F(ExecLiteralTest, BinaryConsumesTdzOperandsViaExecOperand) {
+  clux_value_t *tzv = clux_context_create_i32(ctx, 1, "tz_bv", NULL);
+  ASSERT_NE(tzv, nullptr);
+  clux_value_set_tdz(tzv, true);
+
+  node_t *left_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_bv"),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *left_result = exec_expr_binary(ctx, left_node);
+  ASSERT_NE(left_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(left_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(left_result),
+               "use of a value before initialization");
+  delete_node(&left_node);
+
+  node_t *right_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_bv"));
+  clux_value_t *right_result = exec_expr_binary(ctx, right_node);
+  ASSERT_NE(right_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(right_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(right_result),
+               "use of a value before initialization");
+  delete_node(&right_node);
+}
+
+/* 场景: 前缀一元形态的操作数为 TDZ 变量
+   预期: exec_operand 在 prefix 通道中拒绝（TDZ 精确错误） */
+TEST_F(ExecLiteralTest, PrefixConsumesTdzOperandViaExecOperand) {
+  clux_value_t *tzv = clux_context_create_i32(ctx, 8, "tz_p", NULL);
+  ASSERT_NE(tzv, nullptr);
+  clux_value_set_tdz(tzv, true);
+
+  node_t *node =
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "-"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_p"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of a value before initialization");
+  delete_node(&node);
+}
+
+/* 场景: 逻辑短路读取 TDZ bool 左操作数（tz && true）
+   预期: 即使短路可能跳过右操作数，左操作数消费仍被 TDZ 拒绝 */
+TEST_F(ExecLiteralTest, LogicalShortCircuitConsumesTdzBoolOperand) {
+  clux_value_t *tz_bool = clux_context_create_bool(ctx, false, "tz_lb", NULL);
+  ASSERT_NE(tz_bool, nullptr);
+  clux_value_set_tdz(tz_bool, true);
+
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_lb"),
+                     make_node(CLUX_NODE_SYMBOL, "&&"),
+                     make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of a value before initialization");
+  delete_node(&node);
+}
+
+/* 场景: 三元条件的 cond 与选中分支均为 TDZ 变量（消费位置覆盖）
+   预期: cond TDZ 直接拒绝；cond 为 true 时 then 分支 TDZ 同样拒绝 */
+TEST_F(ExecLiteralTest, TernaryConsumesTdzCondAndSelectedBranch) {
+  clux_value_t *tz_cond = clux_context_create_bool(ctx, true, "tz_tc", NULL);
+  ASSERT_NE(tz_cond, nullptr);
+  clux_value_set_tdz(tz_cond, true);
+  node_t *cond_node =
+      make_ternary_of(a,
+                      make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_tc"),
+                      make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
+                      make_node(CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *cond_result = exec_expr_ternary(ctx, cond_node);
+  ASSERT_NE(cond_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(cond_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(cond_result),
+               "use of a value before initialization");
+  delete_node(&cond_node);
+
+  clux_value_t *tz_branch = clux_context_create_i32(ctx, 7, "tz_tb", NULL);
+  ASSERT_NE(tz_branch, nullptr);
+  clux_value_set_tdz(tz_branch, true);
+  node_t *branch_node =
+      make_ternary_of(a,
+                      make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                      make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_tb"),
+                      make_node(CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *branch_result = exec_expr_ternary(ctx, branch_node);
+  ASSERT_NE(branch_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(branch_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(branch_result),
+               "use of a value before initialization");
+  delete_node(&branch_node);
+}
+
+/* 场景: var 初值引用 TDZ 变量 / var 类型标注引用 TDZ type value
+   预期: stmt_var 的两条消费通道（初值 + 类型标注）均拒绝 TDZ */
+TEST_F(ExecLiteralTest, VarRejectsTdzInitialValueAndAnnotation) {
+  clux_value_t *tz_src = clux_context_create_i32(ctx, 3, "tz_src", NULL);
+  ASSERT_NE(tz_src, nullptr);
+  clux_value_set_tdz(tz_src, true);
+  node_t *var_node = make_stmt_var("tz_y",
+                                   CLUX_NODE_SYMBOL /* type omitted */,
+                                   NULL,
+                                   CLUX_NODE_LITERAL_IDENTIFIER,
+                                   "tz_src");
+  clux_value_t *var_result = exec_stmt_var(ctx, var_node);
+  ASSERT_NE(var_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(var_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(var_result),
+               "use of a value before initialization");
+  delete_node(&var_node);
+
+  clux_value_t *tz_type = clux_context_create_type_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), "tz_ty", NULL);
+  ASSERT_NE(tz_type, nullptr);
+  clux_value_set_tdz(tz_type, true);
+  node_t *ann_node = make_stmt_var("tz_v",
+                                   CLUX_NODE_LITERAL_IDENTIFIER,
+                                   "tz_ty",
+                                   CLUX_NODE_LITERAL_NUMERIC,
+                                   "1");
+  clux_value_t *ann_result = exec_stmt_var(ctx, ann_node);
+  ASSERT_NE(ann_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ann_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(ann_result),
+               "use of a value before initialization");
+  delete_node(&ann_node);
+}
+
+/* 场景: 纯 "=" 对 TDZ 目标是首次赋值通道
+   预期: 赋值成功返回目标本身、TDZ 清除、值写入，随后可正常消费 */
+TEST_F(ExecLiteralTest, AssignPureEqualsOnTdzTargetSucceedsAndClears) {
+  clux_value_t *target = clux_context_create_i32(ctx, 0, "tz_eq", NULL);
+  ASSERT_NE(target, nullptr);
+  clux_value_set_tdz(target, true);
+
+  node_t *node = make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "tz_eq", "5");
+  clux_value_t *result = exec_expr_assign(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result, target) << "first assignment must return the target";
+  EXPECT_EQ(read_i32(target), 5);
+  EXPECT_FALSE(clux_value_is_tdz(target))
+      << "first assignment must clear the TDZ flag";
+  node_t *read_node = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_eq");
+  EXPECT_EQ(exec_operand(ctx, read_node), target)
+      << "after first assignment the variable becomes consumable";
+  delete_node(&read_node);
+  delete_node(&node);
+}
+
+/* 构造带真实存储的具名 const i32 目标（TDZ 首赋值验收点）：
+   create_i32 产出裸 i32 类型，const 目标须按 qualified 类型建值，
+   存储块走 context 的 safe_allocator（context 销毁统一释放）。 */
+static clux_value_t *make_const_i32_target(clux_context_t *ctx,
+                                           const char *name) {
+  clux_type_t *const_i32 = clux_type_get_qualified_type(
+      clux_context_builtin_type(ctx, CLUX_TYPE_I32), CLUX_TYPE_CONST);
+  ptr_handle_t data =
+      safe_alloc(clux_context_get_safe_allocator(ctx), sizeof(int32_t), NULL);
+  if (data == 0) {
+    return nullptr;
+  }
+  void *raw = ptr_to_raw(data, 0);
+  if (raw != nullptr) {
+    *(int32_t *)raw = 0;
+  }
+  return clux_context_create_value(ctx, const_i32, data, name, NULL);
+}
+
+/* 场景: 纯 "=" 对 const 类型 + TDZ 目标（关键验收点：TDZ 旁路 const 检查）
+   预期: 首次 "=" 赋值成功且清除 TDZ；清除后再次 "=" 恢复 const 拒绝 */
+TEST_F(ExecLiteralTest, AssignPureEqualsOnTdzConstTargetSucceeds) {
+  clux_value_t *target = make_const_i32_target(ctx, "tz_c");
+  ASSERT_NE(target, nullptr);
+  clux_value_set_tdz(target, true);
+
+  node_t *node = make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "tz_c", "9");
+  clux_value_t *result = exec_expr_assign(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result, target);
+  EXPECT_EQ(read_i32(target), 9);
+  EXPECT_FALSE(clux_value_is_tdz(target));
+  delete_node(&node);
+
+  node_t *again = make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "tz_c", "1");
+  clux_value_t *bad = exec_expr_assign(ctx, again);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "cannot assign to a value of type 'const i32'");
+  delete_node(&again);
+}
+
+/* 场景: compound 赋值（+= -= *=）对 TDZ 目标读取当前值
+   预期: 报 "use of a value before initialization"（目标读取在写入之前拒绝） */
+TEST_F(ExecLiteralTest, AssignCompoundRejectsTdzTarget) {
+  const char *ops[] = {"+=", "-=", "*="};
+  for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+    const char *op = ops[i];
+    char name[32];
+    snprintf(name, sizeof(name), "tz_cmp_%zu", i);
+    clux_value_t *target = clux_context_create_i32(ctx, 10, name, NULL);
+    ASSERT_NE(target, nullptr) << op;
+    clux_value_set_tdz(target, true);
+    node_t *node = make_assign(CLUX_NODE_LITERAL_NUMERIC, op, name, "3");
+    clux_value_t *result = exec_expr_assign(ctx, node);
+    ASSERT_NE(result, nullptr) << op;
+    EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR)
+        << op;
+    EXPECT_STREQ(error_message_of(result),
+                 "use of a value before initialization")
+        << op;
+    delete_node(&node);
+  }
+}
+
+/* 场景: 逻辑复合赋值（&&= 与 ||=）对 TDZ bool 目标读取当前值
+   预期: 同样报 "use of a value before initialization" */
+TEST_F(ExecLiteralTest, AssignLogicalCompoundRejectsTdzTarget) {
+  const char *ops[] = {"&&=", "||="};
+  for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+    const char *op = ops[i];
+    char name[32];
+    snprintf(name, sizeof(name), "tz_lc_%zu", i);
+    clux_value_t *target = clux_context_create_bool(ctx, true, name, NULL);
+    ASSERT_NE(target, nullptr) << op;
+    clux_value_set_tdz(target, true);
+    node_t *node = make_assign(CLUX_NODE_LITERAL_BOOLEAN, op, name, "true");
+    clux_value_t *result = exec_expr_assign(ctx, node);
+    ASSERT_NE(result, nullptr) << op;
+    EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR)
+        << op;
+    EXPECT_STREQ(error_message_of(result),
+                 "use of a value before initialization")
+        << op;
+    delete_node(&node);
+  }
+}
+
+/* 场景: 首 "=" 清除 TDZ 后再 compound 赋值（tz_seq = 5; tz_seq += 1 序列）
+   预期: 首次 "=" 成功，后续 += 读取当前值合法，最终值为 6 */
+TEST_F(ExecLiteralTest, AssignEqualsThenCompoundAfterTdzClearSucceeds) {
+  clux_value_t *target = clux_context_create_i32(ctx, 0, "tz_seq", NULL);
+  ASSERT_NE(target, nullptr);
+  clux_value_set_tdz(target, true);
+
+  node_t *init = make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "tz_seq", "5");
+  clux_value_t *init_result = exec_expr_assign(ctx, init);
+  ASSERT_NE(init_result, nullptr);
+  EXPECT_EQ(init_result, target);
+  delete_node(&init);
+
+  node_t *inc = make_assign(CLUX_NODE_LITERAL_NUMERIC, "+=", "tz_seq", "1");
+  clux_value_t *inc_result = exec_expr_assign(ctx, inc);
+  ASSERT_NE(inc_result, nullptr);
+  EXPECT_EQ(inc_result, target);
+  EXPECT_EQ(read_i32(target), 6);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "tz_seq", NULL)), 6)
+      << "scope variable must reflect the compound write";
+  delete_node(&inc);
 }
