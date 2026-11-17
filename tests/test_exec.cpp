@@ -21,6 +21,7 @@
 #include "parser/node_binary.h"
 #include "parser/node_group.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
 #include <cstdio>
 #include <stdint.h>
@@ -174,6 +175,60 @@ protected:
     }
     stmt_var_node_set_value(node, make_node(value_kind, value_text));
     return node;
+  }
+
+  /* 合成下标节点：location 覆盖 text 区间（错误值定位用），base 与
+     args 由调用方经 subscript_node_set_base/add_arg 填充，
+     delete 根节点时递归释放全部子节点。 */
+  node_t *make_subscript(const char *text) {
+    node_t *node = create_subscript_node(a);
+    location_t loc;
+    loc.filename = "test.clux";
+    loc.begin.offset = text;
+    loc.begin.column = 1;
+    loc.begin.line = 1;
+    loc.end.offset = text + strlen(text);
+    loc.end.column = 1;
+    loc.end.line = 1;
+    node_set_location(node, &loc);
+    return node;
+  }
+
+  /* 合成完整下标节点 base[arg]：arg 为 NULL 时无实参（0 参场景），
+     delete 根节点时递归释放全部子节点。 */
+  node_t *make_subscript_of(node_t *base, node_t *arg) {
+    node_t *node = make_subscript("subscript");
+    subscript_node_set_base(node, base);
+    if (arg) {
+      subscript_node_add_arg(node, arg);
+    }
+    return node;
+  }
+
+  /* 构造 [len]i32 数组并以 name 注册进作用域（identifier 可 lookup），
+     元素 i 预填非零互异值 10+i（经 engine index/assign 写入），
+     避免断言撞上零初始化默认值。失败返回 NULL 并由调用方 ASSERT。 */
+  clux_value_t *make_i32_array(const char *name, size_t len) {
+    clux_type_t *arr_type = clux_context_get_array_type(
+        ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), len);
+    clux_value_t *arr = clux_context_create_array(ctx, arr_type, name, NULL);
+    if (!arr) {
+      return nullptr;
+    }
+    for (size_t i = 0; i < len; i++) {
+      clux_value_t *view = clux_context_index(
+          ctx, arr, clux_context_create_usize(ctx, i, NULL, NULL), NULL);
+      if (!view ||
+          clux_type_get_kind(clux_value_get_type(view)) == CLUX_TYPE_ERROR) {
+        return nullptr;
+      }
+      clux_value_t *init =
+          clux_context_create_i32(ctx, (int32_t)(10 + i), NULL, NULL);
+      if (!init || clux_context_assign(ctx, view, init, NULL) != view) {
+        return nullptr;
+      }
+    }
+    return arr;
   }
 };
 
@@ -679,15 +734,14 @@ TEST_F(ExecLiteralTest, ExecNodeDispatchesRegisteredKinds) {
   delete_node(&boolean);
 }
 
-/* 场景: 未注册 kind（EXPR_SUBSCRIPT 无回调）
-   预期: 返回 error 值，消息 "unsupported node kind: EXPR_SUBSCRIPT" */
+/* 场景: 未注册 kind（EXPR_SLICE 无回调）
+   预期: 返回 error 值，消息 "unsupported node kind: EXPR_SLICE" */
 TEST_F(ExecLiteralTest, ExecNodeUnsupportedKindError) {
-  node_t *node = make_node(CLUX_NODE_EXPR_SUBSCRIPT, "a[0]");
+  node_t *node = make_node(CLUX_NODE_EXPR_SLICE, "a[1:2]");
   clux_value_t *value = exec_node(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value),
-               "unsupported node kind: EXPR_SUBSCRIPT");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: EXPR_SLICE");
   delete_node(&node);
 }
 
@@ -730,7 +784,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_LITERAL_BOOLEAN ||
         kind == CLUX_NODE_LITERAL_IDENTIFIER || kind == CLUX_NODE_EXPR_GROUP ||
         kind == CLUX_NODE_EXPR_ASSIGN || kind == CLUX_NODE_EXPR_TERNARY ||
-        kind == CLUX_NODE_EXPR_BINARY || kind == CLUX_NODE_STMT_VAR;
+        kind == CLUX_NODE_EXPR_BINARY || kind == CLUX_NODE_EXPR_SUBSCRIPT ||
+        kind == CLUX_NODE_STMT_VAR;
     if (synthetic_skip) {
       continue;
     }
@@ -2385,4 +2440,224 @@ TEST_F(ExecLiteralTest, StandaloneUndefinedLiteralUnsupported) {
   EXPECT_STREQ(error_message_of(value),
                "unsupported node kind: LITERAL_UNDEFINED");
   delete_node(&node);
+}
+
+/* ---- exec_expr_subscript ---- */
+
+/* 场景: [4]i32 数组的正常下标取项 a[1] / a[3]
+   预期: 返回 i32 类型的 view，值为预填的 11 / 13 */
+TEST_F(ExecLiteralTest, SubscriptReadsArrayElement) {
+  ASSERT_NE(make_i32_array("arr_r", 4), nullptr);
+
+  node_t *one =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_r"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *value1 = exec_expr_subscript(ctx, one);
+  ASSERT_NE(value1, nullptr);
+  EXPECT_EQ(clux_value_get_type(value1),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_EQ(read_i32(value1), 11);
+  delete_node(&one);
+
+  node_t *three =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_r"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *value3 = exec_expr_subscript(ctx, three);
+  ASSERT_NE(value3, nullptr);
+  EXPECT_EQ(read_i32(value3), 13);
+  delete_node(&three);
+}
+
+/* 场景: 下标返回 base 类型 view（与数组内联块内存共享）
+   预期: 经通用 assign 写入 view 后原数组元素可见变化（写穿） */
+TEST_F(ExecLiteralTest, SubscriptViewAliasToBaseArray) {
+  clux_value_t *arr = make_i32_array("arr_w", 4);
+  ASSERT_NE(arr, nullptr);
+
+  node_t *two =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_w"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *view = exec_expr_subscript(ctx, two);
+  ASSERT_NE(view, nullptr);
+  EXPECT_EQ(read_i32(view), 12);
+
+  clux_value_t *v42 = clux_context_create_i32(ctx, 42, NULL, NULL);
+  ASSERT_NE(v42, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, view, v42, NULL), view);
+
+  /* engine 层独立通道读取同一元素，确认写穿到数组本体 */
+  clux_value_t *check = clux_context_index(
+      ctx, arr, clux_context_create_usize(ctx, 2, NULL, NULL), NULL);
+  ASSERT_NE(check, nullptr);
+  EXPECT_EQ(read_i32(check), 42);
+
+  /* 再次经 exec 下标读取也可见 */
+  clux_value_t *again = exec_expr_subscript(ctx, two);
+  ASSERT_NE(again, nullptr);
+  EXPECT_EQ(read_i32(again), 42);
+  delete_node(&two);
+}
+
+/* 场景: 越界下标（负数 -1 与 >=len 的 4，数组长度 4）
+   预期: 均为 error，消息精确为 "index -1 is out of bounds for array of
+         length 4" / "index 4 is out of bounds for array of length 4" */
+TEST_F(ExecLiteralTest, SubscriptIndexOutOfBoundsErrors) {
+  ASSERT_NE(make_i32_array("arr_b", 4), nullptr);
+
+  node_t *neg =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_b"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "-1"));
+  clux_value_t *neg_value = exec_expr_subscript(ctx, neg);
+  ASSERT_NE(neg_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(neg_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(neg_value),
+               "index -1 is out of bounds for array of length 4");
+  delete_node(&neg);
+
+  node_t *big =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_b"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "4"));
+  clux_value_t *big_value = exec_expr_subscript(ctx, big);
+  ASSERT_NE(big_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(big_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(big_value),
+               "index 4 is out of bounds for array of length 4");
+  delete_node(&big);
+}
+
+/* 场景: 非整数下标（bool 字面量 true 与 str 字面量 "s"）
+   预期: 均为 error，消息精确为 "index must be an integer, got 'bool'" /
+         "index must be an integer, got 'str'" */
+TEST_F(ExecLiteralTest, SubscriptNonIntegerIndexErrors) {
+  ASSERT_NE(make_i32_array("arr_n", 4), nullptr);
+
+  node_t *bool_node =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_n"),
+                        make_node(CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *bool_value = exec_expr_subscript(ctx, bool_node);
+  ASSERT_NE(bool_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bool_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bool_value),
+               "index must be an integer, got 'bool'");
+  delete_node(&bool_node);
+
+  node_t *str_node =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_n"),
+                        make_node(CLUX_NODE_LITERAL_STRING, "\"s\""));
+  clux_value_t *str_value = exec_expr_subscript(ctx, str_node);
+  ASSERT_NE(str_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(str_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(str_value),
+               "index must be an integer, got 'str'");
+  delete_node(&str_node);
+}
+
+/* 场景: 泛型实例化形态 Type[arg]（base "i32" 求值为 type value）
+   预期: 报 "generic instantiation is not supported yet" */
+TEST_F(ExecLiteralTest, SubscriptGenericInstantiationNotSupported) {
+  node_t *node =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *value = exec_expr_subscript(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value),
+               "generic instantiation is not supported yet");
+  delete_node(&node);
+}
+
+/* 场景: 实参个数不为 1（0 参 a[] 与 2 参 a[0,1]）
+   预期: 均报 "subscript takes exactly one index" */
+TEST_F(ExecLiteralTest, SubscriptRequiresExactlyOneIndex) {
+  ASSERT_NE(make_i32_array("arr_c", 4), nullptr);
+
+  node_t *zero_arg = make_subscript_of(
+      make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_c"), nullptr);
+  clux_value_t *zero_value = exec_expr_subscript(ctx, zero_arg);
+  ASSERT_NE(zero_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(zero_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(zero_value),
+               "subscript takes exactly one index");
+  delete_node(&zero_arg);
+
+  node_t *two_args =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_c"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "0"));
+  subscript_node_add_arg(two_args, make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *two_value = exec_expr_subscript(ctx, two_args);
+  ASSERT_NE(two_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(two_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(two_value),
+               "subscript takes exactly one index");
+  delete_node(&two_args);
+}
+
+/* 场景: base 子节点求值为 error（未注册 kind STMT_BLOCK）
+   预期: error 透传——"unsupported node kind: STMT_BLOCK" */
+TEST_F(ExecLiteralTest, SubscriptPropagatesBaseError) {
+  node_t *node = make_subscript_of(make_node(CLUX_NODE_STMT_BLOCK, "..."),
+                                   make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *value = exec_expr_subscript(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_BLOCK");
+  delete_node(&node);
+}
+
+/* 场景: index 子节点求值为 error（未注册 kind STMT_BLOCK），base 正常
+   预期: index 的 error 透传——"unsupported node kind: STMT_BLOCK" */
+TEST_F(ExecLiteralTest, SubscriptPropagatesIndexError) {
+  ASSERT_NE(make_i32_array("arr_e", 4), nullptr);
+
+  node_t *node =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_e"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "..."));
+  clux_value_t *value = exec_expr_subscript(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_BLOCK");
+  delete_node(&node);
+}
+
+/* 场景: TDZ 拒绝——TDZ 数组作 base 与 TDZ i32 作 index（均经 exec_operand
+   消费通道）
+   预期: 均报 "use of a value before initialization" */
+TEST_F(ExecLiteralTest, SubscriptRejectsTdzBaseAndIndex) {
+  clux_value_t *tdz_arr = make_i32_array("tz_arr", 2);
+  ASSERT_NE(tdz_arr, nullptr);
+  clux_value_set_tdz(tdz_arr, true);
+
+  node_t *base_node =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_arr"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "0"));
+  clux_value_t *base_value = exec_expr_subscript(ctx, base_node);
+  ASSERT_NE(base_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(base_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(base_value),
+               "use of a value before initialization");
+  delete_node(&base_node);
+
+  clux_value_t *arr = make_i32_array("arr_t", 2);
+  ASSERT_NE(arr, nullptr);
+  clux_value_t *tdz_idx = clux_context_create_i32(ctx, 1, "tz_idx", NULL);
+  ASSERT_NE(tdz_idx, nullptr);
+  clux_value_set_tdz(tdz_idx, true);
+
+  node_t *idx_node =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_t"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_idx"));
+  clux_value_t *idx_value = exec_expr_subscript(ctx, idx_node);
+  ASSERT_NE(idx_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(idx_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(idx_value),
+               "use of a value before initialization");
+  delete_node(&idx_node);
 }

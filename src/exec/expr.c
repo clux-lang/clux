@@ -4,6 +4,7 @@
 #include "engine/context.h"
 #include "engine/error.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include "exec/exec.h"
@@ -11,6 +12,7 @@
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
 #include "parser/node_group.h"
+#include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
 #include <stdbool.h>
 
@@ -147,6 +149,35 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
       ctx, op_loc, "unsupported binary operator '%s'", op);
   allocator_free(allocator, (void **)&op);
   return err;
+}
+
+/* 下标/实例化同形（base[expr, ...]）：
+   BASE 求值为 type value 时是泛型实例化，否则是下标取项。 */
+clux_value_t *exec_expr_subscript(clux_context_t *ctx, node_t *node) {
+  node_t *base_node = subscript_node_get_base(node);
+  size_t arg_count = subscript_node_get_arg_count(node);
+  clux_value_t *base = exec_operand(ctx, base_node);
+  if (clux_value_is_error(base)) {
+    return base;
+  }
+  /* 泛型实例化（Type[arg, ...]）：BASE 是 type value。
+     TODO: 泛型实例化暂不支持——等泛型推断引擎就绪后接入。 */
+  if (clux_type_kind_unwrap(clux_value_get_type(base)) == CLUX_TYPE_TYPE) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "generic instantiation is not supported yet");
+  }
+  if (arg_count != 1) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "subscript takes exactly one index");
+  }
+  clux_value_t *index = exec_operand(ctx, subscript_node_get_arg(node, 0));
+  if (clux_value_is_error(index)) {
+    return index;
+  }
+  /* 下标取项：返回 base 类型 view，写穿由通用 assign 完成。 */
+  return clux_context_index(ctx, base, index, node_get_location(node));
 }
 
 /* &&= / ||= 短路复合赋值：左值已是结果时跳过右值求值直接返回目标；
