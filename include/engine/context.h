@@ -21,7 +21,7 @@ clux_value_t *clux_context_create_value(clux_context_t *self,
                                         clux_type_t *type,
                                         ptr_handle_t data,
                                         const char *name,
-                                        location_t *loc);
+                                        const location_t *loc);
 void clux_context_push_scope(clux_context_t *self);
 void clux_context_pop_scope(clux_context_t *self);
 /* 当前作用域（current scope，借用）：所有带名/匿名值的注册点。
@@ -34,7 +34,7 @@ clux_scope_t *clux_context_get_scope(clux_context_t *self);
 clux_value_t *clux_context_declare_value(clux_context_t *self,
                                          clux_value_t *value,
                                          const char *name,
-                                         location_t *loc);
+                                         const location_t *loc);
 clux_value_t *clux_context_lookup(clux_context_t *self,
                                   const char *name,
                                   const location_t *loc);
@@ -45,61 +45,61 @@ clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
 clux_value_t *clux_context_create_i8(clux_context_t *self,
                                      int8_t value,
                                      const char *name,
-                                     location_t *loc);
+                                     const location_t *loc);
 clux_value_t *clux_context_create_i16(clux_context_t *self,
                                       int16_t value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_i32(clux_context_t *self,
                                       int32_t value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_i64(clux_context_t *self,
                                       int64_t value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_u8(clux_context_t *self,
                                      uint8_t value,
                                      const char *name,
-                                     location_t *loc);
+                                     const location_t *loc);
 clux_value_t *clux_context_create_u16(clux_context_t *self,
                                       uint16_t value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_u32(clux_context_t *self,
                                       uint32_t value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_u64(clux_context_t *self,
                                       uint64_t value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_isize(clux_context_t *self,
                                         intptr_t value,
                                         const char *name,
-                                        location_t *loc);
+                                        const location_t *loc);
 clux_value_t *clux_context_create_usize(clux_context_t *self,
                                         size_t value,
                                         const char *name,
-                                        location_t *loc);
+                                        const location_t *loc);
 clux_value_t *clux_context_create_f32(clux_context_t *self,
                                       float value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_f64(clux_context_t *self,
                                       double value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_bool(clux_context_t *self,
                                        bool value,
                                        const char *name,
-                                       location_t *loc);
+                                       const location_t *loc);
 /* type value（值描述类型）：data 存被描述类型的指针；type 须非空，
    否则返回 error。eq / value_extends 代理类型层（见 type_value.c）。 */
 clux_value_t *clux_context_create_type_value(clux_context_t *self,
                                              clux_type_t *type,
                                              const char *name,
-                                             location_t *loc);
+                                             const location_t *loc);
 /* 模板值（type_template / func_template）：模板不是类型，是值——data 只存
    原始 AST 指针，参数表每次实例化时从 AST 重新计算。ast 须非空，否则
    返回 error。模板值经 scope define 进词法命名空间（与变量/类型共用，
@@ -107,23 +107,23 @@ clux_value_t *clux_context_create_type_value(clux_context_t *self,
 clux_value_t *clux_context_create_type_template(clux_context_t *self,
                                                 void *ast,
                                                 const char *name,
-                                                location_t *loc);
+                                                const location_t *loc);
 clux_value_t *clux_context_create_func_template(clux_context_t *self,
                                                 void *ast,
                                                 const char *name,
-                                                location_t *loc);
+                                                const location_t *loc);
 /* 模板值取回原始 AST（两种模板通用）：非模板值返回 NULL。 */
 void *clux_context_template_ast(clux_value_t *value);
 char *clux_context_alloc_str(clux_context_t *self, size_t len);
 clux_value_t *clux_context_create_str(clux_context_t *self,
                                       const char *value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 clux_value_t *clux_context_create_ptr(clux_context_t *self,
                                       clux_type_t *type,
                                       ptr_handle_t value,
                                       const char *name,
-                                      location_t *loc);
+                                      const location_t *loc);
 /* 取指向 value 的指针：error 自传播，shadow 产出 "*<base>" 类型的 shadow。
    任意类型可用，不经过 vtable。 */
 clux_value_t *
@@ -142,12 +142,12 @@ clux_value_t *clux_context_create_slice(clux_context_t *self,
                                         ptr_handle_t ptr,
                                         size_t len,
                                         const char *name,
-                                        location_t *loc);
+                                        const location_t *loc);
 /* 读取切片长度：产出 usize 值；非切片类型返回 error，shadow 切片产出
    shadow usize。 */
 clux_value_t *clux_context_slice_len(clux_context_t *self,
                                      clux_value_t *slice,
-                                     location_t *loc);
+                                     const location_t *loc);
 /* 按 (base, len) 取 "[len]<base>" 定长数组类型：children 表 find-or-create，
    同一 (base, len) 恒等返回同一实例。 */
 clux_type_t *clux_context_get_array_type(clux_context_t *self,
@@ -158,7 +158,7 @@ clux_type_t *clux_context_get_array_type(clux_context_t *self,
 clux_value_t *clux_context_create_array(clux_context_t *self,
                                         clux_type_t *type,
                                         const char *name,
-                                        location_t *loc);
+                                        const location_t *loc);
 /* 指针解引用（*p）：返回 base 类型的 view（内存共享、携带引用属性），
    指针无效报 error，shadow 指针产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成。 */
@@ -175,17 +175,17 @@ clux_value_t *clux_context_create_optional_some(clux_context_t *self,
                                                 clux_type_t *base,
                                                 clux_value_t *value,
                                                 const char *name,
-                                                location_t *loc);
+                                                const location_t *loc);
 /* #none(T) -> ?T{none}：T 是载荷类型，内部提升为 ?T（零值）。 */
 clux_value_t *clux_context_create_optional_none(clux_context_t *self,
                                                 clux_type_t *base,
                                                 const char *name,
-                                                location_t *loc);
+                                                const location_t *loc);
 /* 判空查询（内置函数 #is_none）：none 返回 true。仅 optional 类型
    支持（vtable is_none 槽位），其余类型返回 error。 */
 clux_value_t *clux_context_is_none(clux_context_t *self,
                                    clux_value_t *value,
-                                   location_t *loc);
+                                   const location_t *loc);
 /* 断言取值（内置函数 #take，`.!` 语法糖编译为此调用）：some 返回
    载荷 base 类型的借引用 view，none 是运行期 error。仅 optional 类型
    支持（vtable take 槽位），其余类型返回 error。 */
@@ -205,7 +205,7 @@ clux_context_create_cunion_type(clux_context_t *self,
 clux_value_t *clux_context_create_cunion(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
-                                         location_t *loc);
+                                         const location_t *loc);
 /* 成员读取（x.field）：返回成员类型的 view（内存共享、携带引用属性），
    未知成员报 error，shadow 值产出成员类型的 shadow。写入由通用 assign
    写穿 view 完成。仅绑定 field 槽位的类型支持（当前 cunion 与 tag
@@ -213,7 +213,7 @@ clux_value_t *clux_context_create_cunion(clux_context_t *self,
 clux_value_t *clux_context_field(clux_context_t *self,
                                  clux_value_t *value,
                                  const char *field,
-                                 location_t *loc);
+                                 const location_t *loc);
 /* 创建具名 tag union 类型（白皮书 §3.7）：tag 为定宽 u32（偏移 0），
    payload 从类型对齐处开始，同一时刻只有一个 member 有效。成员表整体
    拷入 meta，成员名经 strs 驻留。结构判等（成员名+类型按声明序一致即
@@ -229,21 +229,21 @@ clux_type_t *clux_context_create_union_type(clux_context_t *self,
 clux_value_t *clux_context_create_union(clux_context_t *self,
                                         clux_type_t *type,
                                         const char *name,
-                                        location_t *loc);
+                                        const location_t *loc);
 /* 激活成员：切换 tag 为该成员声明序号并清零 payload，返回原值；未知
    成员返回语义化 error，shadow 值原样返回（无数据可变）。仅 tag union
    支持，其余类型返回 error。 */
 clux_value_t *clux_context_union_set_member(clux_context_t *self,
                                             clux_value_t *value,
                                             const char *member,
-                                            location_t *loc);
+                                            const location_t *loc);
 /* is 判定（value is Member，白皮书 §5.7）：当前 tag 即该成员声明序号时
    为 true，结果为 bool。仅 tag union 支持（vtable is_member 槽位），
    其余类型返回 error。 */
 clux_value_t *clux_context_is_member(clux_context_t *self,
                                      clux_value_t *value,
                                      const char *member,
-                                     location_t *loc);
+                                     const location_t *loc);
 /* 创建 func 类型（白皮书 §2.7）：签名 = 捕获表 + 参数类型序列 + 返回
    类型。捕获列表是类型的一部分——func|a:i32|(i32)->i32 与
    func(i32)->i32 是不同类型；捕获项默认值属于函数体（AST），不参与
@@ -262,13 +262,13 @@ clux_type_t *clux_context_create_func_type(clux_context_t *self,
 clux_value_t *clux_context_create_func(clux_context_t *self,
                                        clux_type_t *type,
                                        const char *name,
-                                       location_t *loc);
+                                       const location_t *loc);
 /* 挂接函数体 AST 指针（借用，不拥有）：返回原值；非 func 返回语义化
    error，shadow 值原样返回（无数据可变）。 */
 clux_value_t *clux_context_func_set_ast(clux_context_t *self,
                                         clux_value_t *value,
                                         void *ast,
-                                        location_t *loc);
+                                        const location_t *loc);
 /* 捕获读取（f.capture）：func 捕获走独立 API（不占 field 槽位语义），
    返回捕获类型的读写双向 view（内存共享、携带引用属性），写入由通用
    assign 写穿 view 完成；未知捕获返回语义化 error，shadow 值产出
@@ -276,7 +276,7 @@ clux_value_t *clux_context_func_set_ast(clux_context_t *self,
 clux_value_t *clux_context_func_capture(clux_context_t *self,
                                         clux_value_t *value,
                                         const char *capture,
-                                        location_t *loc);
+                                        const location_t *loc);
 /* 调用（f(args)）：按签名校验实参个数与类型，error 自传播；shadow
    函数或任一 shadow 实参产出返回类型的 shadow；校验通过的真函数没有
    可执行环境（AST 体的执行由编译流水线后端接线）是运行期 error。
@@ -285,7 +285,7 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
                                   clux_value_t *value,
                                   size_t argc,
                                   clux_value_t *argv[],
-                                  location_t *loc);
+                                  const location_t *loc);
 /* 创建具名 struct 类型（白皮书 §3.5）：声明体一次性传入——字段表必填，
    attribute（含 method 本体）/method 名单/subtype 三表可选。字段按声明
    序顺序平铺（C 布局），所有字段同时有效；attribute/method/subtype 是
@@ -304,7 +304,7 @@ clux_type_t *clux_context_create_struct_type(clux_context_t *self,
 clux_value_t *clux_context_create_struct(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
-                                         location_t *loc);
+                                         const location_t *loc);
 /* attribute/method 读取（T::a / a.b 的类型命名空间形态）：返回成员值本
    身（借用，不拷贝）——method 也是 func 值，拿到后经 clux_context_invoke
    调用并自行将 receiver 作首参（白皮书 §3.5.1：实例调用 a.b(args) 是
@@ -312,20 +312,20 @@ clux_value_t *clux_context_create_struct(clux_context_t *self,
 clux_value_t *clux_context_struct_attr(clux_context_t *self,
                                        clux_type_t *type,
                                        const char *name,
-                                       location_t *loc);
+                                       const location_t *loc);
 /* subtype 读取（T::S）：返回嵌套类型本体（借用）。非 struct 类型或未知
    成员返回 NULL 并记录 error。 */
 clux_type_t *clux_context_struct_subtype(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
-                                         location_t *loc);
+                                         const location_t *loc);
 /* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
    越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成（无独立下标写原语）。 */
 clux_value_t *clux_context_index(clux_context_t *self,
                                  clux_value_t *aggregate,
                                  clux_value_t *index,
-                                 location_t *loc);
+                                 const location_t *loc);
 /* 下标值归一化为 int64：仅做整数类校验（负数与越界由调用方判定）。
    成功返回 NULL 并写入 *out，否则返回 error 值。 */
 clux_value_t *clux_context_index_to_i64(clux_context_t *self,
@@ -334,7 +334,7 @@ clux_value_t *clux_context_index_to_i64(clux_context_t *self,
 clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             char *str,
                                             const char *name,
-                                            location_t *loc);
+                                            const location_t *loc);
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
                                                 const location_t *loc,
                                                 const char *fmt,
@@ -342,30 +342,30 @@ clux_value_t *clux_context_create_error_message(clux_context_t *self,
 clux_value_t *clux_context_safe_cast(clux_context_t *self,
                                      clux_value_t *value,
                                      clux_type_t *target,
-                                     location_t *loc);
+                                     const location_t *loc);
 clux_value_t *clux_context_cast(clux_context_t *self,
                                 clux_value_t *value,
                                 clux_type_t *target,
-                                location_t *loc);
+                                const location_t *loc);
 clux_value_t *clux_context_binary(clux_context_t *self,
                                   clux_binary_op_t op,
                                   clux_value_t *left,
                                   clux_value_t *right,
-                                  location_t *loc);
+                                  const location_t *loc);
 clux_value_t *clux_context_prefix(clux_context_t *self,
                                   clux_prefix_op_t op,
                                   clux_value_t *value,
-                                  location_t *loc);
+                                  const location_t *loc);
 clux_value_t *clux_context_add(clux_context_t *self,
                                clux_value_t *left,
                                clux_value_t *right,
-                               location_t *loc);
+                               const location_t *loc);
 /* 通用赋值（不经 vtable）：右值 safe_cast 成左值类型后 memcpy 穿透写入左值。
    返回左值本身；cast 失败返回 error，任一操作数为 error 自传播。 */
 clux_value_t *clux_context_assign(clux_context_t *self,
                                   clux_value_t *target,
                                   clux_value_t *value,
-                                  location_t *loc);
+                                  const location_t *loc);
 /* 通用克隆（不经 vtable）：data 是平凡位图，按类型尺寸新分配块整体拷贝。
    shadow 克隆为同类型 shadow，error 自传播。 */
 clux_value_t *

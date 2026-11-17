@@ -6,6 +6,7 @@
 extern "C" {
 #endif
 clux_vtable_t *get_clux_error_vtable(void);
+bool clux_value_is_error(clux_value_t *value);
 #ifdef __cplusplus
 }
 #endif

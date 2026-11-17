@@ -57,3 +57,8 @@ static clux_vtable_t g_error_vtable = {
 };
 
 clux_vtable_t *get_clux_error_vtable(void) { return &g_error_vtable; }
+
+bool clux_value_is_error(clux_value_t *value) {
+  clux_type_t *type = clux_value_get_type(value);
+  return clux_type_get_kind(type) == CLUX_TYPE_ERROR;
+}

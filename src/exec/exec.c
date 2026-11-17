@@ -2,8 +2,10 @@
 #include "core/location.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "exec/stmt.h"
 #include "parser/node.h"
 #include "exec/literal.h"
+#include "exec/expr.h"
 
 typedef clux_value_t *(*exec_fn_t)(clux_context_t *ctx, node_t *node);
 static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
@@ -16,8 +18,8 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_LITERAL_BOOLEAN*/ exec_literal_boolean,
     /*CLUX_NODE_LITERAL_IDENTIFIER*/ exec_literal_identifier,
     /*CLUX_NODE_SOURCE_TEXT*/ NULL,
-    /*CLUX_NODE_EXPR_ASSIGN*/ NULL,
-    /*CLUX_NODE_EXPR_TERNARY*/ NULL,
+    /*CLUX_NODE_EXPR_ASSIGN*/ exec_expr_assign,
+    /*CLUX_NODE_EXPR_TERNARY*/ exec_expr_ternary,
     /*CLUX_NODE_EXPR_BINARY*/ NULL,
     /*CLUX_NODE_EXPR_UNARY*/ NULL,
     /*CLUX_NODE_EXPR_SUBSCRIPT*/ NULL,
@@ -27,7 +29,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_EXPR_BUILTIN*/ NULL,
     /*CLUX_NODE_EXPR_CONSTRUCT*/ NULL,
     /*CLUX_NODE_EXPR_CONSTRUCT_FIELD*/ NULL,
-    /*CLUX_NODE_EXPR_GROUP*/ NULL,
+    /*CLUX_NODE_EXPR_GROUP*/ exec_expr_group,
     /*CLUX_NODE_EXPR_TUPLE*/ NULL,
     /*CLUX_NODE_EXPR_FUNC_TYPE*/ NULL,
     /*CLUX_NODE_EXPR_FUNC_DECL*/ NULL,
@@ -72,7 +74,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_SWITCH_PATTERNS*/ NULL,
     /*CLUX_NODE_DECORATOR*/ NULL,
     /*CLUX_NODE_STMT_FUNC*/ NULL,
-    /*CLUX_NODE_STMT_VAR*/ NULL,
+    /*CLUX_NODE_STMT_VAR*/ exec_stmt_var,
     /*CLUX_NODE_STMT_TYPE*/ NULL,
     /*CLUX_NODE_STMT_ENUM*/ NULL,
     /*CLUX_NODE_STMT_UNION*/ NULL,
@@ -257,6 +259,10 @@ static const char *node_kind_name(node_kind_t kind) {
 }
 
 clux_value_t *exec_node(clux_context_t *ctx, node_t *node) {
+  if (!node) {
+    return clux_context_create_error_message(
+        ctx, NULL, "execution requires a node");
+  }
   node_kind_t kind = node_get_kind(node);
   if (g_exec_callbacks[kind] == NULL) {
     const location_t *loc = node_get_location(node);

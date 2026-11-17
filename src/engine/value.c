@@ -28,6 +28,12 @@ clux_value_t *create_clux_shadow_value(allocator_t *allocator,
   return value;
 }
 ptr_handle_t clux_value_get_data(clux_value_t *self) { return self->data; }
+void *clux_value_get_raw(clux_value_t *self, size_t offset) {
+  if (self->data) {
+    return ptr_to_raw(self->data, offset);
+  }
+  return NULL;
+}
 clux_type_t *clux_value_get_type(clux_value_t *self) { return self->type; }
 bool clux_value_is_shadow(clux_value_t *self) { return self->data == 0; }
 void delete_clux_value(clux_value_t **self) {

@@ -1,0 +1,12 @@
+#ifndef _H_EXEC_STMT_
+#define _H_EXEC_STMT_
+#include "engine/interface.h"
+#include "parser/node.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node);
+#ifdef __cplusplus
+}
+#endif
+#endif
