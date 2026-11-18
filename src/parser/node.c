@@ -60,7 +60,11 @@ node_t *node_get_child(node_t *self, size_t idx) {
   return (node_t *)vec_get(self->children, idx);
 }
 void node_add_child(node_t *self, node_t *child) {
-  child->parent = self;
+  /* child 可空：与 node_set_child 一致，空槽表达"该位置没有值"，
+     空槽不建立父子关系；delete_node 与各 get 访问器对 NULL 免疫。 */
+  if (child) {
+    child->parent = self;
+  }
   vec_push(self->children, child);
 }
 void node_json_begin(json_writer_t *writer, node_t *node, const char *kind) {

@@ -382,6 +382,60 @@ TEST(NodeChildTest, SetChildReturnsReplaced) {
   delete_allocator(&a);
 }
 
+/* ---- node_add_child / node_set_child 空槽语义 ---- */
+
+/* 场景: node_add_child 传入 NULL child（空槽——表达"该位置没有值"）
+   预期: 与 node_set_child 一致容忍：槽位计入 count 但内容为 NULL、
+         不建立父子关系，NULL 槽后可继续追加真实子节点，delete_node 递归
+         释放对 NULL 槽免疫 */
+TEST(NodeChildTest, AddChildNullSlotIsAllowed) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_add_child(parent, NULL);
+  EXPECT_EQ(vec_get_size(node_get_children(parent)), 1u);
+  EXPECT_EQ(node_get_child(parent, 0), nullptr);
+  /* NULL 槽之后继续追加真实子节点仍正常建立父子关系 */
+  node_t *child = create_node(a, CLUX_NODE_LITERAL_IDENTIFIER);
+  node_add_child(parent, child);
+  EXPECT_EQ(node_get_child(parent, 1), child);
+  EXPECT_EQ(node_get_parent(child), parent);
+  delete_node(&parent); /* 父拥有子，递归释放（NULL 槽安全跳过） */
+  delete_allocator(&a);
+}
+
+/* 场景: node_add_child 正常追加真实子节点
+   预期: 建立 parent 关系（由 node_add_child 设置，非构造时指定）且追加到尾部 */
+TEST(NodeChildTest, AddChildEstablishesParent) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_t *child = create_node(a, CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_parent(child), nullptr); /* 追加前无 parent */
+  node_add_child(parent, child);
+  EXPECT_EQ(node_get_parent(child), parent); /* 追加后 parent 关系由 add 建立 */
+  EXPECT_EQ(vec_get_size(node_get_children(parent)), 1u);
+  EXPECT_EQ(node_get_child(parent, 0), child);
+  delete_node(&parent); /* 父拥有子，递归释放 */
+  delete_allocator(&a);
+}
+
+/* 场景: node_set_child 允许空槽（切片省略端点等设计约定），与 add 通道语义一致
+   预期: NULL 槽位不建立父子关系；非 NULL 槽位正常建立父子关系 */
+TEST(NodeChildTest, SetChildNullSlotIsAllowed) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_t *child = create_node(a, CLUX_NODE_LITERAL_NUMERIC);
+  node_resize_children(parent, 2);
+  /* 空槽允许：不 panic，槽位保持 NULL */
+  node_set_child(parent, 0, NULL);
+  EXPECT_EQ(node_get_child(parent, 0), nullptr);
+  /* 非 NULL 槽位：正常建立父子关系 */
+  node_set_child(parent, 1, child);
+  EXPECT_EQ(node_get_child(parent, 1), child);
+  EXPECT_EQ(node_get_parent(child), parent);
+  delete_node(&parent);
+  delete_allocator(&a);
+}
+
 TEST(NodeChildTest, GetChildOutOfRangeReturnsNull) {
   allocator_t *a = create_allocator(malloc, free);
   node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
