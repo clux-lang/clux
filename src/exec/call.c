@@ -143,6 +143,15 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
   return frame_exit(ctx, frame, caller, result);
 }
 
+/* 懒安装帧协议执行器：任何直接走 clux_context_invoke 的路径（调用表达式、
+   var 装饰器的值级包装等）invoke 前必须保证 executor 已挂——首次触发时
+   安装，engine 不依赖 exec 的分层保住。 */
+void exec_call_install_executor(clux_context_t *ctx) {
+  if (!clux_context_get_executor(ctx)) {
+    clux_context_set_executor(ctx, exec_call_executor);
+  }
+}
+
 /* 函数调用表达式 f(args)（白皮书 §2.7）：callee 求值 → 实参逐个求值
    （error 优先传播、spread/rest 实参暂不支持）→ 懒安装执行器（首次
    调用挂帧协议执行器，engine 不依赖 exec 的分层保住）→ clux_context_
@@ -170,9 +179,7 @@ clux_value_t *exec_expr_call(clux_context_t *ctx, node_t *node) {
       return argv[idx];
     }
   }
-  if (!clux_context_get_executor(ctx)) {
-    clux_context_set_executor(ctx, exec_call_executor);
-  }
+  exec_call_install_executor(ctx);
   return clux_context_invoke(
       ctx, callee, argc, argc ? argv : NULL, node_get_location(node));
 }

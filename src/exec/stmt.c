@@ -8,8 +8,10 @@
 #include "engine/qualifier.h"
 #include "engine/scope.h"
 #include "engine/value.h"
+#include "exec/call.h"
 #include "exec/exec.h"
 #include "parser/node.h"
+#include "parser/node_decorator.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_return.h"
@@ -38,7 +40,40 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
       return value;
     }
   }
-  // TODO: 待call完成后实现装饰器
+  /* 装饰器（白皮书 §3.2/§9.1）：普通装饰器是值级包装——装饰器表达式
+     求值为 func 值时按源码顺序依次调用包装初值（[[twice]] var x = 21
+     落地为 x = twice(21)）；求值为其余值（编译期标记，如 metadata）
+     不改初值。TDZ（= undefined）无初值可包装，装饰器不适用。 */
+  if (value) {
+    size_t decorator_count = stmt_var_node_get_decorator_count(node);
+    for (size_t idx = 0; idx < decorator_count; idx++) {
+      node_t *decorator = stmt_var_node_get_decorator(node, idx);
+      node_t *decorator_expr =
+          decorator ? decorator_node_get_expr(decorator) : NULL;
+      if (!decorator_expr) {
+        return clux_context_create_error_message(
+            ctx,
+            decorator ? node_get_location(decorator) : node_get_location(node),
+            "decorator requires an expression");
+      }
+      clux_value_t *wrapper = exec_operand(ctx, decorator_expr);
+      if (clux_value_is_error(wrapper)) {
+        return wrapper;
+      }
+      if (clux_type_kind_unwrap(clux_value_get_type(wrapper)) !=
+          CLUX_TYPE_FUNC) {
+        continue;
+      }
+      /* invoke 走帧协议执行器——先保证已挂（首次调用时懒安装） */
+      exec_call_install_executor(ctx);
+      clux_value_t *wrapped = clux_context_invoke(
+          ctx, wrapper, 1, &value, node_get_location(decorator));
+      if (clux_value_is_error(wrapped)) {
+        return wrapped;
+      }
+      value = wrapped;
+    }
+  }
   /* 类型标注可省略（var x = 10 按初值自身类型落地）。
      有标注时求值类型表达式——必须产出 type value，
      其余值当 clux_type_t* 解引用是内存错误。 */

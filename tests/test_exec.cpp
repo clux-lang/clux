@@ -24,6 +24,7 @@
 #include "parser/node_binary.h"
 #include "parser/node_group.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_decorator.h"
 #include "parser/node_slice.h"
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
@@ -5426,4 +5427,440 @@ TEST_F(ExecLiteralTest, CallErrorUnwindRestoresScopeThroughFrame) {
   delete_node(&after);
   delete_node(&call);
   delete_node(&decl);
+}
+
+/* ---- exec_stmt_var：var 声明装饰器（值级包装，白皮书 §3.2/§9.1） ---- */
+
+/* 合成 location 覆盖 text 的 kind 结点（text 须持久存储）——与 fixture
+   make_node 同构，供文件级辅助函数构造具名 identifier 等子结点。 */
+static node_t *
+make_text_node(allocator_t *allocator, node_kind_t kind, const char *text) {
+  node_t *node = create_node(allocator, kind);
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = text;
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = text + strlen(text);
+  loc.end.column = 1;
+  loc.end.line = 1;
+  node_set_location(node, &loc);
+  return node;
+}
+
+/* 合成 [[expr]] 装饰器结点（expr 允许为 NULL 构造缺表达式容错路径，
+   delete 根结点时一并释放全部子结点）。 */
+static node_t *make_decorator_of(allocator_t *allocator, node_t *expr) {
+  node_t *node = create_decorator_node(allocator);
+  decorator_node_set_expr(node, expr);
+  return node;
+}
+
+/* 定义 func name(x: i32): ret_text { return ret_value; } 并注册进当前
+   作用域——decl AST 被函数值借用，经 decl_out 交调用方持有，须在全部
+   调用结束后再释放（中途释放即悬空借用）。 */
+static clux_value_t *define_i32_wrapper(clux_context_t *ctx,
+                                        allocator_t *allocator,
+                                        const char *name,
+                                        const char *ret_text,
+                                        node_t *ret_value,
+                                        node_t **decl_out) {
+  node_t *params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(allocator);
+  node_t *ret = create_stmt_return_node(allocator);
+  stmt_return_node_set_value(ret, ret_value);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl = make_func_decl_of(
+      allocator,
+      NULL,
+      NULL,
+      params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name),
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, ret_text),
+      body);
+  *decl_out = decl;
+  return exec_expr_func_decl(ctx, decl);
+}
+
+/* 场景: [[twice]] var x = 21（twice = func(x: i32): i32 { return x * 2; }）
+   预期: 装饰器按值级包装落地 x = twice(21) → i32 42（对应 conformance
+         decorated_var == 42 断言）；invoke 前懒安装帧协议执行器；
+         变量按名 lookup 到同一值 */
+TEST_F(ExecLiteralTest, DecoratorWrapsInitialValueWithFuncValue) {
+  node_t *twice_decl = nullptr;
+  clux_value_t *twice = define_i32_wrapper(
+      ctx,
+      a,
+      "twice",
+      "i32",
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "2")),
+      &twice_decl);
+  ASSERT_NE(twice, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(twice)), CLUX_TYPE_FUNC);
+
+  node_t *node = make_stmt_var("x",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               nullptr,
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               "21");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "twice")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 42) << "[[twice]] must wrap the initial value";
+  EXPECT_EQ(clux_context_lookup(ctx, "x", NULL), result)
+      << "decorated value must be declared under the variable name";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "decorator invoke path must lazily install the frame executor";
+  delete_node(&node);
+  delete_node(&twice_decl);
+}
+
+/* 场景: [[d1]] [[d2]] var y = 1 按源码顺序链式包装
+        （d1 = func(x: i32): i32 { return x + 10; }，d2 = ... { return x * 2; }）
+   预期: y = d2(d1(1)) = 22——先 d1 后 d2；反序结果 12 必须被断言区分 */
+TEST_F(ExecLiteralTest, DecoratorChainAppliesInSourceOrder) {
+  node_t *add10_decl = nullptr;
+  clux_value_t *add10 = define_i32_wrapper(
+      ctx,
+      a,
+      "add10",
+      "i32",
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "10")),
+      &add10_decl);
+  ASSERT_NE(add10, nullptr);
+  node_t *mul2_decl = nullptr;
+  clux_value_t *mul2 = define_i32_wrapper(
+      ctx,
+      a,
+      "mul2",
+      "i32",
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "2")),
+      &mul2_decl);
+  ASSERT_NE(mul2, nullptr);
+
+  node_t *node = make_stmt_var("y",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               nullptr,
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               "1");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "add10")));
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "mul2")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(read_i32(result), 22)
+      << "decorators must chain in source order: mul2(add10(1)) == 22";
+  EXPECT_EQ(clux_context_lookup(ctx, "y", NULL), result);
+  delete_node(&node);
+  delete_node(&add10_decl);
+  delete_node(&mul2_decl);
+}
+
+/* 场景: 非 func 装饰器求值结果跳过——[[i32]]（type value，编译期标记）
+        与 [[7]]（整数字面量）混排 var s = 21
+   预期: 两类非 func 求值结果均不包装初值（s == 21）；全程无 invoke
+         （帧执行器保持未安装） */
+TEST_F(ExecLiteralTest, DecoratorNonFuncValueIsSkipped) {
+  node_t *node = make_stmt_var("s",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               nullptr,
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               "21");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  stmt_var_node_add_decorator(
+      node, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 21)
+      << "non-func decorator results (type value / integer) must not alter "
+         "the initial value";
+  EXPECT_EQ(clux_context_lookup(ctx, "s", NULL), result);
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "skipped decorators must never reach the invoke path";
+  delete_node(&node);
+}
+
+/* 场景: 装饰器表达式求值产出 error——[[missing_fn]] var x = 21
+   预期: 求值错误直接传播为声明结果（use of undeclared identifier），
+         变量不落地（lookup 不到） */
+TEST_F(ExecLiteralTest, DecoratorExpressionErrorPropagates) {
+  node_t *node = make_stmt_var("x",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               nullptr,
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               "21");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "missing_fn")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'missing_fn'")
+      << "decorator expression evaluation error must propagate verbatim";
+  clux_value_t *looked_up = clux_context_lookup(ctx, "x", NULL);
+  ASSERT_NE(looked_up, nullptr);
+  EXPECT_TRUE(clux_value_is_error(looked_up))
+      << "the variable must not be declared when decoration fails "
+         "(lookup miss yields an error value)";
+  delete_node(&node);
+}
+
+/* 场景: 装饰器 invoke 内部 error——boom = func(x: i32): i32
+        { return boom_var; }（体内未声明名），[[boom]] var x = 21
+   预期: 函数体执行错误穿帧边界传播为声明结果，错误消息保持原样 */
+TEST_F(ExecLiteralTest, DecoratorInvokeBodyErrorPropagates) {
+  node_t *boom_decl = nullptr;
+  clux_value_t *boom =
+      define_i32_wrapper(ctx,
+                         a,
+                         "boom",
+                         "i32",
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "boom_var"),
+                         &boom_decl);
+  ASSERT_NE(boom, nullptr);
+
+  node_t *node = make_stmt_var("x",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               nullptr,
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               "21");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "boom")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'boom_var'")
+      << "the in-body error must propagate through the frame boundary";
+  clux_value_t *declared = clux_context_lookup(ctx, "x", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared))
+      << "the variable must not be declared when the wrapper body fails "
+         "(lookup miss yields an error value)";
+  delete_node(&node);
+  delete_node(&boom_decl);
+}
+
+/* 场景: 装饰器 invoke 签名校验失败——双参函数 [[pair]] var x = 21
+   预期: func_invoke 校验实参个数（期望 2 实收 1）报 error 并传播 */
+TEST_F(ExecLiteralTest, DecoratorInvokeArityErrorPropagates) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pair"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *pair = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(pair, nullptr);
+
+  node_t *node = make_stmt_var("x",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               nullptr,
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               "21");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pair")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "function expects 2 arguments, got 1")
+      << "invoke signature validation failure must propagate";
+  delete_node(&node);
+  delete_node(&decl);
+}
+
+/* 场景: TDZ 路径装饰器跳过——[[twice]] var t: i32 = undefined
+   预期: 无初值可包装，装饰器整体跳过（执行器保持未安装）；i32 类型
+         TDZ 变量正常创建并按名可达 */
+TEST_F(ExecLiteralTest, DecoratorSkippedOnTdzInitializer) {
+  node_t *twice_decl = nullptr;
+  clux_value_t *twice = define_i32_wrapper(
+      ctx,
+      a,
+      "twice",
+      "i32",
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "2")),
+      &twice_decl);
+  ASSERT_NE(twice, nullptr);
+
+  node_t *node = make_stmt_var("t",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               "i32",
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "twice")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_tdz(result))
+      << "undefined initializer must still create a TDZ variable";
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(clux_context_lookup(ctx, "t", NULL), result);
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "decorators must be skipped entirely on the TDZ path";
+  delete_node(&node);
+  delete_node(&twice_decl);
+}
+
+/* 场景: 装饰器槽位损坏两条容错路径——DECORATOR 结点缺 expr（手工空造）
+        与装饰器槽位本身为 NULL（get_decorator 取到空槽）
+   预期: 均报 "decorator requires an expression"，不触发 invoke */
+TEST_F(ExecLiteralTest, DecoratorMissingExpressionReports) {
+  /* 路径 1：DECORATOR 结点存在但 expr 槽为空 */
+  node_t *first = make_stmt_var("x",
+                                CLUX_NODE_LITERAL_IDENTIFIER,
+                                nullptr,
+                                CLUX_NODE_LITERAL_NUMERIC,
+                                "21");
+  stmt_var_node_add_decorator(first, make_decorator_of(a, nullptr));
+  clux_value_t *result = exec_stmt_var(ctx, first);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "decorator requires an expression");
+  clux_value_t *declared = clux_context_lookup(ctx, "x", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared))
+      << "the variable must not be declared on the malformed decorator path "
+         "(lookup miss yields an error value)";
+  delete_node(&first);
+  declared = nullptr;
+
+  /* 路径 2：装饰器槽位为 NULL（node_add_child NULL 空槽容忍） */
+  node_t *second = make_stmt_var("x",
+                                 CLUX_NODE_LITERAL_IDENTIFIER,
+                                 nullptr,
+                                 CLUX_NODE_LITERAL_NUMERIC,
+                                 "21");
+  stmt_var_node_add_decorator(second, nullptr);
+  clux_value_t *result2 = exec_stmt_var(ctx, second);
+  ASSERT_NE(result2, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result2)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result2), "decorator requires an expression");
+  declared = clux_context_lookup(ctx, "x", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared))
+      << "the variable must not be declared on the malformed decorator path "
+         "(lookup miss yields an error value)";
+  delete_node(&second);
+}
+
+/* 场景: 装饰结果与类型标注交互（拓宽）——[[twice]] var w: i64 = 21
+   预期: 包装产出的 i32 42 经 safe_cast 拓宽到标注 i64 后落地——变量
+         类型精确为 i64、值 42、按名可达 */
+TEST_F(ExecLiteralTest, DecoratedValueWidensThroughSafeCast) {
+  node_t *twice_decl = nullptr;
+  clux_value_t *twice = define_i32_wrapper(
+      ctx,
+      a,
+      "twice",
+      "i32",
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "2")),
+      &twice_decl);
+  ASSERT_NE(twice, nullptr);
+
+  node_t *node = make_stmt_var("w",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               "i64",
+                               CLUX_NODE_LITERAL_NUMERIC,
+                               "21");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "twice")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I64)
+      << "the wrapped i32 value must be safely cast to the annotated i64";
+  EXPECT_EQ(read_i64(result), 42);
+  EXPECT_EQ(clux_context_lookup(ctx, "w", NULL), result);
+  delete_node(&node);
+  delete_node(&twice_decl);
+}
+
+/* 场景: 装饰结果与类型标注交互（窄化拒绝）——[[twice]] var n: i8 = 21
+   预期: 包装产出的 i32 42 到标注 i8 的 safe_cast 因窄化被拒——报
+         narrowing conversion，变量不落地（lookup 不到） */
+TEST_F(ExecLiteralTest, DecoratedValueNarrowingCastRejected) {
+  node_t *twice_decl = nullptr;
+  clux_value_t *twice = define_i32_wrapper(
+      ctx,
+      a,
+      "twice",
+      "i32",
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "2")),
+      &twice_decl);
+  ASSERT_NE(twice, nullptr);
+
+  node_t *node = make_stmt_var(
+      "n", CLUX_NODE_LITERAL_IDENTIFIER, "i8", CLUX_NODE_LITERAL_NUMERIC, "21");
+  stmt_var_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "twice")));
+  clux_value_t *result = exec_stmt_var(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "cannot safely cast 'i32' to 'i8': narrowing conversion")
+      << "the decorated value must still flow through safe_cast";
+  clux_value_t *declared = clux_context_lookup(ctx, "n", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared))
+      << "the variable must not be declared when the cast is rejected "
+         "(lookup miss yields an error value)";
+  delete_node(&node);
+  delete_node(&twice_decl);
 }
