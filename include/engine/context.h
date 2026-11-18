@@ -165,6 +165,13 @@ clux_value_t *clux_context_slice_len(clux_context_t *self,
 clux_type_t *clux_context_get_array_type(clux_context_t *self,
                                          clux_type_t *base,
                                          size_t len);
+/* 取元组类型（白皮书 §2.6）<>：元素类型序列结构去重——按声明序一致
+   时恒等返回，类型由 context 的具名类型表托管释放。空元组合法；
+   入参非法（count>0 而 elems 为 NULL / 元素缺类型）返回 NULL 并记录
+   error。 */
+clux_type_t *clux_context_get_tuple_type(clux_context_t *self,
+                                         clux_type_t **elems,
+                                         size_t count);
 /* 创建数组值：N 个元素的连续内联块零初始化。type 须是
    CLUX_TYPE_ARRAY（由调用方保证）。 */
 clux_value_t *clux_context_create_array(clux_context_t *self,

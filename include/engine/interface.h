@@ -75,6 +75,10 @@ typedef enum _clux_type_kind_t {
   /* opaque：无类型载荷（FFI / 显式类型擦除边界，白皮书 §2.1）。
      布局等同裸指针。任何指针可隐式转为 opaque；反向转出必须显式 as。 */
   CLUX_TYPE_OPAQUE,
+  /* tuple（枚举尾部追加，不打断既有序号）：异构元素按声明序平铺的
+     值类型（白皮书 §2.6），元素按位置访问，判等按字节比较（§5.5）。
+     空元组 <> 合法（size 0、align 1）。 */
+  CLUX_TYPE_TUPLE,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

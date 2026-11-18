@@ -32,6 +32,7 @@
 #include "engine/void.h"
 #include "engine/template.h"
 #include "engine/type_value.h"
+#include "engine/tuple.h"
 #include "engine/union.h"
 
 struct _clux_context_t {
@@ -542,6 +543,55 @@ clux_type_t *clux_context_get_array_type(clux_context_t *self,
                                          size_t len) {
   (void)self;
   return base ? clux_type_get_array_type(base, len) : NULL;
+}
+clux_type_t *clux_context_get_tuple_type(clux_context_t *self,
+                                         clux_type_t **elems,
+                                         size_t count) {
+  if (count > 0 && !elems) {
+    (void)clux_context_create_error_message(
+        self, NULL, "tuple type requires element types");
+    return NULL;
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    if (!elems[idx]) {
+      (void)clux_context_create_error_message(
+          self, NULL, "tuple type element %zu requires a type", idx);
+      return NULL;
+    }
+  }
+  /* 结构去重：已存在元素类型序列按声明序一致的实例时恒等返回。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_tuple_signature_equal(existing, elems, count)) {
+      return existing;
+    }
+  }
+  /* 命名 "<a, b>" 风格组装，仅供错误显示，不参与判等。 */
+  size_t name_len = 2; /* '<' '>' */
+  for (size_t idx = 0; idx < count; idx++) {
+    const char *elem_name = clux_type_get_name(elems[idx]);
+    name_len += strlen(elem_name ? elem_name : "<unknown>") + 2;
+  }
+  char name[name_len + 1];
+  size_t pos = 0;
+  name[pos++] = '<';
+  for (size_t idx = 0; idx < count; idx++) {
+    const char *elem_name = clux_type_get_name(elems[idx]);
+    elem_name = elem_name ? elem_name : "<unknown>";
+    if (idx > 0) {
+      name[pos++] = ',';
+      name[pos++] = ' ';
+    }
+    size_t len = strlen(elem_name);
+    (void)memcpy(name + pos, elem_name, len);
+    pos += len;
+  }
+  name[pos++] = '>';
+  name[pos] = '\0';
+  clux_type_t *type =
+      create_clux_tuple_type(self->allocator, name, elems, count);
+  (void)vec_push(self->named_types, type);
+  return type;
 }
 clux_value_t *clux_context_create_array(clux_context_t *self,
                                         clux_type_t *type,

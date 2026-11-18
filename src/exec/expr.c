@@ -11,11 +11,16 @@
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
+#include "parser/node_func_capture.h"
+#include "parser/node_func_param.h"
+#include "parser/node_func_type.h"
 #include "parser/node_group.h"
 #include "parser/node_slice.h"
 #include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
+#include "parser/node_tuple.h"
 #include <stdbool.h>
+#include <string.h>
 
 clux_value_t *exec_expr_group(clux_context_t *ctx, node_t *node) {
   node_t *body = group_node_get_expr(node);
@@ -327,6 +332,152 @@ clux_value_t *exec_expr_slice(clux_context_t *ctx, node_t *node) {
     }
   }
   return clux_context_slice(ctx, base, lo, hi, node_get_location(node));
+}
+
+/* 函数类型定义 func |captures|(params) -> ret（白皮书 §2.7）：捕获表、
+   参数序列与返回类型全部求值为 type value 后经引擎结构去重构造——
+   捕获列表是类型签名的一部分。参数为 rest 表达式（C FFI 变参 `...`
+   或参数包 `...Args`）暂不支持，等 FFI / 泛型推断批次接入。 */
+clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  /* 捕获项求值：名称取 identifier 文本，类型经公共类型通道；重名在
+     引擎校验前拦截以携带源位置。 */
+  node_t *captures_node = func_type_node_get_captures(node);
+  size_t capture_count =
+      captures_node ? func_captures_node_get_capture_count(captures_node) : 0;
+  clux_func_capture_t captures[capture_count];
+  size_t filled = 0;
+  clux_value_t *fail = NULL;
+  for (size_t idx = 0; idx < capture_count && !fail; idx++) {
+    node_t *capture = func_captures_node_get_capture(captures_node, idx);
+    node_t *name_node = capture ? func_capture_node_get_name(capture) : NULL;
+    char *name = name_node
+                     ? location_get(node_get_location(name_node), allocator)
+                     : NULL;
+    if (!name) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "capture %zu requires a name and a type", idx);
+      break;
+    }
+    for (size_t prev = 0; prev < filled; prev++) {
+      if (strcmp(name, captures[prev].name) == 0) {
+        fail = clux_context_create_error_message(
+            ctx, node_get_location(name_node), "duplicate capture '%s'", name);
+        break;
+      }
+    }
+    if (fail) {
+      allocator_free(allocator, (void **)&name);
+      break;
+    }
+    node_t *type_node = func_capture_node_get_type(capture);
+    if (!type_node) {
+      fail = clux_context_create_error_message(ctx,
+                                               node_get_location(capture),
+                                               "capture '%s' requires a type",
+                                               name);
+      allocator_free(allocator, (void **)&name);
+      break;
+    }
+    clux_value_t *err = NULL;
+    clux_type_t *type = exec_operand_type(ctx, type_node, &err);
+    if (!type) {
+      fail = err;
+      allocator_free(allocator, (void **)&name);
+      break;
+    }
+    captures[filled].name = name;
+    captures[filled].type = type;
+    filled++;
+  }
+  /* 参数序列求值：函数类型的形参是裸类型表达式，rest（变参/参数包）
+     暂不支持。 */
+  node_t *params_node = func_type_node_get_params(node);
+  size_t param_count =
+      params_node ? func_params_node_get_param_count(params_node) : 0;
+  clux_type_t *params[param_count];
+  for (size_t idx = 0; idx < param_count && !fail; idx++) {
+    node_t *param = func_params_node_get_param(params_node, idx);
+    if (!param) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "parameter %zu requires a type", idx);
+      break;
+    }
+    if (node_get_kind(param) == CLUX_NODE_EXPR_REST) {
+      fail = clux_context_create_error_message(ctx,
+                                               node_get_location(param),
+                                               "variadic function type is "
+                                               "not supported yet");
+      break;
+    }
+    clux_value_t *err = NULL;
+    params[idx] = exec_operand_type(ctx, param, &err);
+    if (!params[idx]) {
+      fail = err;
+      break;
+    }
+  }
+  /* 返回类型必填（'->' 后的类型表达式）。 */
+  clux_type_t *return_type = NULL;
+  node_t *return_node = func_type_node_get_return(node);
+  if (!fail) {
+    if (!return_node) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "function type requires a return type");
+    } else {
+      clux_value_t *err = NULL;
+      return_type = exec_operand_type(ctx, return_node, &err);
+      if (!return_type) {
+        fail = err;
+      }
+    }
+  }
+  clux_type_t *type = NULL;
+  if (!fail) {
+    type = clux_context_create_func_type(
+        ctx, "func", captures, capture_count, params, param_count, return_type);
+  }
+  for (size_t idx = 0; idx < filled; idx++) {
+    allocator_free(allocator, (void **)&captures[idx].name);
+  }
+  if (fail) {
+    return fail;
+  }
+  if (!type) {
+    return clux_context_create_error_message(
+        ctx, loc, "function type creation failed");
+  }
+  return clux_context_create_type_value(ctx, type, NULL, loc);
+}
+
+/* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value
+   后经引擎结构去重构造，空元组 <> 合法；<...Ts> 参数包（rest 表达式）
+   暂不支持，等泛型推断引擎就绪后接入。 */
+clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node) {
+  size_t count = tuple_node_get_elem_count(node);
+  clux_type_t *elems[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *elem = tuple_node_get_elem(node, idx);
+    if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "generic parameter pack is not supported yet");
+    }
+    clux_value_t *err = NULL;
+    elems[idx] = exec_operand_type(ctx, elem, &err);
+    if (!elems[idx]) {
+      return err;
+    }
+  }
+  clux_type_t *type = clux_context_get_tuple_type(ctx, elems, count);
+  if (!type) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "tuple type creation failed");
+  }
+  return clux_context_create_type_value(
+      ctx, type, NULL, node_get_location(node));
 }
 
 /* &&= / ||= 短路复合赋值：左值已是结果时跳过右值求值直接返回目标；

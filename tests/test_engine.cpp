@@ -12,6 +12,7 @@
 #include "engine/qualifier.h"
 #include "engine/slice.h"
 #include "engine/type.h"
+#include "engine/tuple.h"
 #include "engine/template.h"
 #include "engine/type_value.h"
 #include "engine/value.h"
@@ -6073,6 +6074,453 @@ TEST(EngineTest, CreateTdzValueLifecycleConsumeAssignRead) {
       << "successful first assignment must clear the TDZ flag";
   EXPECT_EQ(clux_context_consume_value(ctx, value, NULL), value)
       << "after first assignment the value becomes consumable";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- tuple 复合类型（白皮书 §2.6/§5.5）---- */
+
+/* 场景: <i32, str> 结构去重与 meta 访问
+   预期: 命名 "<i32, str>" 风格、元素序列按声明序访问；同元素序列恒等
+         返回；顺序/长度/元素不同均产出不同实例 */
+TEST(EngineTest, TupleTypeInterningAndMeta) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
+  clux_type_t *pair[] = {i32_type, str_type};
+
+  clux_type_t *t = clux_context_get_tuple_type(ctx, pair, 2);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(clux_type_get_kind(t), CLUX_TYPE_TUPLE);
+  EXPECT_STREQ(clux_type_get_name(t), "<i32, str>");
+  EXPECT_EQ(clux_tuple_elem_count(t), 2u);
+  EXPECT_EQ(clux_tuple_get_elem(t, 0), i32_type);
+  EXPECT_EQ(clux_tuple_get_elem(t, 1), str_type);
+  EXPECT_EQ(clux_tuple_get_elem(t, 2), nullptr)
+      << "out-of-bounds element access must return NULL";
+  EXPECT_EQ(clux_tuple_elem_count(nullptr), 0u)
+      << "NULL type must be tolerated with count 0";
+  EXPECT_EQ(clux_tuple_get_elem(nullptr, 0), nullptr)
+      << "NULL type must be tolerated with NULL element";
+
+  EXPECT_EQ(clux_context_get_tuple_type(ctx, pair, 2), t)
+      << "same element sequence must be interned";
+  clux_type_t *swapped[] = {str_type, i32_type};
+  EXPECT_NE(clux_context_get_tuple_type(ctx, swapped, 2), t)
+      << "declaration order is part of tuple identity";
+  EXPECT_NE(clux_context_get_tuple_type(ctx, pair, 1), t)
+      << "shorter sequence must be a different type";
+  clux_type_t *three[] = {i32_type, str_type, i32_type};
+  EXPECT_NE(clux_context_get_tuple_type(ctx, three, 3), t)
+      << "longer sequence must be a different type";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 空元组 <>（0 元素）
+   预期: 合法类型；size 0、align 1、元素数 0、命名 "<>"、两次获取恒等 */
+TEST(EngineTest, TupleEmptyType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *empty = clux_context_get_tuple_type(ctx, NULL, 0);
+  ASSERT_NE(empty, nullptr);
+  EXPECT_EQ(clux_type_get_kind(empty), CLUX_TYPE_TUPLE);
+  EXPECT_STREQ(clux_type_get_name(empty), "<>");
+  EXPECT_EQ(clux_type_get_size(empty), 0u);
+  EXPECT_EQ(clux_type_get_align(empty), 1u);
+  EXPECT_EQ(clux_tuple_elem_count(empty), 0u);
+  EXPECT_EQ(clux_tuple_get_elem(empty, 0), nullptr);
+  EXPECT_EQ(clux_context_get_tuple_type(ctx, NULL, 0), empty)
+      << "two empty tuples must be the same instance";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: <i8, i64> 平铺布局与元素偏移；<i64, i8> 逆序对齐填充；
+        嵌套元组（元素本身是元组类型）
+   预期: i8 在偏移 0、i64 在偏移 8，align=8、size=16；逆序 size 取整到
+         align 仍为 16；越界 idx 返回已累积的安全偏移；嵌套元素恒等 */
+TEST(EngineTest, TupleLayoutOffsetsAndNesting) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i8_type = clux_context_builtin_type(ctx, CLUX_TYPE_I8);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+
+  clux_type_t *pair[] = {i8_type, i64_type};
+  clux_type_t *t = clux_context_get_tuple_type(ctx, pair, 2);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(clux_type_get_align(t), 8u);
+  EXPECT_EQ(clux_type_get_size(t), 16u);
+  EXPECT_EQ(clux_tuple_elem_offset(t, 0), 0u);
+  EXPECT_EQ(clux_tuple_elem_offset(t, 1), 8u)
+      << "i64 must be placed at its own alignment (8)";
+  EXPECT_EQ(clux_tuple_elem_offset(t, 2), 16u)
+      << "out-of-bounds idx returns the accumulated flat offset";
+
+  clux_type_t *rev_pair[] = {i64_type, i8_type};
+  clux_type_t *rev = clux_context_get_tuple_type(ctx, rev_pair, 2);
+  ASSERT_NE(rev, nullptr);
+  EXPECT_EQ(clux_type_get_align(rev), 8u);
+  EXPECT_EQ(clux_type_get_size(rev), 16u)
+      << "flat size 9 rounded up to align 8 is 16";
+  EXPECT_EQ(clux_tuple_elem_offset(rev, 0), 0u);
+  EXPECT_EQ(clux_tuple_elem_offset(rev, 1), 8u);
+
+  clux_type_t *only_i32[] = {i32_type};
+  clux_type_t *inner = clux_context_get_tuple_type(ctx, only_i32, 1);
+  ASSERT_NE(inner, nullptr);
+  EXPECT_STREQ(clux_type_get_name(inner), "<i32>");
+  clux_type_t *nested_pair[] = {inner, i64_type};
+  clux_type_t *nested = clux_context_get_tuple_type(ctx, nested_pair, 2);
+  ASSERT_NE(nested, nullptr);
+  EXPECT_EQ(clux_tuple_get_elem(nested, 0), inner)
+      << "tuple element can itself be a tuple type";
+  EXPECT_EQ(clux_tuple_get_elem(nested, 1), i64_type);
+  EXPECT_EQ(clux_tuple_elem_offset(nested, 0), 0u);
+  EXPECT_EQ(clux_tuple_elem_offset(nested, 1), 8u);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 结构判等（clux_type_equal / clux_tuple_signature_equal 各分支）
+   预期: 跨 context 的同元素序列结构判等 true；顺序/长度不同 false；
+         非 tuple 对端 false；signature_equal 对非 tuple self、count 不
+         一致、elems NULL、空序列对空元组各分支行为正确 */
+TEST(EngineTest, TupleTypeEqualAndSignature) {
+  allocator_t *a1 = create_allocator(malloc, free);
+  clux_context_t *ctx1 = create_clux_context(a1);
+  allocator_t *a2 = create_allocator(malloc, free);
+  clux_context_t *ctx2 = create_clux_context(a2);
+
+  clux_type_t *i32_a = clux_context_builtin_type(ctx1, CLUX_TYPE_I32);
+  clux_type_t *i64_a = clux_context_builtin_type(ctx1, CLUX_TYPE_I64);
+  clux_type_t *pair_a[] = {i32_a, i64_a};
+  clux_type_t *x = clux_context_get_tuple_type(ctx1, pair_a, 2);
+  ASSERT_NE(x, nullptr);
+
+  clux_type_t *i32_b = clux_context_builtin_type(ctx2, CLUX_TYPE_I32);
+  clux_type_t *i64_b = clux_context_builtin_type(ctx2, CLUX_TYPE_I64);
+  clux_type_t *pair_b[] = {i32_b, i64_b};
+  clux_type_t *y = clux_context_get_tuple_type(ctx2, pair_b, 2);
+  ASSERT_NE(y, nullptr);
+  EXPECT_NE(x, y) << "independent contexts must create distinct instances";
+  EXPECT_TRUE(clux_type_equal(x, y))
+      << "same element sequence must be structurally equal";
+
+  clux_type_t *rev_b[] = {i64_b, i32_b};
+  clux_type_t *rev = clux_context_get_tuple_type(ctx2, rev_b, 2);
+  ASSERT_NE(rev, nullptr);
+  EXPECT_FALSE(clux_type_equal(x, rev))
+      << "declaration order is part of tuple identity";
+  clux_type_t *only_b[] = {i32_b};
+  clux_type_t *single = clux_context_get_tuple_type(ctx2, only_b, 1);
+  ASSERT_NE(single, nullptr);
+  EXPECT_FALSE(clux_type_equal(x, single));
+  EXPECT_FALSE(clux_type_equal(x, i32_b))
+      << "tuple vs non-tuple must not be equal";
+
+  EXPECT_FALSE(clux_tuple_signature_equal(i32_a, pair_a, 2))
+      << "non-tuple self must be rejected";
+  EXPECT_FALSE(clux_tuple_signature_equal(x, pair_a, 1))
+      << "count mismatch must be rejected";
+  EXPECT_TRUE(clux_tuple_signature_equal(x, pair_a, 2));
+  EXPECT_FALSE(clux_tuple_signature_equal(x, NULL, 2))
+      << "NULL elems with positive count must be rejected";
+  clux_type_t *empty = clux_context_get_tuple_type(ctx1, NULL, 0);
+  ASSERT_NE(empty, nullptr);
+  EXPECT_TRUE(clux_tuple_signature_equal(empty, NULL, 0))
+      << "empty sequence matches the empty tuple";
+  EXPECT_FALSE(clux_tuple_signature_equal(x, NULL, 0))
+      << "2-element tuple does not match an empty sequence";
+  clux_type_t *rev_a[] = {i64_a, i32_a};
+  EXPECT_FALSE(clux_tuple_signature_equal(x, rev_a, 2))
+      << "element order must be respected";
+
+  delete_clux_context(&ctx1);
+  delete_allocator(&a1);
+  delete_clux_context(&ctx2);
+  delete_allocator(&a2);
+}
+
+/* 场景: tuple 按位置 index（元素类型 view、内存共享写穿）与错误路径
+   预期: index 0/1 返回元素类型 view，assign 写穿到元组内联块；越界
+         （==count / 负数）报 out of bounds；非整数下标报错；shadow 元组
+         产出元素类型 shadow；悬垂句柄报 "cannot index an invalid
+         tuple"；error 下标原样透传 */
+TEST(EngineTest, TupleIndexWriteThroughAndBounds) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *pair[] = {i32_type, i64_type};
+  clux_type_t *t = clux_context_get_tuple_type(ctx, pair, 2);
+  ASSERT_NE(t, nullptr);
+  size_t size = clux_type_get_size(t);
+  ASSERT_EQ(size, 16u);
+
+  ptr_handle_t data =
+      safe_alloc(clux_context_get_safe_allocator(ctx), size, NULL);
+  ASSERT_NE(data, (ptr_handle_t)0);
+  memset(ptr_to_raw(data, 0), 0, size);
+  clux_value_t *tuple =
+      clux_context_create_value(ctx, t, data, "tuple_v", NULL);
+  ASSERT_NE(tuple, nullptr);
+
+  /* index 0：i32 view 写穿（块内偏移 0） */
+  clux_value_t *v0 = clux_context_index(
+      ctx, tuple, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(v0, nullptr);
+  EXPECT_EQ(clux_value_get_type(v0), i32_type);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, v0, five, NULL), v0);
+  EXPECT_EQ(read_i32(v0), 5);
+  EXPECT_EQ(*(int32_t *)ptr_to_raw(data, 0), 5)
+      << "assignment must write through to the tuple inline block";
+
+  /* index 1：i64 view 写穿（块内偏移 8） */
+  clux_value_t *v1 = clux_context_index(
+      ctx, tuple, clux_context_create_usize(ctx, 1, NULL, NULL), NULL);
+  ASSERT_NE(v1, nullptr);
+  EXPECT_EQ(clux_value_get_type(v1), i64_type);
+  clux_value_t *seven = clux_context_create_i64(ctx, 7, NULL, NULL);
+  ASSERT_NE(seven, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, v1, seven, NULL), v1);
+  EXPECT_EQ(read_i64(v1), 7);
+  EXPECT_EQ(*(int64_t *)((char *)ptr_to_raw(data, 0) + 8), 7);
+
+  /* 新取的 view 读出写穿后的值（内存共享） */
+  clux_value_t *again = clux_context_index(
+      ctx, tuple, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(again, nullptr);
+  EXPECT_EQ(read_i32(again), 5);
+
+  /* 越界：idx == count */
+  clux_value_t *oob = clux_context_index(
+      ctx, tuple, clux_context_create_usize(ctx, 2, NULL, NULL), NULL);
+  ASSERT_NE(oob, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(oob)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(oob),
+               "index 2 is out of bounds for tuple of length 2");
+  /* 负数下标 */
+  clux_value_t *neg = clux_context_index(
+      ctx, tuple, clux_context_create_i32(ctx, -1, NULL, NULL), NULL);
+  ASSERT_NE(neg, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(neg)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(neg),
+               "index -1 is out of bounds for tuple of length 2");
+  /* 非整数下标 */
+  clux_value_t *not_int = clux_context_index(
+      ctx, tuple, clux_context_create_bool(ctx, true, NULL, NULL), NULL);
+  ASSERT_NE(not_int, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(not_int)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(not_int),
+               "index must be an integer, got 'bool'");
+  /* error 下标透传 */
+  clux_value_t *boom = clux_context_create_error_message(ctx, NULL, "boom");
+  ASSERT_NE(boom, nullptr);
+  EXPECT_EQ(clux_context_index(ctx, tuple, boom, NULL), boom)
+      << "error index must pass through unchanged";
+
+  /* 悬垂句柄：idx 合法但块无效 */
+  ptr_handle_t dead =
+      safe_alloc(clux_context_get_safe_allocator(ctx), size, NULL);
+  ASSERT_NE(dead, (ptr_handle_t)0);
+  ASSERT_TRUE(safe_free(dead));
+  clux_value_t *bad = clux_context_create_value(ctx, t, dead, NULL, NULL);
+  ASSERT_NE(bad, nullptr);
+  clux_value_t *bad_view = clux_context_index(
+      ctx, bad, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(bad_view, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_view)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_view), "cannot index an invalid tuple");
+
+  /* shadow 元组：产出对应元素类型的 shadow */
+  clux_value_t *shadow_tuple = clux_context_create_shadow_value(ctx, t);
+  ASSERT_NE(shadow_tuple, nullptr);
+  clux_value_t *shadow_elem = clux_context_index(
+      ctx, shadow_tuple, clux_context_create_usize(ctx, 1, NULL, NULL), NULL);
+  ASSERT_NE(shadow_elem, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_elem));
+  EXPECT_EQ(clux_value_get_type(shadow_elem), i64_type);
+
+  /* shadow 下标：tuple_index 的 shadow 检查位于 index_to_i64 之后，
+     shadow 值 data==0 先被拦截——当前行为是 "cannot read an invalid
+     index" error（slice_index 是先查 shadow 的约定，此处为已报告的
+     防错顺序疑似 bug，待主代理确认后该断言应改为元素 shadow） */
+  clux_value_t *shadow_index = clux_context_create_shadow_value(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_USIZE));
+  ASSERT_NE(shadow_index, nullptr);
+  clux_value_t *via_shadow_index =
+      clux_context_index(ctx, tuple, shadow_index, NULL);
+  ASSERT_NE(via_shadow_index, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(via_shadow_index)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(via_shadow_index),
+               "cannot read an invalid index");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: tuple eq/ne 字节比较与错误路径
+   预期: 同类型同字节 eq 为 true；一字节差异 eq/ne 反转；类型不同（另一
+         元组 / 非 tuple）报 "requires operands of the same type"（含
+         '!=' 操作符文本）；悬垂句柄报 "cannot compare invalid tuples"；
+         shadow 产出 bool shadow；error 操作数原样透传 */
+TEST(EngineTest, TupleEqNeByteComparison) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *pair[] = {i32_type, i64_type};
+  clux_type_t *t = clux_context_get_tuple_type(ctx, pair, 2);
+  ASSERT_NE(t, nullptr);
+  size_t size = clux_type_get_size(t);
+  ASSERT_EQ(size, 16u);
+
+  ptr_handle_t data_a =
+      safe_alloc(clux_context_get_safe_allocator(ctx), size, NULL);
+  ptr_handle_t data_b =
+      safe_alloc(clux_context_get_safe_allocator(ctx), size, NULL);
+  ASSERT_NE(data_a, (ptr_handle_t)0);
+  ASSERT_NE(data_b, (ptr_handle_t)0);
+  memset(ptr_to_raw(data_a, 0), 0, size);
+  memset(ptr_to_raw(data_b, 0), 0, size);
+  clux_value_t *left = clux_context_create_value(ctx, t, data_a, "l", NULL);
+  clux_value_t *right = clux_context_create_value(ctx, t, data_b, "r", NULL);
+  ASSERT_NE(left, nullptr);
+  ASSERT_NE(right, nullptr);
+
+  /* 全零字节：eq true / ne false */
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, left, right, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_TRUE(read_bool(eq));
+  clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, left, right, NULL);
+  ASSERT_NE(ne, nullptr);
+  EXPECT_FALSE(read_bool(ne));
+
+  /* 一字节差异：eq false / ne true（按字节 memcmp 语义） */
+  *(int32_t *)ptr_to_raw(data_b, 0) = 1;
+  clux_value_t *eq_diff =
+      clux_context_binary(ctx, CLUX_OP_EQ, left, right, NULL);
+  ASSERT_NE(eq_diff, nullptr);
+  EXPECT_FALSE(read_bool(eq_diff));
+  clux_value_t *ne_diff =
+      clux_context_binary(ctx, CLUX_OP_NE, left, right, NULL);
+  ASSERT_NE(ne_diff, nullptr);
+  EXPECT_TRUE(read_bool(ne_diff));
+
+  /* 不同 tuple 类型（元素序不同，size 相同） */
+  clux_type_t *rev_pair[] = {i64_type, i32_type};
+  clux_type_t *rev = clux_context_get_tuple_type(ctx, rev_pair, 2);
+  ASSERT_NE(rev, nullptr);
+  clux_value_t *rev_value =
+      clux_context_create_value(ctx, rev, data_a, NULL, NULL);
+  ASSERT_NE(rev_value, nullptr);
+  clux_value_t *eq_rev =
+      clux_context_binary(ctx, CLUX_OP_EQ, left, rev_value, NULL);
+  ASSERT_NE(eq_rev, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(eq_rev)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(eq_rev),
+               "operator '==' requires operands of the same type");
+  clux_value_t *ne_rev =
+      clux_context_binary(ctx, CLUX_OP_NE, left, rev_value, NULL);
+  ASSERT_NE(ne_rev, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ne_rev)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(ne_rev),
+               "operator '!=' requires operands of the same type");
+
+  /* 右操作数非 tuple */
+  clux_value_t *plain = clux_context_create_i32(ctx, 0, NULL, NULL);
+  ASSERT_NE(plain, nullptr);
+  clux_value_t *eq_non_tuple =
+      clux_context_binary(ctx, CLUX_OP_EQ, left, plain, NULL);
+  ASSERT_NE(eq_non_tuple, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(eq_non_tuple)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(eq_non_tuple),
+               "operator '==' requires operands of the same type");
+
+  /* 悬垂句柄（右操作数无效） */
+  ptr_handle_t dead =
+      safe_alloc(clux_context_get_safe_allocator(ctx), size, NULL);
+  ASSERT_NE(dead, (ptr_handle_t)0);
+  ASSERT_TRUE(safe_free(dead));
+  clux_value_t *bad = clux_context_create_value(ctx, t, dead, NULL, NULL);
+  ASSERT_NE(bad, nullptr);
+  clux_value_t *eq_bad = clux_context_binary(ctx, CLUX_OP_EQ, left, bad, NULL);
+  ASSERT_NE(eq_bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(eq_bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(eq_bad), "cannot compare invalid tuples");
+
+  /* 悬垂左操作数：同样报 "cannot compare invalid tuples" */
+  clux_value_t *eq_bad_left =
+      clux_context_binary(ctx, CLUX_OP_EQ, bad, left, NULL);
+  ASSERT_NE(eq_bad_left, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(eq_bad_left)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(eq_bad_left), "cannot compare invalid tuples");
+
+  /* shadow：产出 bool shadow */
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, t);
+  ASSERT_NE(shadow, nullptr);
+  clux_value_t *shadow_eq =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow, left, NULL);
+  ASSERT_NE(shadow_eq, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_eq));
+  EXPECT_EQ(clux_value_get_type(shadow_eq),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
+  /* shadow 在右：同样产出 bool shadow */
+  clux_value_t *shadow_right =
+      clux_context_binary(ctx, CLUX_OP_NE, left, shadow, NULL);
+  ASSERT_NE(shadow_right, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_right));
+  EXPECT_EQ(clux_value_get_type(shadow_right),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
+
+  /* error 操作数透传（左/右） */
+  clux_value_t *boom = clux_context_create_error_message(ctx, NULL, "boom");
+  ASSERT_NE(boom, nullptr);
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, boom, left, NULL), boom);
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, left, boom, NULL), boom);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: clux_context_get_tuple_type 入参非法
+   预期: count>0 而 elems NULL / 元素 NULL 返回 NULL（错误经
+         create_error_message 记入 context 错误表，无公开访问器，按
+         NULL 返回值断言）；之后合法调用不受影响 */
+TEST(EngineTest, GetTupleTypeInvalidInputs) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+
+  EXPECT_EQ(clux_context_get_tuple_type(ctx, NULL, 2), nullptr)
+      << "positive count with NULL elems must be rejected";
+  clux_type_t *with_null[] = {i32_type, NULL};
+  EXPECT_EQ(clux_context_get_tuple_type(ctx, with_null, 2), nullptr)
+      << "NULL element must be rejected";
+
+  clux_type_t *good[] = {i32_type};
+  clux_type_t *t = clux_context_get_tuple_type(ctx, good, 1);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(clux_type_get_kind(t), CLUX_TYPE_TUPLE);
+  EXPECT_STREQ(clux_type_get_name(t), "<i32>");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
