@@ -599,13 +599,15 @@ clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
         ctx, loc, "function type creation failed");
   }
   /* 创建函数零值并按名 define 进当前作用域（重名报 duplicate，
-     匿名 name NULL 安全）；随后挂接函数体 AST（借用，不拥有）。 */
+     匿名 name NULL 安全）；随后挂接整个声明节点 AST（借用，不拥有）——
+     形参名只存在于 AST 不在类型（类型判等不含名），栈帧绑形参时
+     需读到 PARAMS 槽。 */
   clux_value_t *value = clux_context_create_func(ctx, type, name, loc);
   allocator_free(allocator, (void **)&name);
   if (clux_value_is_error(value)) {
     return value;
   }
-  value = clux_context_func_set_ast(ctx, value, body_node, loc);
+  value = clux_context_func_set_ast(ctx, value, node, loc);
   if (clux_value_is_error(value)) {
     return value;
   }

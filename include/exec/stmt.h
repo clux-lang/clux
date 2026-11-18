@@ -6,6 +6,9 @@
 extern "C" {
 #endif
 clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_block(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_expr(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_return(clux_context_t *ctx, node_t *node);
 #ifdef __cplusplus
 }
 #endif

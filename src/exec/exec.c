@@ -8,6 +8,7 @@
 #include "parser/node.h"
 #include "exec/literal.h"
 #include "exec/expr.h"
+#include "exec/call.h"
 
 typedef clux_value_t *(*exec_fn_t)(clux_context_t *ctx, node_t *node);
 static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
@@ -26,7 +27,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_EXPR_SUBSCRIPT*/ exec_expr_subscript,
     /*CLUX_NODE_EXPR_SLICE*/ exec_expr_slice,
     /*CLUX_NODE_EXPR_REST*/ NULL,
-    /*CLUX_NODE_EXPR_CALL*/ NULL,
+    /*CLUX_NODE_EXPR_CALL*/ exec_expr_call,
     /*CLUX_NODE_EXPR_BUILTIN*/ NULL,
     /*CLUX_NODE_EXPR_CONSTRUCT*/ NULL,
     /*CLUX_NODE_EXPR_CONSTRUCT_FIELD*/ NULL,
@@ -55,9 +56,9 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_BITFIELD_FIELDS*/ NULL,
     /*CLUX_NODE_GENERIC_PARAMS*/ NULL,
     /*CLUX_NODE_GENERIC_PARAM*/ NULL,
-    /*CLUX_NODE_STMT_BLOCK*/ NULL,
-    /*CLUX_NODE_STMT_EXPR*/ NULL,
-    /*CLUX_NODE_STMT_RETURN*/ NULL,
+    /*CLUX_NODE_STMT_BLOCK*/ exec_stmt_block,
+    /*CLUX_NODE_STMT_EXPR*/ exec_stmt_expr,
+    /*CLUX_NODE_STMT_RETURN*/ exec_stmt_return,
     /*CLUX_NODE_STMT_EMPTY*/ NULL,
     /*CLUX_NODE_STMT_BREAK*/ NULL,
     /*CLUX_NODE_STMT_CONTINUE*/ NULL,
@@ -278,6 +279,10 @@ clux_value_t *exec_node(clux_context_t *ctx, node_t *node) {
    （声明后未经首次赋值，报 use of a value before initialization）。 */
 clux_value_t *exec_operand(clux_context_t *ctx, node_t *node) {
   clux_value_t *value = exec_node(ctx, node);
+  if (!value) {
+    /* 无值（如空块）：原样上抛，唯一合法消费点是调用帧边界。 */
+    return value;
+  }
   if (clux_value_is_error(value)) {
     return value;
   }

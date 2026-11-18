@@ -10,6 +10,7 @@
 #include "engine/optional.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
+#include "engine/scope.h"
 #include "engine/slice.h"
 #include "engine/type.h"
 #include "engine/tuple.h"
@@ -6521,6 +6522,230 @@ TEST(EngineTest, GetTupleTypeInvalidInputs) {
   ASSERT_NE(t, nullptr);
   EXPECT_EQ(clux_type_get_kind(t), CLUX_TYPE_TUPLE);
   EXPECT_STREQ(clux_type_get_name(t), "<i32>");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ================= 栈帧协议 engine 侧通道 ================= */
+
+/* 场景：swap_scope 是栈帧协议的核心通道——调用边界「保存调用方作用域 →
+   进入帧 → 执行 → 恢复」。验证换入返回原作用域、current 随之切换、
+   global 恒定不变，换回后 current 复原，帧 scope 生命周期归调用方。 */
+TEST(EngineTest, SwapScopeExchangesAndReturnsPrevious) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_scope_t *global = clux_context_get_global_scope(ctx);
+  clux_scope_t *original = clux_context_get_scope(ctx);
+  ASSERT_EQ(original, global) << "fresh context starts at global scope";
+
+  clux_scope_t *frame = create_clux_scope(a, global);
+  ASSERT_NE(frame, nullptr);
+
+  clux_scope_t *prev = clux_context_swap_scope(ctx, frame);
+  EXPECT_EQ(prev, original) << "swap must return the previous scope";
+  EXPECT_EQ(clux_context_get_scope(ctx), frame)
+      << "current must switch to the frame";
+  EXPECT_EQ(clux_context_get_global_scope(ctx), global)
+      << "global must stay constant across swaps";
+
+  clux_scope_t *back = clux_context_swap_scope(ctx, prev);
+  EXPECT_EQ(back, frame);
+  EXPECT_EQ(clux_context_get_scope(ctx), original);
+
+  delete_clux_scope(&frame);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 哨兵执行器：记录调用次数与收到的六参，固定返回 i32 42——
+   不解析 AST，只验证 engine 侧透传契约。 */
+static int g_executor_calls;
+static clux_context_t *g_executor_last_ctx;
+static void *g_executor_last_ast;
+static clux_value_t *g_executor_last_func;
+static size_t g_executor_last_argc;
+
+static clux_value_t *test_executor(clux_context_t *ctx,
+                                   void *ast,
+                                   clux_value_t *func,
+                                   size_t argc,
+                                   clux_value_t *argv[],
+                                   const location_t *loc) {
+  (void)argv;
+  (void)loc;
+  g_executor_calls++;
+  g_executor_last_ctx = ctx;
+  g_executor_last_ast = ast;
+  g_executor_last_func = func;
+  g_executor_last_argc = argc;
+  return clux_context_create_i32(ctx, 42, NULL, NULL);
+}
+
+/* 场景：执行器安装/读取往返，invoke 对校验通过的真函数回调执行器并
+   六参透传（ast 指针、argc）；函数体未挂 AST 时即使已装执行器也报
+   "no executable environment" 且不回调。 */
+TEST(EngineTest, ExecutorInstallAndDispatch) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "fresh context has no executor";
+  clux_context_set_executor(ctx, test_executor);
+  EXPECT_EQ(clux_context_get_executor(ctx), test_executor)
+      << "set/get must round-trip";
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *params[] = {i32_type};
+  clux_type_t *func_type =
+      clux_context_create_func_type(ctx, "F", NULL, 0, params, 1, i32_type);
+  ASSERT_NE(func_type, nullptr);
+  clux_value_t *f = clux_context_create_func(ctx, func_type, "f", NULL);
+  ASSERT_NE(f, nullptr);
+
+  /* 已装执行器但函数体未挂 AST：运行期 error，执行器不得被回调 */
+  g_executor_calls = 0;
+  clux_value_t *arg = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *no_env = clux_context_invoke(ctx, f, 1, &arg, NULL);
+  EXPECT_NE(strstr(error_message_of(no_env),
+                   "function call has no executable environment attached"),
+            nullptr);
+  EXPECT_EQ(g_executor_calls, 0) << "executor must not run without an AST";
+
+  /* 挂 AST 后 invoke 回调执行器：ast 指针与 argc 透传，返回执行器结果 */
+  static int dummy_body;
+  ASSERT_EQ(clux_context_func_set_ast(ctx, f, &dummy_body, NULL), f);
+  clux_value_t *called = clux_context_invoke(ctx, f, 1, &arg, NULL);
+  ASSERT_NE(called, nullptr);
+  EXPECT_EQ(g_executor_calls, 1);
+  EXPECT_EQ(g_executor_last_ctx, ctx);
+  EXPECT_EQ(g_executor_last_ast, &dummy_body);
+  EXPECT_EQ(g_executor_last_func, f);
+  EXPECT_EQ(g_executor_last_argc, 1u);
+  EXPECT_EQ(read_i32(called), 42);
+
+  /* 零实参形态：argc 透传 0，argv NULL 容忍 */
+  clux_type_t *void_fn_type =
+      clux_context_create_func_type(ctx, "V", NULL, 0, NULL, 0, i32_type);
+  clux_value_t *v = clux_context_create_func(ctx, void_fn_type, "v", NULL);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, v, &dummy_body, NULL), v);
+  clux_value_t *called0 = clux_context_invoke(ctx, v, 0, NULL, NULL);
+  ASSERT_NE(called0, nullptr);
+  EXPECT_EQ(g_executor_calls, 2);
+  EXPECT_EQ(g_executor_last_argc, 0u);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景：深度护栏默认上限 1024——1024 次 enter 全部放行，第 1025 次拒绝；
+   被拒的 enter 不占槽位（leave 一次后可再进）；enter/leave 配对归零。 */
+TEST(EngineTest, CallDepthDefaultLimit1024) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  EXPECT_EQ(clux_context_get_call_depth(ctx), 0u);
+  for (size_t i = 0; i < 1024; i++) {
+    ASSERT_TRUE(clux_context_call_depth_enter(ctx))
+        << "enter #" << i << " must be allowed";
+    ASSERT_EQ(clux_context_get_call_depth(ctx), i + 1);
+  }
+  EXPECT_FALSE(clux_context_call_depth_enter(ctx))
+      << "enter #1024 (the 1025th) must be rejected";
+  EXPECT_EQ(clux_context_get_call_depth(ctx), 1024u)
+      << "rejected enter must not take a slot";
+
+  clux_context_call_depth_leave(ctx);
+  EXPECT_EQ(clux_context_get_call_depth(ctx), 1023u);
+  EXPECT_TRUE(clux_context_call_depth_enter(ctx))
+      << "after one leave a new enter must succeed";
+
+  for (size_t i = 0; i < 1024; i++)
+    clux_context_call_depth_leave(ctx);
+  EXPECT_EQ(clux_context_get_call_depth(ctx), 0u)
+      << "paired enter/leave must return to zero";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景：CLUX_MAX_CALL_DEPTH 环境变量覆盖默认上限（仅在
+   create_clux_context 时读取）——env=2 时第 3 次 enter 拒绝，leave 后
+   可再进；用例自建 ctx 并在结尾还原环境变量。 */
+TEST(EngineTest, CallDepthEnvOverride) {
+  const char *prev = getenv("CLUX_MAX_CALL_DEPTH");
+#ifdef _WIN32
+  ASSERT_EQ(_putenv_s("CLUX_MAX_CALL_DEPTH", "2"), 0);
+#else
+  ASSERT_EQ(setenv("CLUX_MAX_CALL_DEPTH", "2", 1), 0);
+#endif
+
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  EXPECT_TRUE(clux_context_call_depth_enter(ctx));
+  EXPECT_TRUE(clux_context_call_depth_enter(ctx));
+  EXPECT_FALSE(clux_context_call_depth_enter(ctx))
+      << "env=2 must cap enters at two";
+  EXPECT_EQ(clux_context_get_call_depth(ctx), 2u);
+
+  clux_context_call_depth_leave(ctx);
+  EXPECT_TRUE(clux_context_call_depth_enter(ctx))
+      << "leave must free a slot under env override";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+
+  /* 结尾必还原环境变量（EXPECT 失败不跳过本段；用例无提前 return） */
+  if (prev) {
+#ifdef _WIN32
+    EXPECT_EQ(_putenv_s("CLUX_MAX_CALL_DEPTH", prev), 0);
+#else
+    EXPECT_EQ(setenv("CLUX_MAX_CALL_DEPTH", prev, 1), 0);
+#endif
+  } else {
+#ifdef _WIN32
+    EXPECT_EQ(_putenv_s("CLUX_MAX_CALL_DEPTH", ""), 0);
+#else
+    unsetenv("CLUX_MAX_CALL_DEPTH");
+#endif
+  }
+}
+
+/* 场景：return signal API 语义——signal 的 type kind 是 RETURN_SIGNAL，
+   is_return_signal 判别，payload 读取返回借用（指针同一）；非 signal
+   值判别 false/载荷 NULL；NULL 入参安全（false/NULL）；裸 signal
+   （无载荷）payload 为 NULL。 */
+TEST(EngineTest, ReturnSignalApiSemantics) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *payload = clux_context_create_i32(ctx, 9, NULL, NULL);
+  clux_value_t *signal = clux_context_create_return_signal(ctx, payload);
+  ASSERT_NE(signal, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(signal)),
+            CLUX_TYPE_RETURN_SIGNAL);
+  EXPECT_TRUE(clux_value_is_return_signal(signal));
+  clux_value_t *read_back = clux_return_signal_get_payload(signal);
+  ASSERT_NE(read_back, nullptr);
+  EXPECT_EQ(read_back, payload) << "payload reading must be a borrow";
+  EXPECT_EQ(read_i32(read_back), 9);
+
+  /* 非 signal 值：判别 false，载荷 NULL */
+  clux_value_t *plain = clux_context_create_i32(ctx, 1, NULL, NULL);
+  EXPECT_FALSE(clux_value_is_return_signal(plain));
+  EXPECT_EQ(clux_return_signal_get_payload(plain), nullptr);
+
+  /* NULL 入参：安全拒绝 */
+  EXPECT_FALSE(clux_value_is_return_signal(NULL));
+  EXPECT_EQ(clux_return_signal_get_payload(NULL), nullptr);
+
+  /* 裸 signal（return; 无值形态）：payload NULL */
+  clux_value_t *bare = clux_context_create_return_signal(ctx, NULL);
+  ASSERT_NE(bare, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(bare));
+  EXPECT_EQ(clux_return_signal_get_payload(bare), nullptr);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

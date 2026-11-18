@@ -27,6 +27,14 @@ void clux_context_pop_scope(clux_context_t *self);
 /* 当前作用域（current scope，借用）：所有带名/匿名值的注册点。
    供执行层做名称查找与作用域栈导航，只读使用。 */
 clux_scope_t *clux_context_get_scope(clux_context_t *self);
+/* 全局作用域（global scope，借用）：栈帧的词法挂链父——函数体自由名字
+   只允许解析到形参、显式捕获与模块级名字，帧因此挂 global 而非调用方。 */
+clux_scope_t *clux_context_get_global_scope(clux_context_t *self);
+/* 作用域切换（栈帧协议核心）：将 current scope 换成 target 并返回原
+   scope。调用边界据此完成「保存调用方作用域 → 进入帧 → 执行 → 恢复」，
+   引擎不提供帧的建立/销毁语义（帧就是 scope，生命周期归执行层）。 */
+clux_scope_t *clux_context_swap_scope(clux_context_t *self,
+                                      clux_scope_t *target);
 /* 将匿名值具名化加入当前作用域（var 声明的落地通道）：
    值是当前作用域的匿名持有时原地填名（声明即 move，零拷贝）；
    值是借用（对既有变量的引用）时按值拷贝落地为独立存储；
@@ -297,14 +305,43 @@ clux_value_t *clux_context_func_capture(clux_context_t *self,
                                         const char *capture,
                                         const location_t *loc);
 /* 调用（f(args)）：按签名校验实参个数与类型，error 自传播；shadow
-   函数或任一 shadow 实参产出返回类型的 shadow；校验通过的真函数没有
-   可执行环境（AST 体的执行由编译流水线后端接线）是运行期 error。
-   仅 func 支持（vtable invoke 槽位），其余类型返回 error。 */
+   函数或任一 shadow 实参产出返回类型的 shadow；校验通过的真函数走
+   执行器回调（见 clux_context_set_executor）；无可执行环境（未装
+   执行器或函数体未挂 AST）是运行期 error。仅 func 支持（vtable
+   invoke 槽位），其余类型返回 error。 */
 clux_value_t *clux_context_invoke(clux_context_t *self,
                                   clux_value_t *value,
                                   size_t argc,
                                   clux_value_t *argv[],
                                   const location_t *loc);
+/* AST 执行器（栈帧协议的入口）：clux_context_invoke 对校验通过的真函
+   数回调此处——engine 只透传 AST 指针与函数值/实参，不解析 AST；帧的
+   建立（挂 global 的临时 scope）、形参/捕获绑定、return signal 消费、
+   跨帧 clone 全部由执行层实现。engine 不依赖 exec 的分层借此保住。 */
+typedef clux_value_t *(*clux_ast_executor_t)(clux_context_t *ctx,
+                                             void *ast,
+                                             clux_value_t *func,
+                                             size_t argc,
+                                             clux_value_t *argv[],
+                                             const location_t *loc);
+void clux_context_set_executor(clux_context_t *self,
+                               clux_ast_executor_t executor);
+clux_ast_executor_t clux_context_get_executor(clux_context_t *self);
+/* 调用深度护栏：tree-walking 每层函数调用嵌一层 C 栈，无限递归等于
+   不可诊断的栈溢出——执行器进入/退出调用边界时 enter/leave 配对，超限
+   的 enter 返回 false（执行层报 maximum call depth exceeded）。上限
+   默认 1024，环境变量 CLUX_MAX_CALL_DEPTH 覆盖（与内存预算护栏正交）。 */
+bool clux_context_call_depth_enter(clux_context_t *self);
+void clux_context_call_depth_leave(clux_context_t *self);
+size_t clux_context_get_call_depth(clux_context_t *self);
+/* return signal（栈帧协议的展开通道）：return 语句产出信号值（载荷为
+   返回值的借用），语句层原样上抛，唯一消费点是调用表达式的帧边界；
+   逃逸到调用边界之外由执行层报 "return outside of a function"。 */
+clux_value_t *clux_context_create_return_signal(clux_context_t *self,
+                                                clux_value_t *payload);
+bool clux_value_is_return_signal(clux_value_t *value);
+/* 信号载荷读取（借用）：非 return signal 返回 NULL。 */
+clux_value_t *clux_return_signal_get_payload(clux_value_t *signal);
 /* 创建具名 struct 类型（白皮书 §3.5）：声明体一次性传入——字段表必填，
    attribute（含 method 本体）/method 名单/subtype 三表可选。字段按声明
    序顺序平铺（C 布局），所有字段同时有效；attribute/method/subtype 是

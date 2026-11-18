@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdalign.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "engine/bool.h"
 #include "engine/cunion.h"
@@ -42,6 +43,12 @@ struct _clux_context_t {
   rbtree_t *strs;
   clux_scope_t *global_scope;
   clux_scope_t *current_scope;
+  /* AST 执行器（栈帧协议入口）：engine 只透传，帧语义住执行层。 */
+  clux_ast_executor_t executor;
+  /* 调用深度护栏：执行器 enter/leave 配对，超限报语义化错误。
+     上限默认 1024，环境变量 CLUX_MAX_CALL_DEPTH 覆盖。 */
+  size_t call_depth;
+  size_t max_call_depth;
   /* 具名复合类型（cunion 等）托管表：无 base 可挂 children，
      由 context 按创建逆序统一释放。 */
   vec_t *named_types;
@@ -66,6 +73,7 @@ struct _clux_context_t {
     clux_type_t *type_void;
     clux_type_t *type_opaque;
     clux_type_t *type_func_template;
+    clux_type_t *type_return_signal;
   } builtin_types;
 };
 clux_context_t *create_clux_context(allocator_t *allocator) {
@@ -78,6 +86,18 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->global_scope = create_clux_scope(allocator, NULL);
   ctx->current_scope = ctx->global_scope;
   ctx->named_types = create_vec(allocator);
+  ctx->executor = NULL;
+  ctx->call_depth = 0;
+  /* 调用深度上限：环境变量 CLUX_MAX_CALL_DEPTH 覆盖，默认 1024。 */
+  ctx->max_call_depth = 1024;
+  const char *depth_env = getenv("CLUX_MAX_CALL_DEPTH");
+  if (depth_env && *depth_env) {
+    char *end = NULL;
+    unsigned long long parsed = strtoull(depth_env, &end, 10);
+    if (end != depth_env && parsed > 0) {
+      ctx->max_call_depth = (size_t)parsed;
+    }
+  }
   ctx->builtin_types.type_error = create_clux_type(allocator,
                                                    CLUX_TYPE_ERROR,
                                                    "error",
@@ -196,6 +216,15 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                                                     sizeof(ptr_handle_t),
                                                     alignof(ptr_handle_t),
                                                     get_clux_opaque_vtable());
+  /* return signal：引擎级控制值，载荷为返回值借用指针。vtable 全空
+     （无运算、无成员），仅在调用边界构造/判定/取载荷后即消费。 */
+  ctx->builtin_types.type_return_signal =
+      create_clux_type(allocator,
+                       CLUX_TYPE_RETURN_SIGNAL,
+                       "return_signal",
+                       sizeof(clux_value_t *),
+                       alignof(clux_value_t *),
+                       NULL);
   /* 类型名与 identifier 合一（白皮书 §2.1）：内建类型作为 type value
      按名注册进 global scope，script 层经 context_lookup 按名查找，
      与用户类型/变量共用同一查找通道。机制上统一处理；遮蔽内建
@@ -267,6 +296,7 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_error);
   delete_clux_type(&ctx->builtin_types.type_void);
   delete_clux_type(&ctx->builtin_types.type_opaque);
+  delete_clux_type(&ctx->builtin_types.type_return_signal);
   delete_vec(&ctx->errors);
   rbtree_foreach(ctx->strs, (rbtree_callback_t)strs_dispose, ctx->allocator);
   delete_rbtree(&ctx->strs);
@@ -299,7 +329,19 @@ clux_value_t *clux_context_create_value(clux_context_t *self,
 }
 clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error) {
-  (void)vec_push(self->errors, error);
+  /* 出口协议会用已在列的 err 重建 error 值（块/帧边界借 err 指针转
+     换出值）：查重防同一 err 重复入列——context 销毁按向量逐个
+     delete_error，重复入列即双重释放。 */
+  bool queued = false;
+  for (size_t idx = 0; idx < vec_get_size(self->errors); idx++) {
+    if (vec_get(self->errors, idx) == error) {
+      queued = true;
+      break;
+    }
+  }
+  if (!queued) {
+    (void)vec_push(self->errors, error);
+  }
   size_t size = clux_type_get_size(self->builtin_types.type_error);
   ptr_handle_t data =
       safe_alloc(self->safe_allocator, size, error_get_location(error));
@@ -1083,6 +1125,49 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
       "invoke requires a function value, got '%s'",
       type_name ? type_name : "<unknown>");
 }
+void clux_context_set_executor(clux_context_t *self,
+                               clux_ast_executor_t executor) {
+  if (self) {
+    self->executor = executor;
+  }
+}
+clux_ast_executor_t clux_context_get_executor(clux_context_t *self) {
+  return self ? self->executor : NULL;
+}
+bool clux_context_call_depth_enter(clux_context_t *self) {
+  if (!self || self->call_depth >= self->max_call_depth) {
+    return false;
+  }
+  self->call_depth++;
+  return true;
+}
+void clux_context_call_depth_leave(clux_context_t *self) {
+  if (self && self->call_depth > 0) {
+    self->call_depth--;
+  }
+}
+size_t clux_context_get_call_depth(clux_context_t *self) {
+  return self ? self->call_depth : 0;
+}
+clux_value_t *clux_context_create_return_signal(clux_context_t *self,
+                                                clux_value_t *payload) {
+  ptr_handle_t data =
+      safe_alloc(self->safe_allocator, sizeof(clux_value_t *), NULL);
+  void *raw = ptr_to_raw(data, 0);
+  memcpy(raw, &payload, sizeof(payload));
+  return clux_context_create_value(
+      self, self->builtin_types.type_return_signal, data, NULL, NULL);
+}
+bool clux_value_is_return_signal(clux_value_t *value) {
+  return value && clux_type_kind_unwrap(clux_value_get_type(value)) ==
+                      CLUX_TYPE_RETURN_SIGNAL;
+}
+clux_value_t *clux_return_signal_get_payload(clux_value_t *signal) {
+  if (!clux_value_is_return_signal(signal)) {
+    return NULL;
+  }
+  return *(clux_value_t **)clux_value_get_raw(signal, 0);
+}
 clux_type_t *clux_context_create_struct_type(clux_context_t *self,
                                              const char *name,
                                              const clux_struct_decl_t *decl) {
@@ -1505,6 +1590,15 @@ void clux_context_pop_scope(clux_context_t *self) {
 }
 clux_scope_t *clux_context_get_scope(clux_context_t *self) {
   return self ? self->current_scope : NULL;
+}
+clux_scope_t *clux_context_get_global_scope(clux_context_t *self) {
+  return self ? self->global_scope : NULL;
+}
+clux_scope_t *clux_context_swap_scope(clux_context_t *self,
+                                      clux_scope_t *target) {
+  clux_scope_t *previous = self->current_scope;
+  self->current_scope = target;
+  return previous;
 }
 clux_value_t *clux_context_declare_value(clux_context_t *self,
                                          clux_value_t *value,

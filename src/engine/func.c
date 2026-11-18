@@ -168,8 +168,9 @@ static bool func_type_equal(clux_type_t *self, clux_type_t *other) {
 
 /* 调用（f(args)，白皮书 §2.7 func 值）：按签名校验实参个数与类型。
    shadow 函数（任一 shadow：函数或实参）产出返回类型的 shadow——
-   调用结果的形态是静态可知的。校验通过的真函数没有可执行环境
-   （AST 体的执行由编译流水线后端接线）是运行期 error。 */
+   调用结果的形态是静态可知的。校验通过的真函数分派给挂在 context
+   上的 AST 执行器回调（帧协议住 exec 侧，engine 不依赖 exec）；
+   未挂 AST 或未装执行器时报运行期 error。 */
 static clux_value_t *func_invoke(clux_context_t *ctx,
                                  clux_value_t *value,
                                  size_t argc,
@@ -210,6 +211,11 @@ static clux_value_t *func_invoke(clux_context_t *ctx,
   }
   if (shadow) {
     return clux_context_create_shadow_value(ctx, meta->return_type);
+  }
+  void *ast = clux_func_get_ast(value);
+  clux_ast_executor_t executor = clux_context_get_executor(ctx);
+  if (ast && executor) {
+    return executor(ctx, ast, value, argc, argv, NULL);
   }
   return clux_context_create_error_message(
       ctx, NULL, "function call has no executable environment attached");

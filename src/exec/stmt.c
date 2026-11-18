@@ -1,13 +1,18 @@
 #include "exec/stmt.h"
 #include "core/allocator.h"
+#include "core/error.h"
 #include "core/location.h"
 #include "engine/context.h"
 #include "engine/error.h"
 #include "engine/interface.h"
 #include "engine/qualifier.h"
+#include "engine/scope.h"
 #include "engine/value.h"
 #include "exec/exec.h"
 #include "parser/node.h"
+#include "parser/node_stmt_block.h"
+#include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_return.h"
 #include "parser/node_stmt_var.h"
 
 clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
@@ -70,4 +75,77 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
   }
   allocator_free(allocator, (void **)&name);
   return value;
+}
+
+/* 块出口协议：error / return signal / 最后语句值都注册在块作用域内，
+   作用域销毁后继续引用即悬空——先回退作用域，再转换出值（error 借
+   err 指针在外层重建，err 本体归 context 的 errors 向量，值销毁不动
+   本体；signal 载荷与普通值克隆，与「函数返回一律 copy」的值语义
+   一致）。
+   栈平衡：从真实栈顶逐层走 pop_scope 直到块自身——任何未配对退出
+   的中间层都走各自的 pop 通道销毁（不依赖 delete 跳层递归删，defer
+   批次的挂点就在每层出口），以 global 兜底防越界挂死。块自身的
+   销毁排在转换之后：先 swap 回外层（注册点转移，源值仍存活）转换
+   出值，再 delete 块——此时块的 children 已被上方排干，delete 即
+   本层的 pop，不做跳层递归删。空块产出 NULL（无值），唯一合法消费
+   点是调用帧边界（报 missing return）。 */
+clux_value_t *exec_stmt_block(clux_context_t *ctx, node_t *node) {
+  clux_context_push_scope(ctx);
+  clux_scope_t *block = clux_context_get_scope(ctx);
+  clux_scope_t *outer = clux_scope_get_parent(block);
+  clux_value_t *result = NULL;
+  size_t count = stmt_block_node_get_stmt_count(node);
+  for (size_t idx = 0; idx < count; idx++) {
+    clux_value_t *value = exec_node(ctx, stmt_block_node_get_stmt(node, idx));
+    result = value;
+    if (clux_value_is_error(value) || clux_value_is_return_signal(value)) {
+      break;
+    }
+  }
+  clux_scope_t *current = clux_context_get_scope(ctx);
+  while (current != block && current != clux_context_get_global_scope(ctx)) {
+    clux_context_pop_scope(ctx);
+    current = clux_context_get_scope(ctx);
+  }
+  (void)clux_context_swap_scope(ctx, outer);
+  clux_value_t *out = NULL;
+  if (clux_value_is_error(result)) {
+    clux_error_t *err = *(clux_error_t **)clux_value_get_raw(result, 0);
+    out = clux_context_create_error(ctx, err);
+  } else if (clux_value_is_return_signal(result)) {
+    clux_value_t *payload = clux_return_signal_get_payload(result);
+    clux_value_t *cloned =
+        payload ? clux_context_clone(ctx, payload, NULL) : NULL;
+    out = clux_context_create_return_signal(ctx, cloned);
+  } else if (result) {
+    out = clux_context_clone(ctx, result, NULL);
+  }
+  delete_clux_scope(&block);
+  return out;
+}
+
+/* 表达式语句 expr ';'：表达式值即语句值。 */
+clux_value_t *exec_stmt_expr(clux_context_t *ctx, node_t *node) {
+  node_t *expr = stmt_expr_node_get_expr(node);
+  if (!expr) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "expression statement requires an expression");
+  }
+  return exec_operand(ctx, expr);
+}
+
+/* return; / return expr;（白皮书 §4.11）：产出 return signal（载荷为
+   返回值的借用），语句层原样上抛，唯一消费点是调用帧边界。 */
+clux_value_t *exec_stmt_return(clux_context_t *ctx, node_t *node) {
+  clux_value_t *payload = NULL;
+  node_t *value_node = stmt_return_node_get_value(node);
+  if (value_node) {
+    payload = exec_operand(ctx, value_node);
+    if (clux_value_is_error(payload)) {
+      return payload;
+    }
+  }
+  return clux_context_create_return_signal(ctx, payload);
 }

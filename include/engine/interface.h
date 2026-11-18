@@ -79,6 +79,12 @@ typedef enum _clux_type_kind_t {
      值类型（白皮书 §2.6），元素按位置访问，判等按字节比较（§5.5）。
      空元组 <> 合法（size 0、align 1）。 */
   CLUX_TYPE_TUPLE,
+  /* return signal（枚举尾部追加）：函数体 return 的展开通道——return
+     语句产出信号值（载荷为返回值），语句层原样上抛，唯一消费点是
+     调用表达式的栈帧边界；逃逸到调用边界之外即 "return outside of a
+     function"。引擎级控制值（与 error 同级），不属于类型系统的用户
+     可见面。 */
+  CLUX_TYPE_RETURN_SIGNAL,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

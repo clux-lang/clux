@@ -8,6 +8,7 @@
 #include "core/position.h"
 #include "core/safe_alloc.h"
 #include "engine/context.h"
+#include "engine/error.h"
 #include "engine/func.h"
 #include "engine/interface.h"
 #include "engine/qualifier.h"
@@ -28,6 +29,12 @@
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
 #include "parser/node_func_type.h"
+#include "parser/node_call.h"
+#include "parser/node_stmt_block.h"
+#include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_return.h"
+#include "engine/scope.h"
+#include "exec/call.h"
 #include "parser/node_subscript.h"
 #include "parser/node_tuple.h"
 #include "parser/node_ternary.h"
@@ -786,14 +793,14 @@ TEST_F(ExecLiteralTest, ExecNodeUnregisteredLiteralKindError) {
   delete_node(&node);
 }
 
-/* 场景: 逐一触发一个未注册 kind 的精确名字（node_kind_name 的 STMT_BLOCK case）
+/* 场景: 逐一触发一个未注册 kind 的精确名字（node_kind_name 的 STMT_EMPTY case）
    预期: 错误消息包含 kind 的准确名字 */
-TEST_F(ExecLiteralTest, ExecNodeUnsupportedKindNameStmtBlock) {
-  node_t *node = make_node(CLUX_NODE_STMT_BLOCK, "...");
+TEST_F(ExecLiteralTest, ExecNodeUnsupportedKindNameStmtEmpty) {
+  node_t *node = make_node(CLUX_NODE_STMT_EMPTY, "...");
   clux_value_t *value = exec_node(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_BLOCK");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
   delete_node(&node);
 }
 
@@ -816,6 +823,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_BINARY || kind == CLUX_NODE_EXPR_SUBSCRIPT ||
         kind == CLUX_NODE_EXPR_SLICE || kind == CLUX_NODE_EXPR_TUPLE ||
         kind == CLUX_NODE_EXPR_FUNC_TYPE || kind == CLUX_NODE_EXPR_FUNC_DECL ||
+        kind == CLUX_NODE_EXPR_CALL || kind == CLUX_NODE_STMT_BLOCK ||
+        kind == CLUX_NODE_STMT_EXPR || kind == CLUX_NODE_STMT_RETURN ||
         kind == CLUX_NODE_STMT_VAR;
     if (synthetic_skip) {
       continue;
@@ -2629,30 +2638,30 @@ TEST_F(ExecLiteralTest, SubscriptRequiresExactlyOneIndex) {
   delete_node(&two_args);
 }
 
-/* 场景: base 子节点求值为 error（未注册 kind STMT_BLOCK）
-   预期: error 透传——"unsupported node kind: STMT_BLOCK" */
+/* 场景: base 子节点求值为 error（未注册 kind STMT_EMPTY）
+   预期: error 透传——"unsupported node kind: STMT_EMPTY" */
 TEST_F(ExecLiteralTest, SubscriptPropagatesBaseError) {
-  node_t *node = make_subscript_of(make_node(CLUX_NODE_STMT_BLOCK, "..."),
+  node_t *node = make_subscript_of(make_node(CLUX_NODE_STMT_EMPTY, "..."),
                                    make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
   clux_value_t *value = exec_expr_subscript(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_BLOCK");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
   delete_node(&node);
 }
 
-/* 场景: index 子节点求值为 error（未注册 kind STMT_BLOCK），base 正常
-   预期: index 的 error 透传——"unsupported node kind: STMT_BLOCK" */
+/* 场景: index 子节点求值为 error（未注册 kind STMT_EMPTY），base 正常
+   预期: index 的 error 透传——"unsupported node kind: STMT_EMPTY" */
 TEST_F(ExecLiteralTest, SubscriptPropagatesIndexError) {
   ASSERT_NE(make_i32_array("arr_e", 4), nullptr);
 
   node_t *node =
       make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_e"),
-                        make_node(CLUX_NODE_STMT_BLOCK, "..."));
+                        make_node(CLUX_NODE_STMT_EMPTY, "..."));
   clux_value_t *value = exec_expr_subscript(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_BLOCK");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
   delete_node(&node);
 }
 
@@ -2775,22 +2784,22 @@ TEST_F(ExecLiteralTest, SliceOpenEndpoints) {
   delete_node(&whole);
 }
 
-/* 场景: base 子节点求值为 error（未注册 kind STMT_BLOCK）
-   预期: error 透传——"unsupported node kind: STMT_BLOCK" */
+/* 场景: base 子节点求值为 error（未注册 kind STMT_EMPTY）
+   预期: error 透传——"unsupported node kind: STMT_EMPTY" */
 TEST_F(ExecLiteralTest, SlicePropagatesBaseError) {
   node_t *node = make_slice_of("bad[1:3]",
-                               make_node(CLUX_NODE_STMT_BLOCK, "..."),
+                               make_node(CLUX_NODE_STMT_EMPTY, "..."),
                                make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
                                make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
   clux_value_t *value = exec_expr_slice(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_BLOCK");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
   delete_node(&node);
 }
 
-/* 场景: lo/hi 子节点求值为 error（未注册 kind STMT_BLOCK），base 正常
-   预期: 端点 error 透传——"unsupported node kind: STMT_BLOCK"。
+/* 场景: lo/hi 子节点求值为 error（未注册 kind STMT_EMPTY），base 正常
+   预期: 端点 error 透传——"unsupported node kind: STMT_EMPTY"。
          base 成功在先，lo 先于 hi 求值 */
 TEST_F(ExecLiteralTest, SlicePropagatesEndpointErrors) {
   ASSERT_NE(make_i32_array("arr_pe", 4), nullptr);
@@ -2798,23 +2807,23 @@ TEST_F(ExecLiteralTest, SlicePropagatesEndpointErrors) {
   node_t *lo_node =
       make_slice_of("arr_pe[bad:3]",
                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_pe"),
-                    make_node(CLUX_NODE_STMT_BLOCK, "..."),
+                    make_node(CLUX_NODE_STMT_EMPTY, "..."),
                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
   clux_value_t *lo_value = exec_expr_slice(ctx, lo_node);
   ASSERT_NE(lo_value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(lo_value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(lo_value), "unsupported node kind: STMT_BLOCK");
+  EXPECT_STREQ(error_message_of(lo_value), "unsupported node kind: STMT_EMPTY");
   delete_node(&lo_node);
 
   node_t *hi_node =
       make_slice_of("arr_pe[1:bad]",
                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_pe"),
                     make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
-                    make_node(CLUX_NODE_STMT_BLOCK, "..."));
+                    make_node(CLUX_NODE_STMT_EMPTY, "..."));
   clux_value_t *hi_value = exec_expr_slice(ctx, hi_node);
   ASSERT_NE(hi_value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(hi_value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(hi_value), "unsupported node kind: STMT_BLOCK");
+  EXPECT_STREQ(error_message_of(hi_value), "unsupported node kind: STMT_EMPTY");
   delete_node(&hi_node);
 }
 
@@ -3172,17 +3181,17 @@ TEST_F(ExecLiteralTest, QualifierPrefixOperandNotTypeValueErrors) {
   delete_node(&node);
 }
 
-/* 场景: 类型前缀操作数子节点求值出错（RIGHT=STMT_BLOCK 裸节点）
-   预期: error 透传——"unsupported node kind: STMT_BLOCK" */
+/* 场景: 类型前缀操作数子节点求值出错（RIGHT=STMT_EMPTY 裸节点）
+   预期: error 透传——"unsupported node kind: STMT_EMPTY" */
 TEST_F(ExecLiteralTest, TypePrefixPropagatesOperandError) {
   node_t *node = make_binary_of(a,
                                 NULL,
                                 make_node(CLUX_NODE_SYMBOL, "*"),
-                                make_node(CLUX_NODE_STMT_BLOCK, "..."));
+                                make_node(CLUX_NODE_STMT_EMPTY, "..."));
   clux_value_t *result = exec_expr_binary(ctx, node);
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_BLOCK");
+  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_EMPTY");
   delete_node(&node);
 }
 
@@ -3200,11 +3209,11 @@ TEST_F(ExecLiteralTest, TypePrefixMissingOperandRequiresNode) {
 
 /* 场景: 数组长度/元素子节点求值出错（长度先求值故其 error 优先透传；
          长度合法时元素的 error 透传）
-   预期: 均报 "unsupported node kind: STMT_BLOCK" */
+   预期: 均报 "unsupported node kind: STMT_EMPTY" */
 TEST_F(ExecLiteralTest, ArrayPropagatesLengthAndElementErrors) {
   node_t *bad_length =
       make_binary_of(a,
-                     make_node(CLUX_NODE_STMT_BLOCK, "..."),
+                     make_node(CLUX_NODE_STMT_EMPTY, "..."),
                      make_node(CLUX_NODE_SYMBOL, "[]"),
                      make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
   clux_value_t *length_result = exec_expr_binary(ctx, bad_length);
@@ -3212,20 +3221,20 @@ TEST_F(ExecLiteralTest, ArrayPropagatesLengthAndElementErrors) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(length_result)),
             CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(length_result),
-               "unsupported node kind: STMT_BLOCK");
+               "unsupported node kind: STMT_EMPTY");
   delete_node(&bad_length);
 
   node_t *bad_element =
       make_binary_of(a,
                      make_node(CLUX_NODE_LITERAL_NUMERIC, "2"),
                      make_node(CLUX_NODE_SYMBOL, "[]"),
-                     make_node(CLUX_NODE_STMT_BLOCK, "..."));
+                     make_node(CLUX_NODE_STMT_EMPTY, "..."));
   clux_value_t *element_result = exec_expr_binary(ctx, bad_element);
   ASSERT_NE(element_result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(element_result)),
             CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(element_result),
-               "unsupported node kind: STMT_BLOCK");
+               "unsupported node kind: STMT_EMPTY");
   delete_node(&bad_element);
 }
 
@@ -3931,7 +3940,7 @@ make_named_param_of(allocator_t *allocator, node_t *name, node_t *type) {
 /* 场景: func add(a: i32, b: i32): i32 {body} 基本形态
    预期: 返回函数值（值类型 kind FUNC），签名（参数序列/返回类型/捕获表）
          与引擎 clux_context_create_func_type 通道结构恒等（指针相同），
-         函数体 AST 借用挂接可读回（clux_func_get_ast 返回 body 结点），
+         函数声明 AST 借用挂接可读回（clux_func_get_ast 返回 decl 结点），
          按名可从作用域 lookup 到同一值 */
 TEST_F(ExecLiteralTest, FuncDeclBuildsFunctionValue) {
   clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
@@ -3967,8 +3976,8 @@ TEST_F(ExecLiteralTest, FuncDeclBuildsFunctionValue) {
   EXPECT_EQ(clux_func_get_param(func_type, 0), i32_type);
   EXPECT_EQ(clux_func_get_param(func_type, 1), i32_type);
   EXPECT_EQ(clux_func_get_return_type(func_type), i32_type);
-  EXPECT_EQ(clux_func_get_ast(result), body)
-      << "body AST must be attached (borrowed) on the function value";
+  EXPECT_EQ(clux_func_get_ast(result), node)
+      << "decl AST must be attached (borrowed) on the function value";
   EXPECT_EQ(clux_context_lookup(ctx, "add", NULL), result)
       << "named function must be reachable from the current scope";
   clux_type_t *engine_params[] = {i32_type, i32_type};
@@ -4050,7 +4059,7 @@ TEST_F(ExecLiteralTest, FuncDeclAnonymousSucceedsWithoutNameLookup) {
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC)
       << "anonymous function definition must still succeed";
-  EXPECT_EQ(clux_func_get_ast(result), body);
+  EXPECT_EQ(clux_func_get_ast(result), node);
   clux_value_t *probe = clux_context_lookup(ctx, "fd_anon", NULL);
   ASSERT_NE(probe, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
@@ -4472,4 +4481,949 @@ TEST_F(ExecLiteralTest, FuncDeclDuplicateNameErrors) {
   ASSERT_NE(lookup, nullptr);
   EXPECT_EQ(lookup, first_result);
   EXPECT_EQ(clux_func_param_count(clux_value_get_type(lookup)), (size_t)1);
+}
+
+/* ---- exec：函数调用（栈帧协议） ---- */
+
+/* 合成调用结点 callee(args...)：callee 为 NULL 走容错路径，args 逐个
+   add，argc 由结点自身记录。delete 根结点时一并释放全部子结点。 */
+static node_t *make_call_of(allocator_t *allocator,
+                            node_t *callee,
+                            size_t argc,
+                            node_t **args) {
+  node_t *node = create_call_node(allocator);
+  call_node_set_callee(node, callee);
+  for (size_t idx = 0; idx < argc; idx++) {
+    call_node_add_arg(node, args[idx]);
+  }
+  return node;
+}
+
+/* 场景: func f(x: i32): i32 { return x; } 调用 f(7)
+   预期: 首次 exec_expr_call 前执行器未安装（懒安装），调用后已安装；
+         调用产出 clone 出帧的 i32 值 7 */
+TEST_F(ExecLiteralTest, CallReturnsValueFromFunction) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(func)), CLUX_TYPE_FUNC);
+
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "executor must be lazily installed on first call";
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "7");
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &call_arg);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32)
+      << "call must return the payload cloned out of the frame";
+  EXPECT_EQ(read_i32(result), 7);
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "executor must be installed after the first call";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* ---- 场景: 栈帧协议——形参 copy / 静态作用域 / 捕获写穿 / return 三形态
+   / missing return / 深度护栏 / 校验错误路径 / 分派语句（block/expr/return） ---- */
+
+/* 场景: func pc(x: i32): i32 { x = 99; return x; } 以调用方变量调用
+   预期: 形参按 copy 克隆进帧——体内对形参赋值生效（返回 99）、调用方
+         变量不受影响（仍为 7）、再次调用仍从实参重新克隆（返回 99） */
+TEST_F(ExecLiteralTest, CallClonesArgumentsIntoFrame) {
+  clux_value_t *caller_v = clux_context_create_i32(ctx, 7, "pc_v", NULL);
+  ASSERT_NE(caller_v, nullptr);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body, make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "x", "99"));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pc"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(func)), CLUX_TYPE_FUNC);
+
+  node_t *arg = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pc_v");
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pc"), 1, &arg);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(read_i32(result), 99) << "body must see the frame-local copy";
+
+  clux_value_t *after = clux_context_lookup(ctx, "pc_v", NULL);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(read_i32(after), 7)
+      << "argument is copied into the frame; caller value must not change";
+
+  node_t *arg2 = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pc_v");
+  node_t *call2 =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pc"), 1, &arg2);
+  clux_value_t *result2 = exec_expr_call(ctx, call2);
+  ASSERT_NE(result2, nullptr);
+  EXPECT_EQ(read_i32(result2), 99) << "each call clones its arguments afresh";
+  delete_node(&call);
+  delete_node(&call2);
+  delete_node(&decl);
+}
+
+/* 场景: 静态作用域——帧挂 global 而非调用方：
+        global 定义 gv、g0 返回 gv；push 作用域后其中定义 lv、f2 返回 lv
+   预期: f2() 报 "use of undeclared identifier 'lv'"（调用方局部名帧内
+         不可见——那是动态作用域漏洞）；g0() 返回 11（global 名经挂链
+         可达），pop 后 g0() 依然返回 11 */
+TEST_F(ExecLiteralTest, CallFrameUsesStaticScoping) {
+  clux_value_t *gv = clux_context_create_i32(ctx, 11, "gv", NULL);
+  ASSERT_NE(gv, nullptr);
+
+  /* g0: func g0(): i32 { return gv; } —— 定义在 global */
+  node_t *g0_body = create_stmt_block_node(a);
+  node_t *g0_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(g0_ret,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "gv"));
+  stmt_block_node_add_stmt(g0_body, g0_ret);
+  node_t *g0 = make_func_decl_of(a,
+                                 NULL,
+                                 NULL,
+                                 create_func_params_node(a),
+                                 make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g0"),
+                                 make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                                 g0_body);
+  clux_value_t *g0_func = exec_expr_func_decl(ctx, g0);
+  ASSERT_NE(g0_func, nullptr);
+
+  clux_context_push_scope(ctx);
+  clux_value_t *lv = clux_context_create_i32(ctx, 5, "lv", NULL);
+  ASSERT_NE(lv, nullptr);
+
+  /* f2: func f2(): i32 { return lv; } —— 定义在 push 出的作用域 */
+  node_t *f2_body = create_stmt_block_node(a);
+  node_t *f2_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(f2_ret,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "lv"));
+  stmt_block_node_add_stmt(f2_body, f2_ret);
+  node_t *f2 = make_func_decl_of(a,
+                                 NULL,
+                                 NULL,
+                                 create_func_params_node(a),
+                                 make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f2"),
+                                 make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                                 f2_body);
+  clux_value_t *f2_func = exec_expr_func_decl(ctx, f2);
+  ASSERT_NE(f2_func, nullptr);
+
+  node_t *f2_call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f2"), 0, NULL);
+  clux_value_t *leaked = exec_expr_call(ctx, f2_call);
+  ASSERT_NE(leaked, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(leaked)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(leaked), "use of undeclared identifier 'lv'")
+      << "caller-local names must not leak into the frame";
+
+  node_t *g0_call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g0"), 0, NULL);
+  clux_value_t *via_global = exec_expr_call(ctx, g0_call);
+  ASSERT_NE(via_global, nullptr);
+  EXPECT_EQ(read_i32(via_global), 11)
+      << "module-level names stay reachable through the global chain";
+
+  clux_context_pop_scope(ctx);
+  clux_value_t *after_pop = exec_expr_call(ctx, g0_call);
+  ASSERT_NE(after_pop, nullptr);
+  EXPECT_EQ(read_i32(after_pop), 11);
+  delete_node(&f2_call);
+  delete_node(&g0_call);
+  delete_node(&f2);
+  delete_node(&g0);
+}
+
+/* 场景: 捕获写穿——func|c: i32| wc(): i32 { c = 42; return c; }
+        调用后经 clux_context_func_capture 读到 42
+   预期: 帧内对捕获名的赋值写穿函数值存储；外层同名变量不受影响（捕获
+         存储属函数值，与外层变量相互独立） */
+TEST_F(ExecLiteralTest, CallWritesThroughCaptures) {
+  clux_value_t *outer_c = clux_context_create_i32(ctx, 1, "wpc_c", NULL);
+  ASSERT_NE(outer_c, nullptr);
+
+  node_t *captures = create_func_captures_node(a);
+  node_t *capture_params = create_func_params_node(a);
+  func_params_node_add_param(
+      capture_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "c"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_captures_node_add_capture(captures, capture_params);
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body, make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "c", "42"));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "c"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wc"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(func)), CLUX_TYPE_FUNC);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wc"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(read_i32(result), 42) << "body sees the capture view";
+
+  clux_value_t *written = clux_context_func_capture(ctx, func, "c", NULL);
+  ASSERT_NE(written, nullptr);
+  EXPECT_EQ(read_i32(written), 42)
+      << "capture assignment must write through to the function's storage";
+
+  clux_value_t *after = clux_context_lookup(ctx, "wpc_c", NULL);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(read_i32(after), 1)
+      << "capture storage is independent of the outer variable";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: return; 无值形态——func nv(): i32 { return; }
+   预期: 调用产出 NULL（无载荷 signal 在帧出口解包为 NULL，
+         按无返回值函数处理） */
+TEST_F(ExecLiteralTest, CallReturnWithoutValueYieldsNull) {
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, create_stmt_return_node(a));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nv"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nv"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  EXPECT_EQ(result, nullptr)
+      << "void return unwraps to NULL at the frame boundary";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: return 从嵌套块上抛——func nb(x: i32): i32 { { return x; } }
+   预期: signal 穿越块出口（载荷 clone 再包 signal）后到帧边界解包，
+         返回 7 */
+TEST_F(ExecLiteralTest, CallReturnFromNestedBlock) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *inner = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_block_node_add_stmt(inner, ret);
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, inner);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nb"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "7");
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nb"), 1, &arg);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 7);
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: missing return——函数体 fallthrough（有产出但非 return）与空体
+        两种形态，具名函数错误消息带函数名
+   预期: func mrf(x: i32): i32 { x } 报 "missing return in function 'mrf'"；
+         func mre(): i32 {} 报 "missing return in function 'mre'" */
+TEST_F(ExecLiteralTest, CallMissingReturnReportsFunctionName) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *fallthrough_body = create_stmt_block_node(a);
+  node_t *expr_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(expr_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_block_node_add_stmt(fallthrough_body, expr_stmt);
+  node_t *mrf =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "mrf"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        fallthrough_body);
+  clux_value_t *mrf_func = exec_expr_func_decl(ctx, mrf);
+  ASSERT_NE(mrf_func, nullptr);
+
+  node_t *mrf_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "1");
+  node_t *mrf_call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "mrf"), 1, &mrf_arg);
+  clux_value_t *result = exec_expr_call(ctx, mrf_call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "missing return in function 'mrf'");
+
+  node_t *mre =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "mre"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *mre_func = exec_expr_func_decl(ctx, mre);
+  ASSERT_NE(mre_func, nullptr);
+  node_t *mre_call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "mre"), 0, NULL);
+  clux_value_t *empty_result = exec_expr_call(ctx, mre_call);
+  ASSERT_NE(empty_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(empty_result),
+               "missing return in function 'mre'");
+  delete_node(&mrf_call);
+  delete_node(&mre_call);
+  delete_node(&mrf);
+  delete_node(&mre);
+}
+
+/* 场景: 匿名函数的 missing return——类型隐含名为 "func"（decl 无名）
+   预期: 匿名函数值经 declare_value 具名化后可按名调用，空体 fallthrough
+         报 "missing return in function 'func'" */
+TEST_F(ExecLiteralTest, CallMissingReturnImplicitTypeName) {
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        NULL,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(func)), CLUX_TYPE_FUNC);
+
+  clux_value_t *named = clux_context_declare_value(ctx, func, "anon_fn", NULL);
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(named, func) << "anonymous owning value must be named in place";
+
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "anon_fn"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "missing return in function 'func'")
+      << "unnamed decl interns its type under the implicit name";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: 深度护栏——CLUX_MAX_CALL_DEPTH=3 的 ctx 上无限递归
+   预期: 第 4 次 enter false，报 "maximum call depth exceeded" 完整传播
+         到顶层调用表达式；配对的 leave 让调用深度归零。env 只在
+         create_clux_context 读取，用例内自建 ctx，结束还原 env */
+TEST_F(ExecLiteralTest, CallDepthGuardStopsRunawayRecursion) {
+  const char *prev = getenv("CLUX_MAX_CALL_DEPTH");
+#ifdef _WIN32
+  _putenv_s("CLUX_MAX_CALL_DEPTH", "3");
+#else
+  setenv("CLUX_MAX_CALL_DEPTH", "3", 1);
+#endif
+  allocator_t *a2 = create_allocator(malloc, free);
+  clux_context_t *ctx2 = create_clux_context(a2);
+
+  /* f: func f(x: i32): i32 { return f(x); } —— body 内调用自身 */
+  node_t *body = create_stmt_block_node(a2);
+  node_t *self_arg = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x");
+  node_t *self_call = make_call_of(
+      a2, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &self_arg);
+  node_t *ret = create_stmt_return_node(a2);
+  stmt_return_node_set_value(ret, self_call);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *params = create_func_params_node(a2);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a2,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a2,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx2, decl);
+  EXPECT_NE(func, nullptr);
+
+  node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "1");
+  node_t *call =
+      make_call_of(a2, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &arg);
+  clux_value_t *result = exec_expr_call(ctx2, call);
+  EXPECT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "maximum call depth exceeded");
+  EXPECT_EQ(clux_context_get_call_depth(ctx2), (size_t)0)
+      << "enter/leave must stay paired after the guard trips";
+
+  delete_node(&call);
+  delete_node(&decl);
+  delete_clux_context(&ctx2);
+  delete_allocator(&a2);
+  if (prev) {
+#ifdef _WIN32
+    _putenv_s("CLUX_MAX_CALL_DEPTH", prev);
+#else
+    setenv("CLUX_MAX_CALL_DEPTH", prev, 1);
+#endif
+  } else {
+#ifdef _WIN32
+    _putenv_s("CLUX_MAX_CALL_DEPTH", "");
+#else
+    unsetenv("CLUX_MAX_CALL_DEPTH");
+#endif
+  }
+}
+
+/* 场景: spread 实参——f(…x)（EXPR_REST 实参）
+   预期: 报 "spread argument is not supported yet" */
+TEST_F(ExecLiteralTest, CallRejectsSpreadArgument) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "spf"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *args[] = {make_node(CLUX_NODE_EXPR_REST, "x")};
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "spf"), 1, args);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "spread argument is not supported yet");
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: 无 callee 的调用结点
+   预期: 报 "function call requires a callee" */
+TEST_F(ExecLiteralTest, CallRequiresACallee) {
+  node_t *call = make_call_of(a, NULL, 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "function call requires a callee");
+  delete_node(&call);
+}
+
+/* 场景: callee 求值失败——调用未定义的函数名
+   预期: 报 "use of undeclared identifier 'nope_fn'"（error 优先传播） */
+TEST_F(ExecLiteralTest, CallPropagatesCalleeError) {
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nope_fn"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'nope_fn'");
+  delete_node(&call);
+}
+
+/* 场景: 实参求值失败——实参是未定义标识符
+   预期: 报 "use of undeclared identifier 'nope_arg'"（实参 error 透传） */
+TEST_F(ExecLiteralTest, CallPropagatesArgumentError) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "aef"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *args[] = {make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nope_arg")};
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "aef"), 1, args);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'nope_arg'");
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: 实参个数不匹配——单参函数零实参调用
+   预期: 报 "function expects 1 argument, got 0"（单数形式） */
+TEST_F(ExecLiteralTest, CallRejectsWrongArgCount) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "acf"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "acf"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "function expects 1 argument, got 0");
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: 实参类型不匹配——i32 形参传 bool
+   预期: 报 "function argument 0 requires type 'i32', got 'bool'" */
+TEST_F(ExecLiteralTest, CallRejectsArgumentTypeMismatch) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "atf"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *args[] = {make_node(CLUX_NODE_LITERAL_BOOLEAN, "true")};
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "atf"), 1, args);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "function argument 0 requires type 'i32', got 'bool'");
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: 无函数体 AST——engine 通道构造的 func 值（零值，无 AST）经
+        exec 调用链路调用
+   预期: 报 "function call has no executable environment attached" */
+TEST_F(ExecLiteralTest, CallWithoutAstHasNoExecutableEnvironment) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *ft =
+      clux_context_create_func_type(ctx, "nhf", NULL, 0, NULL, 0, i32_type);
+  ASSERT_NE(ft, nullptr);
+  clux_value_t *raw = clux_context_create_func(ctx, ft, NULL, NULL);
+  ASSERT_NE(raw, nullptr);
+  clux_value_t *named = clux_context_declare_value(ctx, raw, "nh", NULL);
+  ASSERT_NE(named, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nh"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "function call has no executable environment attached");
+  delete_node(&call);
+}
+
+/* 场景: AST kind 校验——函数值的 AST 被换成非 EXPR_FUNC_DECL 结点
+   预期: 报 "function AST is not a function definition" */
+TEST_F(ExecLiteralTest, CallRejectsNonFuncDeclAst) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "kaf"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *bogus = make_node(CLUX_NODE_STMT_BLOCK, "{}");
+  EXPECT_EQ(clux_context_func_set_ast(ctx, func, bogus, NULL), func);
+  node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "1");
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "kaf"), 1, &arg);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "function AST is not a function definition");
+  delete_node(&call);
+  delete_node(&bogus);
+  delete_node(&decl);
+}
+
+/* 场景: 无名形参——定义期只读 TYPE 槽可过，调用帧绑定时报错
+   预期: 报 "parameter 0 requires a name" */
+TEST_F(ExecLiteralTest, CallRejectsUnnamedParameter) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a, NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "upf"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr)
+      << "definition-only path reads the TYPE slot, unnamed param passes";
+
+  node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "7");
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "upf"), 1, &arg);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "parameter 0 requires a name");
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: return signal 顶层逃逸——STMT_RETURN 在调用帧之外直接执行
+   预期: 产出 return signal（语句层不消费，唯一消费点是帧边界，
+         顶层逃逸按语义原样上抛），载荷可读 */
+TEST_F(ExecLiteralTest, TopLevelReturnSignalEscapes) {
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_NUMERIC, "9"));
+  clux_value_t *result = exec_node(ctx, ret);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(result))
+      << "top-level return escapes as a signal (not an error)";
+  clux_value_t *payload = clux_return_signal_get_payload(result);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(read_i32(payload), 9);
+  delete_node(&ret);
+}
+
+/* 场景: 空块——STMT_BLOCK 无语句
+   预期: NULL（无值；空块的唯一合法消费点是调用帧边界的 fallthrough） */
+TEST_F(ExecLiteralTest, StmtBlockEmptyReturnsNull) {
+  node_t *block = create_stmt_block_node(a);
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  EXPECT_EQ(result, nullptr);
+  delete_node(&block);
+}
+
+/* 场景: 块值语义——最后语句值 clone 出块（块作用域销毁后仍可读）
+   预期: { 5 } 返回 clone 的 i32 5；{ 6; 7 } 返回最后语句值 7 */
+TEST_F(ExecLiteralTest, StmtBlockClonesLastStatementValue) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *expr_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(expr_stmt, make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+  stmt_block_node_add_stmt(block, expr_stmt);
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 5) << "value survives block scope deletion";
+  delete_node(&block);
+
+  node_t *two = create_stmt_block_node(a);
+  node_t *first = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(first, make_node(CLUX_NODE_LITERAL_NUMERIC, "6"));
+  node_t *last = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(last, make_node(CLUX_NODE_LITERAL_NUMERIC, "7"));
+  stmt_block_node_add_stmt(two, first);
+  stmt_block_node_add_stmt(two, last);
+  clux_value_t *last_result = exec_stmt_block(ctx, two);
+  ASSERT_NE(last_result, nullptr);
+  EXPECT_EQ(read_i32(last_result), 7) << "last statement wins";
+  delete_node(&two);
+}
+
+/* 场景: 块内 error 终止——首语句求值失败后续语句不执行
+   预期: 报 "use of undeclared identifier 'nowhere'" */
+TEST_F(ExecLiteralTest, StmtBlockStopsOnError) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *bad = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(bad,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nowhere"));
+  node_t *good = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(good, make_node(CLUX_NODE_LITERAL_NUMERIC, "7"));
+  stmt_block_node_add_stmt(block, bad);
+  stmt_block_node_add_stmt(block, good);
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'nowhere'");
+  delete_node(&block);
+}
+
+/* 场景: 表达式语句空槽——STMT_EXPR 的 EXPR 槽为 NULL
+   预期: 报 "expression statement requires an expression" */
+TEST_F(ExecLiteralTest, StmtExprRequiresExpression) {
+  node_t *node = create_stmt_expr_node(a);
+  clux_value_t *result = exec_stmt_expr(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expression statement requires an expression");
+  delete_node(&node);
+}
+
+/* 场景: return 语句两形态——带载荷 / return;（VALUE 槽 NULL）
+   预期: 带 payload 的 signal 载荷可读；无值形态 payload 为 NULL */
+TEST_F(ExecLiteralTest, StmtReturnCarriesOptionalPayload) {
+  node_t *with_value = create_stmt_return_node(a);
+  stmt_return_node_set_value(with_value,
+                             make_node(CLUX_NODE_LITERAL_NUMERIC, "9"));
+  clux_value_t *signal = exec_stmt_return(ctx, with_value);
+  ASSERT_NE(signal, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(signal));
+  clux_value_t *payload = clux_return_signal_get_payload(signal);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(read_i32(payload), 9);
+  delete_node(&with_value);
+
+  node_t *bare = create_stmt_return_node(a);
+  clux_value_t *bare_signal = exec_stmt_return(ctx, bare);
+  ASSERT_NE(bare_signal, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(bare_signal));
+  EXPECT_EQ(clux_return_signal_get_payload(bare_signal), nullptr)
+      << "return; carries no payload";
+  delete_node(&bare);
+}
+
+/* ---- 作用域栈平衡：error / return signal 逐层上抛后各层出口自恢复
+   （defer 接入点位于各层出口 swap 之前，此结构是前提） ---- */
+
+/* 场景 A: 块内 STMT_VAR 声明 x 后，后续语句产生 error 上抛出块；
+        error 出块后在当前作用域重新声明同名 x
+   预期: 块出口先恢复外层作用域再转换 error——若块作用域未正确换出
+         销毁，current scope 仍挂在块上，同名 x 会报 duplicate
+         declaration；正确实现下重新声明成功且 lookup 读到新值 */
+TEST_F(ExecLiteralTest, BlockErrorUnwindKeepsScopeStackBalanced) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block,
+                           make_stmt_var("x",
+                                         CLUX_NODE_LITERAL_IDENTIFIER,
+                                         "i32",
+                                         CLUX_NODE_LITERAL_NUMERIC,
+                                         "1"));
+  node_t *bad = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(bad,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "boom_a"));
+  stmt_block_node_add_stmt(block, bad);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'boom_a'");
+  delete_node(&block);
+
+  /* 出块后同名 x 在当前作用域可重新声明（块作用域已换出销毁） */
+  node_t *redecl = make_stmt_var(
+      "x", CLUX_NODE_LITERAL_IDENTIFIER, "i32", CLUX_NODE_LITERAL_NUMERIC, "9");
+  clux_value_t *declared = exec_node(ctx, redecl);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_NE(clux_type_get_kind(clux_value_get_type(declared)), CLUX_TYPE_ERROR)
+      << "scope stack must be restored; block-local x must not leak";
+  clux_value_t *lookup = clux_context_lookup(ctx, "x", NULL);
+  ASSERT_NE(lookup, nullptr);
+  EXPECT_EQ(lookup, declared);
+  EXPECT_EQ(read_i32(lookup), 9);
+  delete_node(&redecl);
+}
+
+/* 场景 B: 函数体嵌套块内 return——signal 逐层穿过多层块出口，
+        调用结果载荷正确 clone 出帧，调用完成后调用方作用域继续正常
+   预期: 调用返回 77；调用后调用方可继续声明/lookup 新名字 */
+TEST_F(ExecLiteralTest, CallSignalUnwindKeepsCallerScopeUsable) {
+  /* nb2: func nb2(): i32 { { { return 77; } } } */
+  node_t *innermost = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_NUMERIC, "77"));
+  stmt_block_node_add_stmt(innermost, ret);
+  node_t *middle = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(middle, innermost);
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, middle);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nb2"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nb2"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 77)
+      << "payload must survive cloning through every block exit and the frame";
+
+  /* 调用后调用方作用域未被帧/块残留破坏：新声明可用 */
+  node_t *after = make_stmt_var("post_b",
+                                CLUX_NODE_LITERAL_IDENTIFIER,
+                                "i32",
+                                CLUX_NODE_LITERAL_NUMERIC,
+                                "5");
+  clux_value_t *declared = exec_node(ctx, after);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_NE(clux_type_get_kind(clux_value_get_type(declared)), CLUX_TYPE_ERROR);
+  clux_value_t *looked_up = clux_context_lookup(ctx, "post_b", NULL);
+  ASSERT_NE(looked_up, nullptr);
+  EXPECT_EQ(read_i32(looked_up), 5);
+  delete_node(&after);
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景 C: error 从函数体 2 层嵌套块深处上抛，穿块出口到帧边界（帧出口
+        借 err 指针重建），调用结果仍是该 error；之后 current scope 正常
+   预期: 调用结果消息 "use of undeclared identifier 'deep_boom'"；
+         调用后继续声明/lookup 成功 */
+TEST_F(ExecLiteralTest, CallErrorUnwindRestoresScopeThroughFrame) {
+  /* ef: func ef(): i32 { { deep_boom; } } */
+  node_t *inner = create_stmt_block_node(a);
+  node_t *bad = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(bad,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "deep_boom"));
+  stmt_block_node_add_stmt(inner, bad);
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, inner);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ef"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ef"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'deep_boom'")
+      << "the error must survive every block exit and the frame rebuild";
+
+  /* 帧与各层块全部换出后，current scope 状态正常 */
+  node_t *after = make_stmt_var("post_c",
+                                CLUX_NODE_LITERAL_IDENTIFIER,
+                                "i32",
+                                CLUX_NODE_LITERAL_NUMERIC,
+                                "3");
+  clux_value_t *declared = exec_node(ctx, after);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_NE(clux_type_get_kind(clux_value_get_type(declared)), CLUX_TYPE_ERROR);
+  clux_value_t *looked_up = clux_context_lookup(ctx, "post_c", NULL);
+  ASSERT_NE(looked_up, nullptr);
+  EXPECT_EQ(read_i32(looked_up), 3);
+  delete_node(&after);
+  delete_node(&call);
+  delete_node(&decl);
 }
