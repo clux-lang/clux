@@ -25,6 +25,7 @@
 #include "parser/node_stmt_var.h"
 #include "parser/node_slice.h"
 #include "parser/node_func_capture.h"
+#include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
 #include "parser/node_func_type.h"
 #include "parser/node_subscript.h"
@@ -814,7 +815,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_ASSIGN || kind == CLUX_NODE_EXPR_TERNARY ||
         kind == CLUX_NODE_EXPR_BINARY || kind == CLUX_NODE_EXPR_SUBSCRIPT ||
         kind == CLUX_NODE_EXPR_SLICE || kind == CLUX_NODE_EXPR_TUPLE ||
-        kind == CLUX_NODE_EXPR_FUNC_TYPE || kind == CLUX_NODE_STMT_VAR;
+        kind == CLUX_NODE_EXPR_FUNC_TYPE || kind == CLUX_NODE_EXPR_FUNC_DECL ||
+        kind == CLUX_NODE_STMT_VAR;
     if (synthetic_skip) {
       continue;
     }
@@ -3891,4 +3893,583 @@ TEST_F(ExecLiteralTest, VarUndefinedWithFuncAndTupleAnnotations) {
   EXPECT_TRUE(clux_value_is_tdz(tuple_result));
   EXPECT_EQ(clux_context_lookup(ctx, "tt", NULL), tuple_result);
   delete_node(&tuple_var);
+}
+
+/* ---- exec_expr_func_decl：函数定义表达式 ---- */
+
+/* 合成函数定义结点 func|captures| name[generics](params): ret {body}
+   （七槽：captures/generics/params/name/ret/body 由调用方构造并允许为
+   NULL 走各容错路径，KEYWORD 槽 exec 不读故不填，delete 根结点时一并
+   释放全部子结点）。 */
+static node_t *make_func_decl_of(allocator_t *allocator,
+                                 node_t *captures,
+                                 node_t *generics,
+                                 node_t *params,
+                                 node_t *name,
+                                 node_t *ret,
+                                 node_t *body) {
+  node_t *node = create_func_decl_node(allocator);
+  func_decl_node_set_captures(node, captures);
+  func_decl_node_set_generics(node, generics);
+  func_decl_node_set_params(node, params);
+  func_decl_node_set_name(node, name);
+  func_decl_node_set_return(node, ret);
+  func_decl_node_set_body(node, body);
+  return node;
+}
+
+/* 合成带名形参 name: type（name/type 为 NULL 时走缺名/缺类型容错路径，
+   delete 形参列表根结点时一并释放）。 */
+static node_t *
+make_named_param_of(allocator_t *allocator, node_t *name, node_t *type) {
+  node_t *node = create_func_param_node(allocator);
+  func_param_node_set_name(node, name);
+  func_param_node_set_type(node, type);
+  return node;
+}
+
+/* 场景: func add(a: i32, b: i32): i32 {body} 基本形态
+   预期: 返回函数值（值类型 kind FUNC），签名（参数序列/返回类型/捕获表）
+         与引擎 clux_context_create_func_type 通道结构恒等（指针相同），
+         函数体 AST 借用挂接可读回（clux_func_get_ast 返回 body 结点），
+         按名可从作用域 lookup 到同一值 */
+TEST_F(ExecLiteralTest, FuncDeclBuildsFunctionValue) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = make_node(CLUX_NODE_STMT_BLOCK, "{ a + b }");
+  node_t *node =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "add"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *result = exec_expr_func_decl(ctx, node);
+  ASSERT_NE(result, nullptr);
+  clux_type_t *func_type = clux_value_get_type(result);
+  ASSERT_NE(func_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(func_type), CLUX_TYPE_FUNC)
+      << "function definition must produce a func-typed value";
+  EXPECT_EQ(clux_func_capture_count(func_type), (size_t)0);
+  EXPECT_EQ(clux_func_param_count(func_type), (size_t)2);
+  EXPECT_EQ(clux_func_get_param(func_type, 0), i32_type);
+  EXPECT_EQ(clux_func_get_param(func_type, 1), i32_type);
+  EXPECT_EQ(clux_func_get_return_type(func_type), i32_type);
+  EXPECT_EQ(clux_func_get_ast(result), body)
+      << "body AST must be attached (borrowed) on the function value";
+  EXPECT_EQ(clux_context_lookup(ctx, "add", NULL), result)
+      << "named function must be reachable from the current scope";
+  clux_type_t *engine_params[] = {i32_type, i32_type};
+  EXPECT_EQ(func_type,
+            clux_context_create_func_type(
+                ctx, "func", NULL, 0, engine_params, 2, i32_type))
+      << "implicit func type must be interned with the engine channel";
+  delete_node(&node);
+}
+
+/* 场景: 同签名隐含类型与显式类型表达式恒等——
+        func add(a: i32, b: i32): i32{} 的值类型 vs 显式
+        func(i32, i32) -> i32 类型表达式的被描述类型
+   预期: 定义隐含生成的函数类型与显式 EXPR_FUNC_TYPE 产出的 type value
+         描述同一 clux_type_t*（指针恒等，类型名不参与去重） */
+TEST_F(ExecLiteralTest, FuncDeclImplicitTypeIdenticalToFuncType) {
+  /* 显式函数类型 func(i32, i32) -> i32 */
+  node_t *type_params = create_func_params_node(a);
+  func_params_node_add_param(type_params,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  func_params_node_add_param(type_params,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *type_node = make_func_type_of(
+      a, NULL, type_params, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *type_result = exec_expr_func_type(ctx, type_node);
+  ASSERT_NE(type_result, nullptr);
+  clux_type_t *explicit_type = type_described_by(type_result);
+  ASSERT_NE(explicit_type, nullptr);
+
+  /* 函数定义隐含生成的函数类型 */
+  node_t *decl_params = create_func_params_node(a);
+  func_params_node_add_param(
+      decl_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      decl_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        decl_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_add"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *decl_result = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(decl_result, nullptr);
+  EXPECT_EQ(clux_value_get_type(decl_result), explicit_type)
+      << "implicit func type of a definition must be pointer-identical "
+         "with the explicit func type expression of the same signature";
+  delete_node(&decl);
+  delete_node(&type_node);
+}
+
+/* 场景: 匿名函数 func(x: i32): i32 {body}（NAME 槽为 NULL）
+   预期: 成功创建函数值（kind FUNC，AST 挂接），匿名不进命名查找——
+         lookup 任意名均报未声明错误 */
+TEST_F(ExecLiteralTest, FuncDeclAnonymousSucceedsWithoutNameLookup) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = make_node(CLUX_NODE_STMT_BLOCK, "{}");
+  node_t *node =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        NULL,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *result = exec_expr_func_decl(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC)
+      << "anonymous function definition must still succeed";
+  EXPECT_EQ(clux_func_get_ast(result), body);
+  clux_value_t *probe = clux_context_lookup(ctx, "fd_anon", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "anonymous function must not be reachable by name";
+  EXPECT_STREQ(error_message_of(probe),
+               "use of undeclared identifier 'fd_anon'");
+  delete_node(&node);
+}
+
+/* 场景: func |n: i32, acc: *i32| step(x: i32): i32 {body} 带捕获列表
+   预期: 捕获名+类型正确进签名（按名可查、按位置可取），与引擎通道
+         结构恒等（指针相同） */
+TEST_F(ExecLiteralTest, FuncDeclCapturesArePartOfSignature) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+
+  /* 捕获列表：CAPTURES 的唯一子节点是含两个 FUNC_PARAM 的 FUNC_PARAMS */
+  node_t *capture_entries = create_func_params_node(a);
+  func_params_node_add_param(
+      capture_entries,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      capture_entries,
+      make_named_param_of(
+          a,
+          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "acc"),
+          make_binary_of(a,
+                         NULL,
+                         make_node(CLUX_NODE_SYMBOL, "*"),
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"))));
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, capture_entries);
+
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *node =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "step"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *result = exec_expr_func_decl(ctx, node);
+  ASSERT_NE(result, nullptr);
+  clux_type_t *func_type = clux_value_get_type(result);
+  ASSERT_NE(func_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(func_type), CLUX_TYPE_FUNC);
+  EXPECT_EQ(clux_func_capture_count(func_type), (size_t)2);
+  const clux_func_capture_t *capture_n = clux_func_find_capture(func_type, "n");
+  ASSERT_NE(capture_n, nullptr);
+  EXPECT_EQ(capture_n->type, i32_type);
+  const clux_func_capture_t *capture_acc =
+      clux_func_find_capture(func_type, "acc");
+  ASSERT_NE(capture_acc, nullptr);
+  EXPECT_EQ(capture_acc->type, ptr_i32);
+  clux_func_capture_t engine_captures[] = {{"n", i32_type}, {"acc", ptr_i32}};
+  clux_type_t *engine_params[] = {i32_type};
+  EXPECT_EQ(func_type,
+            clux_context_create_func_type(
+                ctx, "func", engine_captures, 2, engine_params, 1, i32_type))
+      << "capture entries must be interned with the engine channel";
+  EXPECT_EQ(clux_context_lookup(ctx, "step", NULL), result);
+  delete_node(&node);
+}
+
+/* 场景: 缺返回类型 / 缺函数体 / GENERICS 槽非 NULL
+   预期: 分别报 "function definition requires a return type" /
+         "function definition requires a body" /
+         "generic function is not supported yet" */
+TEST_F(ExecLiteralTest, FuncDeclMissingReturnBodyAndGenericsErrors) {
+  /* 缺返回类型：RETURN 槽为 NULL */
+  node_t *no_return_params = create_func_params_node(a);
+  func_params_node_add_param(no_return_params,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *no_return =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        no_return_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_nr"),
+                        NULL,
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *no_return_result = exec_expr_func_decl(ctx, no_return);
+  ASSERT_NE(no_return_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(no_return_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(no_return_result),
+               "function definition requires a return type");
+  delete_node(&no_return);
+
+  /* 缺函数体：BODY 槽为 NULL */
+  node_t *no_body_params = create_func_params_node(a);
+  func_params_node_add_param(no_body_params,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *no_body =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        no_body_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_nb"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        NULL);
+  clux_value_t *no_body_result = exec_expr_func_decl(ctx, no_body);
+  ASSERT_NE(no_body_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(no_body_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(no_body_result),
+               "function definition requires a body");
+  delete_node(&no_body);
+
+  /* 泛型参数：GENERICS 槽非 NULL */
+  node_t *generic_params = create_func_params_node(a);
+  func_params_node_add_param(generic_params,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *generics = make_node(CLUX_NODE_EXPR_TUPLE, "<T>");
+  node_t *generic_node =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        generic_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *generic_result = exec_expr_func_decl(ctx, generic_node);
+  ASSERT_NE(generic_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(generic_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(generic_result),
+               "generic function is not supported yet");
+  delete_node(&generic_node);
+}
+
+/* 场景: rest 参数 / 捕获表内非 FUNC_PARAM（泛型捕获）/ 形参缺类型节点 /
+        形参类型与返回类型非 type value
+   预期: 分别报 "variadic function parameter is not supported yet" /
+         "generic capture is not supported yet" /
+         "parameter %zu requires a type" /
+         "expected a type expression, got '<类型名>'" */
+TEST_F(ExecLiteralTest, FuncDeclRestGenericCaptureAndParamTypeErrors) {
+  /* rest 参数：PARAMS 中混入 CLUX_NODE_EXPR_REST 结点 */
+  node_t *rest_params = create_func_params_node(a);
+  func_params_node_add_param(
+      rest_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(rest_params,
+                             make_node(CLUX_NODE_EXPR_REST, "..."));
+  node_t *rest_node =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        rest_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_rest"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *rest_result = exec_expr_func_decl(ctx, rest_node);
+  ASSERT_NE(rest_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rest_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(rest_result),
+               "variadic function parameter is not supported yet");
+  delete_node(&rest_node);
+
+  /* 泛型捕获：CAPTURES 里的 FUNC_PARAMS 混入裸类型表达式（非 FUNC_PARAM） */
+  node_t *generic_entries = create_func_params_node(a);
+  func_params_node_add_param(generic_entries,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"));
+  node_t *generic_captures = create_func_captures_node(a);
+  func_captures_node_add_capture(generic_captures, generic_entries);
+  node_t *generic_capture_node =
+      make_func_decl_of(a,
+                        generic_captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_gc"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *generic_capture_result =
+      exec_expr_func_decl(ctx, generic_capture_node);
+  ASSERT_NE(generic_capture_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(generic_capture_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(generic_capture_result),
+               "generic capture is not supported yet");
+  delete_node(&generic_capture_node);
+
+  /* 形参缺类型节点：FUNC_PARAM 的 TYPE 槽为 NULL */
+  node_t *untyped_params = create_func_params_node(a);
+  func_params_node_add_param(
+      untyped_params,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"), NULL));
+  node_t *untyped_node =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        untyped_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_ut"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *untyped_result = exec_expr_func_decl(ctx, untyped_node);
+  ASSERT_NE(untyped_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(untyped_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(untyped_result), "parameter 0 requires a type");
+  delete_node(&untyped_node);
+
+  /* 形参类型非 type value：TYPE 槽是数值字面量 */
+  node_t *bad_param_params = create_func_params_node(a);
+  func_params_node_add_param(
+      bad_param_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_NUMERIC, "1")));
+  node_t *bad_param_node =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        bad_param_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_bp"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *bad_param_result = exec_expr_func_decl(ctx, bad_param_node);
+  ASSERT_NE(bad_param_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_param_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_param_result),
+               "expected a type expression, got 'i32'");
+  delete_node(&bad_param_node);
+
+  /* 返回类型非 type value：RETURN 槽是 str 字面量 */
+  node_t *bad_return_node =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_br"),
+                        make_node(CLUX_NODE_LITERAL_STRING, "\"s\""),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *bad_return_result = exec_expr_func_decl(ctx, bad_return_node);
+  ASSERT_NE(bad_return_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_return_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_return_result),
+               "expected a type expression, got 'str'");
+  delete_node(&bad_return_node);
+}
+
+/* 场景: 捕获缺名 / 捕获重名 / 捕获缺类型 / 捕获类型非 type value
+   预期: 分别报 "capture %zu requires a name and a type" /
+         "duplicate capture '%s'" / "capture '%s' requires a type" /
+         "expected a type expression, got '<类型名>'"（与 func_type 共用
+         公共校验通道） */
+TEST_F(ExecLiteralTest, FuncDeclCaptureValidationErrors) {
+  /* 缺名：FUNC_PARAM 的 NAME 槽为 NULL */
+  node_t *unnamed_entries = create_func_params_node(a);
+  func_params_node_add_param(
+      unnamed_entries,
+      make_named_param_of(
+          a, NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *unnamed_captures = create_func_captures_node(a);
+  func_captures_node_add_capture(unnamed_captures, unnamed_entries);
+  node_t *unnamed =
+      make_func_decl_of(a,
+                        unnamed_captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_cn"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *unnamed_result = exec_expr_func_decl(ctx, unnamed);
+  ASSERT_NE(unnamed_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(unnamed_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(unnamed_result),
+               "capture 0 requires a name and a type");
+  delete_node(&unnamed);
+
+  /* 重名：两个同名捕获 c */
+  node_t *dup_entries = create_func_params_node(a);
+  func_params_node_add_param(
+      dup_entries,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "c"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      dup_entries,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "c"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *dup_captures = create_func_captures_node(a);
+  func_captures_node_add_capture(dup_captures, dup_entries);
+  node_t *dup_node =
+      make_func_decl_of(a,
+                        dup_captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_cd"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *dup_result = exec_expr_func_decl(ctx, dup_node);
+  ASSERT_NE(dup_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(dup_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(dup_result), "duplicate capture 'c'");
+  delete_node(&dup_node);
+
+  /* 缺类型：FUNC_PARAM 的 TYPE 槽为 NULL */
+  node_t *untyped_entries = create_func_params_node(a);
+  func_params_node_add_param(
+      untyped_entries,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "c"), NULL));
+  node_t *untyped_captures = create_func_captures_node(a);
+  func_captures_node_add_capture(untyped_captures, untyped_entries);
+  node_t *untyped =
+      make_func_decl_of(a,
+                        untyped_captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_ct"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *untyped_result = exec_expr_func_decl(ctx, untyped);
+  ASSERT_NE(untyped_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(untyped_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(untyped_result), "capture 'c' requires a type");
+  delete_node(&untyped);
+
+  /* 捕获类型非 type value：TYPE 槽是数值字面量 */
+  node_t *bad_type_entries = create_func_params_node(a);
+  func_params_node_add_param(
+      bad_type_entries,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "c"),
+                          make_node(CLUX_NODE_LITERAL_NUMERIC, "1")));
+  node_t *bad_type_captures = create_func_captures_node(a);
+  func_captures_node_add_capture(bad_type_captures, bad_type_entries);
+  node_t *bad_type_node =
+      make_func_decl_of(a,
+                        bad_type_captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_cb"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *bad_type_result = exec_expr_func_decl(ctx, bad_type_node);
+  ASSERT_NE(bad_type_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_type_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_type_result),
+               "expected a type expression, got 'i32'");
+  delete_node(&bad_type_node);
+}
+
+/* 场景: 同名函数重复定义（同一作用域 define 两次）
+   预期: 第一次成功，第二次报 "duplicate declaration 'fd_dup'"，
+         lookup 仍返回第一个函数值 */
+TEST_F(ExecLiteralTest, FuncDeclDuplicateNameErrors) {
+  node_t *first_params = create_func_params_node(a);
+  func_params_node_add_param(
+      first_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *first =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        first_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_dup"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *first_result = exec_expr_func_decl(ctx, first);
+  ASSERT_NE(first_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(first_result)),
+            CLUX_TYPE_FUNC);
+  delete_node(&first);
+
+  /* 同名第二次定义：类型不同（两参数）也因重名被拒 */
+  node_t *second_params = create_func_params_node(a);
+  func_params_node_add_param(
+      second_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      second_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *second =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        second_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_dup"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *second_result = exec_expr_func_decl(ctx, second);
+  ASSERT_NE(second_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(second_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(second_result),
+               "duplicate declaration 'fd_dup'");
+  delete_node(&second);
+
+  /* 首个函数保持原状：lookup 仍返回第一个值，签名未被第二次定义破坏 */
+  clux_value_t *lookup = clux_context_lookup(ctx, "fd_dup", NULL);
+  ASSERT_NE(lookup, nullptr);
+  EXPECT_EQ(lookup, first_result);
+  EXPECT_EQ(clux_func_param_count(clux_value_get_type(lookup)), (size_t)1);
 }
