@@ -2868,3 +2868,411 @@ TEST_F(ExecLiteralTest, SlicePropagatesRangeErrors) {
   EXPECT_STREQ(error_message_of(neg_value), "slice index must not be negative");
   delete_node(&neg);
 }
+
+/* ---- exec_expr_binary：复合类型定义表达式（前缀 *T/[]T/?T/const/volatile
+       与数组类型 [N]T）---- */
+
+/* 从 type value 提取被描述的 clux_type_t*（raw 首槽位是类型指针）。 */
+static clux_type_t *type_described_by(clux_value_t *value) {
+  clux_type_t **stored =
+      (clux_type_t **)ptr_to_raw(clux_value_get_data(value), 0);
+  return stored ? *stored : nullptr;
+}
+
+/* 场景: 前缀类型 *i32 / []i32 / ?i32（LEFT=NULL，SYMBOL 存运算符文本）
+   预期: 产出 type value（值类型 unwrap 为 TYPE），被描述类型与引擎
+         clux_context_get_*_type 通道 interning 恒等（指针相同） */
+TEST_F(ExecLiteralTest, TypePrefixBuildsCompositeTypeValue) {
+  struct {
+    const char *op;
+    clux_type_kind_t kind;
+  } cases[] = {
+      {"*", CLUX_TYPE_PTR},
+      {"[]", CLUX_TYPE_SLICE},
+      {"?", CLUX_TYPE_OPTIONAL},
+  };
+  for (const auto &c : cases) {
+    node_t *node =
+        make_binary_of(a,
+                       NULL,
+                       make_node(CLUX_NODE_SYMBOL, c.op),
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << c.op;
+    EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)),
+              CLUX_TYPE_TYPE)
+        << c.op << " prefix must produce a type value";
+    clux_type_t *described = type_described_by(result);
+    ASSERT_NE(described, nullptr) << c.op;
+    EXPECT_EQ(clux_type_get_kind(described), c.kind) << c.op;
+    clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+    clux_type_t *expected = nullptr;
+    if (c.op[0] == '*') {
+      expected = clux_context_get_ptr_type(ctx, i32_type);
+    } else if (c.op[0] == '[') {
+      expected = clux_context_get_slice_type(ctx, i32_type);
+    } else {
+      expected = clux_context_get_optional_type(ctx, i32_type);
+    }
+    EXPECT_EQ(described, expected)
+        << c.op << " composite must be interned with the engine channel";
+    delete_node(&node);
+  }
+}
+
+/* 场景: 同一 *i32 表达式两次求值
+   预期: interning 生效——两次提取的被描述类型指针相同 */
+TEST_F(ExecLiteralTest, TypePrefixDoubleEvaluationIsInterned) {
+  clux_type_t *first = nullptr;
+  clux_type_t *second = nullptr;
+  for (int round = 0; round < 2; round++) {
+    node_t *node =
+        make_binary_of(a,
+                       NULL,
+                       make_node(CLUX_NODE_SYMBOL, "*"),
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << round;
+    EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)),
+              CLUX_TYPE_TYPE)
+        << round;
+    clux_type_t *described = type_described_by(result);
+    ASSERT_NE(described, nullptr) << round;
+    if (round == 0) {
+      first = described;
+    } else {
+      second = described;
+    }
+    delete_node(&node);
+  }
+  EXPECT_EQ(first, second)
+      << "two evaluations of *i32 must describe the same interned type";
+}
+
+/* 场景: 限定前缀 const i32 / volatile i32 与链式 const volatile i32
+   预期: 单层限定 kind 正确且与 clux_type_get_qualified_type 恒等；
+         链式叠加外层 const、内层 volatile、底层 i32 */
+TEST_F(ExecLiteralTest, TypePrefixQualifiersNest) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+
+  node_t *const_node =
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "const"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *const_result = exec_expr_binary(ctx, const_node);
+  ASSERT_NE(const_result, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(const_result)),
+            CLUX_TYPE_TYPE);
+  clux_type_t *const_described = type_described_by(const_result);
+  ASSERT_NE(const_described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(const_described), CLUX_TYPE_CONST);
+  EXPECT_EQ(const_described,
+            clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST));
+  delete_node(&const_node);
+
+  node_t *volatile_node =
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "volatile"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *volatile_result = exec_expr_binary(ctx, volatile_node);
+  ASSERT_NE(volatile_result, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(volatile_result)),
+            CLUX_TYPE_TYPE);
+  clux_type_t *volatile_described = type_described_by(volatile_result);
+  ASSERT_NE(volatile_described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(volatile_described), CLUX_TYPE_VOLATILE);
+  EXPECT_EQ(volatile_described,
+            clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE));
+  delete_node(&volatile_node);
+
+  /* const volatile i32：外层 const 节点的 RIGHT 是 volatile 节点 */
+  node_t *inner =
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "volatile"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *outer =
+      make_binary_of(a, NULL, make_node(CLUX_NODE_SYMBOL, "const"), inner);
+  clux_value_t *chained_result = exec_expr_binary(ctx, outer);
+  ASSERT_NE(chained_result, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(chained_result)),
+            CLUX_TYPE_TYPE);
+  clux_type_t *chained = type_described_by(chained_result);
+  ASSERT_NE(chained, nullptr);
+  EXPECT_EQ(clux_type_get_kind(chained), CLUX_TYPE_CONST)
+      << "outermost qualifier must be const";
+  EXPECT_EQ(clux_type_get_qualified_base(chained),
+            clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE))
+      << "inner qualifier must be volatile";
+  EXPECT_EQ(clux_type_unwrap(chained), i32_type)
+      << "stripping all qualifiers must reach the base i32";
+  EXPECT_TRUE(clux_type_is_const(chained));
+  delete_node(&outer);
+}
+
+/* 场景: 数组类型 [4]i32（LEFT=长度表达式，SYMBOL="[]"，RIGHT=元素类型）
+   预期: 产出 type value，被描述类型与 clux_context_get_array_type 恒等，
+         类型名为 "[4]i32" */
+TEST_F(ExecLiteralTest, ArrayTypeBuildsInternedArrayTypeValue) {
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "4"),
+                                make_node(CLUX_NODE_SYMBOL, "[]"),
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ARRAY);
+  EXPECT_EQ(described,
+            clux_context_get_array_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), 4));
+  EXPECT_STREQ(clux_type_get_name(described), "[4]i32");
+  delete_node(&node);
+}
+
+/* 场景: 数组长度用全部 10 种整数宽度的字面量（is_integer_kind 全 case）
+   预期: 均经 clux_context_index_to_i64 正确读取为长度 4，
+         interning 下描述同一 [4]i32 类型 */
+TEST_F(ExecLiteralTest, ArrayLengthAcceptsAllIntegerWidths) {
+  const char *lengths[] = {
+      "4",
+      "4i8",
+      "4i16",
+      "4i32",
+      "4i64",
+      "4isize",
+      "4u8",
+      "4u16",
+      "4u32",
+      "4u64",
+      "4usize",
+  };
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *expected = clux_context_get_array_type(ctx, i32_type, 4);
+  for (const char *len : lengths) {
+    node_t *node =
+        make_binary_of(a,
+                       make_node(CLUX_NODE_LITERAL_NUMERIC, len),
+                       make_node(CLUX_NODE_SYMBOL, "[]"),
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << len;
+    EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)),
+              CLUX_TYPE_TYPE)
+        << len;
+    clux_type_t *described = type_described_by(result);
+    ASSERT_NE(described, nullptr) << len;
+    EXPECT_EQ(described, expected) << len;
+    delete_node(&node);
+  }
+}
+
+/* 场景: 数组长度非整数（bool 字面量 / str 字面量）
+   预期: 报 "array length must be an integer, got 'bool'" /
+         "array length must be an integer, got 'str'" */
+TEST_F(ExecLiteralTest, ArrayLengthRejectsNonInteger) {
+  struct {
+    node_kind_t kind;
+    const char *text;
+    const char *type_name;
+  } cases[] = {
+      {CLUX_NODE_LITERAL_BOOLEAN, "true", "bool"},
+      {CLUX_NODE_LITERAL_STRING, "\"s\"", "str"},
+  };
+  for (const auto &c : cases) {
+    node_t *node =
+        make_binary_of(a,
+                       make_node(c.kind, c.text),
+                       make_node(CLUX_NODE_SYMBOL, "[]"),
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+    clux_value_t *result = exec_expr_binary(ctx, node);
+    ASSERT_NE(result, nullptr) << c.type_name;
+    EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR)
+        << c.type_name;
+    char expected[64];
+    snprintf(expected,
+             sizeof(expected),
+             "array length must be an integer, got '%s'",
+             c.type_name);
+    EXPECT_STREQ(error_message_of(result), expected) << c.type_name;
+    delete_node(&node);
+  }
+}
+
+/* 场景: 数组长度为负数（-3）
+   预期: 报 "array length must not be negative" */
+TEST_F(ExecLiteralTest, ArrayLengthRejectsNegative) {
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "-3"),
+                                make_node(CLUX_NODE_SYMBOL, "[]"),
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "array length must not be negative");
+  delete_node(&node);
+}
+
+/* 场景: 类型前缀操作数不是 type value（*5：RIGHT 是数值字面量）
+   预期: 报 "expected a type expression, got 'i32'" */
+TEST_F(ExecLiteralTest, TypePrefixOperandNotTypeValueErrors) {
+  node_t *node = make_binary_of(a,
+                                NULL,
+                                make_node(CLUX_NODE_SYMBOL, "*"),
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected a type expression, got 'i32'");
+  delete_node(&node);
+}
+
+/* 场景: 数组元素不是 type value（[4]5：RIGHT 是数值字面量）
+   预期: 同样报 "expected a type expression, got 'i32'"（元素检查在
+         长度检查之后，长度 4 合法故错误由元素通道产出） */
+TEST_F(ExecLiteralTest, ArrayElementNotTypeValueErrors) {
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "4"),
+                                make_node(CLUX_NODE_SYMBOL, "[]"),
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected a type expression, got 'i32'");
+  delete_node(&node);
+}
+
+/* 场景: 限定前缀操作数不是 type value（const 5：RIGHT 是数值字面量）
+   预期: 走与类型前缀公共的 exec_operand_type 通道——
+         报 "expected a type expression, got 'i32'" */
+TEST_F(ExecLiteralTest, QualifierPrefixOperandNotTypeValueErrors) {
+  node_t *node = make_binary_of(a,
+                                NULL,
+                                make_node(CLUX_NODE_SYMBOL, "const"),
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected a type expression, got 'i32'");
+  delete_node(&node);
+}
+
+/* 场景: 类型前缀操作数子节点求值出错（RIGHT=STMT_BLOCK 裸节点）
+   预期: error 透传——"unsupported node kind: STMT_BLOCK" */
+TEST_F(ExecLiteralTest, TypePrefixPropagatesOperandError) {
+  node_t *node = make_binary_of(a,
+                                NULL,
+                                make_node(CLUX_NODE_SYMBOL, "*"),
+                                make_node(CLUX_NODE_STMT_BLOCK, "..."));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_BLOCK");
+  delete_node(&node);
+}
+
+/* 场景: RIGHT NULL 容错残缺节点（* 缺操作数）
+   预期: exec_operand 拒绝空节点——"execution requires a node" */
+TEST_F(ExecLiteralTest, TypePrefixMissingOperandRequiresNode) {
+  node_t *node =
+      make_binary_of(a, NULL, make_node(CLUX_NODE_SYMBOL, "*"), NULL);
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "execution requires a node");
+  delete_node(&node);
+}
+
+/* 场景: 数组长度/元素子节点求值出错（长度先求值故其 error 优先透传；
+         长度合法时元素的 error 透传）
+   预期: 均报 "unsupported node kind: STMT_BLOCK" */
+TEST_F(ExecLiteralTest, ArrayPropagatesLengthAndElementErrors) {
+  node_t *bad_length =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_STMT_BLOCK, "..."),
+                     make_node(CLUX_NODE_SYMBOL, "[]"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *length_result = exec_expr_binary(ctx, bad_length);
+  ASSERT_NE(length_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(length_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(length_result),
+               "unsupported node kind: STMT_BLOCK");
+  delete_node(&bad_length);
+
+  node_t *bad_element =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "2"),
+                     make_node(CLUX_NODE_SYMBOL, "[]"),
+                     make_node(CLUX_NODE_STMT_BLOCK, "..."));
+  clux_value_t *element_result = exec_expr_binary(ctx, bad_element);
+  ASSERT_NE(element_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(element_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(element_result),
+               "unsupported node kind: STMT_BLOCK");
+  delete_node(&bad_element);
+}
+
+/* 场景: 端到端 var x: *i32 = undefined（类型标注是前缀类型节点）
+   预期: stmt_var 类型标注通道消费前缀节点产物，创建 *i32 的 TDZ 变量，
+         scope 按名可查到同一指针 */
+TEST_F(ExecLiteralTest, VarUndefinedWithPointerTypeAnnotation) {
+  node_t *type_node =
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *var_node = create_stmt_var_node(a);
+  stmt_var_node_set_keyword(var_node, make_node(CLUX_NODE_SYMBOL, "var"));
+  stmt_var_node_set_name(var_node,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tx"));
+  stmt_var_node_set_type(var_node, type_node);
+  stmt_var_node_set_value(
+      var_node, make_node(CLUX_NODE_LITERAL_UNDEFINED, kUndefinedText));
+  clux_value_t *result = exec_stmt_var(ctx, var_node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_PTR)
+      << "annotation must type the TDZ variable as *i32";
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_get_ptr_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32)));
+  EXPECT_TRUE(clux_value_is_tdz(result))
+      << "undefined initializer must produce a TDZ-marked variable";
+  EXPECT_EQ(clux_context_lookup(ctx, "tx", NULL), result);
+  delete_node(&var_node);
+}
+
+/* 场景: 端到端 var a: [2]i32 = undefined（类型标注是数组类型节点）
+   预期: 创建 [2]i32 的 TDZ 变量，类型与引擎数组通道恒等 */
+TEST_F(ExecLiteralTest, VarUndefinedWithArrayTypeAnnotation) {
+  node_t *type_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "2"),
+                     make_node(CLUX_NODE_SYMBOL, "[]"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *var_node = create_stmt_var_node(a);
+  stmt_var_node_set_keyword(var_node, make_node(CLUX_NODE_SYMBOL, "var"));
+  stmt_var_node_set_name(var_node,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ta"));
+  stmt_var_node_set_type(var_node, type_node);
+  stmt_var_node_set_value(
+      var_node, make_node(CLUX_NODE_LITERAL_UNDEFINED, kUndefinedText));
+  clux_value_t *result = exec_stmt_var(ctx, var_node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ARRAY)
+      << "annotation must type the TDZ variable as [2]i32";
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_get_array_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), 2));
+  EXPECT_STREQ(clux_type_get_name(clux_value_get_type(result)), "[2]i32");
+  EXPECT_TRUE(clux_value_is_tdz(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "ta", NULL), result);
+  delete_node(&var_node);
+}

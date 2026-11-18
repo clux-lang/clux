@@ -63,6 +63,60 @@ static const struct {
     {"!", CLUX_OP_LNOT},
 };
 
+/* 复合类型定义的公共通道：求值操作数并要求 type value，返回被描述类型；
+   失败返回 NULL 且 *out_err 携带 error 值（操作数 error 优先传播）。 */
+static clux_type_t *
+exec_operand_type(clux_context_t *ctx, node_t *node, clux_value_t **out_err) {
+  clux_value_t *value = exec_operand(ctx, node);
+  if (clux_value_is_error(value)) {
+    *out_err = value;
+    return NULL;
+  }
+  if (clux_type_kind_unwrap(clux_value_get_type(value)) != CLUX_TYPE_TYPE) {
+    const char *type_name = clux_type_get_name(clux_value_get_type(value));
+    *out_err = clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "expected a type expression, got '%s'",
+        type_name ? type_name : "<unknown>");
+    return NULL;
+  }
+  /* exec 已拒绝 shadow，raw 必有真实存储 */
+  *out_err = NULL;
+  return *(clux_type_t **)clux_value_get_raw(value, 0);
+}
+
+/* 一元类型定义前缀：运算符文本→引擎类型构造器。
+   const/volatile 走限定通道单独处理（构造器签名不同）。 */
+static const struct {
+  const char *text;
+  clux_type_t *(*build)(clux_context_t *, clux_type_t *);
+} k_type_prefix_ops[] = {
+    {"*", clux_context_get_ptr_type},
+    {"[]", clux_context_get_slice_type},
+    {"?", clux_context_get_optional_type},
+};
+
+/* 整数类型族判定：数组长度只接受整数（读取宽度随 kind 变化，
+   见 clux_context_index_to_i64）。 */
+static bool is_integer_kind(clux_type_kind_t kind) {
+  switch (kind) {
+  case CLUX_TYPE_I8:
+  case CLUX_TYPE_I16:
+  case CLUX_TYPE_I32:
+  case CLUX_TYPE_I64:
+  case CLUX_TYPE_U8:
+  case CLUX_TYPE_U16:
+  case CLUX_TYPE_U32:
+  case CLUX_TYPE_U64:
+  case CLUX_TYPE_ISIZE:
+  case CLUX_TYPE_USIZE:
+    return true;
+  default:
+    return false;
+  }
+}
+
 clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
   node_t *left_node = binary_node_get_left(node);
   node_t *symbol_node = binary_node_get_symbol(node);
@@ -82,6 +136,40 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
         return operand;
       }
       return clux_context_prefix(ctx, k_prefix_ops[i].op, operand, op_loc);
+    }
+    /* 类型定义前缀（*T / []T / ?T，白皮书 §2）：操作数须为 type value，
+       经引擎 interning 后包装成 type value 返回（var x: *i32 由此落地）。 */
+    for (size_t i = 0;
+         i < sizeof(k_type_prefix_ops) / sizeof(k_type_prefix_ops[0]);
+         i++) {
+      if (!location_is(op_loc, k_type_prefix_ops[i].text)) {
+        continue;
+      }
+      clux_value_t *err = NULL;
+      clux_type_t *base = exec_operand_type(ctx, right_node, &err);
+      if (!base) {
+        return err;
+      }
+      clux_type_t *composite = k_type_prefix_ops[i].build(ctx, base);
+      return clux_context_create_type_value(ctx, composite, NULL, op_loc);
+    }
+    /* 限定类型前缀（const T / volatile T）：经 qualifier 通道叠加限定，
+       支持 const volatile T 链式叠加。 */
+    clux_type_kind_t qualifier_kind = CLUX_TYPE_ERROR;
+    if (location_is(op_loc, "const")) {
+      qualifier_kind = CLUX_TYPE_CONST;
+    } else if (location_is(op_loc, "volatile")) {
+      qualifier_kind = CLUX_TYPE_VOLATILE;
+    }
+    if (qualifier_kind != CLUX_TYPE_ERROR) {
+      clux_value_t *err = NULL;
+      clux_type_t *base = exec_operand_type(ctx, right_node, &err);
+      if (!base) {
+        return err;
+      }
+      clux_type_t *qualified =
+          clux_type_get_qualified_type(base, qualifier_kind);
+      return clux_context_create_type_value(ctx, qualified, NULL, op_loc);
     }
     char *op = location_get(op_loc, allocator);
     clux_value_t *err = clux_context_create_error_message(
@@ -129,6 +217,40 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
           op_name);
     }
     return right;
+  }
+  /* 数组类型定义 [N]T：SYMBOL '[]' 且 LEFT 为长度表达式（切片类型前缀
+     []T 的 LEFT 为 NULL，已由上方前缀形态处理）。长度先于元素求值，
+     须为非负整数；元素须为 type value。 */
+  if (location_is(op_loc, "[]")) {
+    clux_value_t *length = exec_operand(ctx, left_node);
+    if (clux_value_is_error(length)) {
+      return length;
+    }
+    if (!is_integer_kind(clux_type_kind_unwrap(clux_value_get_type(length)))) {
+      const char *len_name = clux_type_get_name(clux_value_get_type(length));
+      return clux_context_create_error_message(
+          ctx,
+          op_loc,
+          "array length must be an integer, got '%s'",
+          len_name ? len_name : "<unknown>");
+    }
+    int64_t count = 0;
+    clux_value_t *len_err = clux_context_index_to_i64(ctx, length, &count);
+    if (len_err) {
+      return len_err;
+    }
+    if (count < 0) {
+      return clux_context_create_error_message(
+          ctx, op_loc, "array length must not be negative");
+    }
+    clux_value_t *err = NULL;
+    clux_type_t *base = exec_operand_type(ctx, right_node, &err);
+    if (!base) {
+      return err;
+    }
+    clux_type_t *array_type =
+        clux_context_get_array_type(ctx, base, (size_t)count);
+    return clux_context_create_type_value(ctx, array_type, NULL, op_loc);
   }
   /* 二元形态：文本映射引擎槽位后交 clux_context_binary 分派。 */
   for (size_t i = 0; i < sizeof(k_binary_ops) / sizeof(k_binary_ops[0]); i++) {
