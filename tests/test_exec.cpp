@@ -33,6 +33,7 @@
 #include "parser/node_call.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
 #include "engine/scope.h"
 #include "exec/call.h"
@@ -826,7 +827,7 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_FUNC_TYPE || kind == CLUX_NODE_EXPR_FUNC_DECL ||
         kind == CLUX_NODE_EXPR_CALL || kind == CLUX_NODE_STMT_BLOCK ||
         kind == CLUX_NODE_STMT_EXPR || kind == CLUX_NODE_STMT_RETURN ||
-        kind == CLUX_NODE_STMT_VAR;
+        kind == CLUX_NODE_STMT_VAR || kind == CLUX_NODE_STMT_FUNC;
     if (synthetic_skip) {
       continue;
     }
@@ -4077,6 +4078,13 @@ TEST_F(ExecLiteralTest, FuncDeclCapturesArePartOfSignature) {
   clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
   clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
 
+  /* 定义点捕获快照：先在作用域备好被捕获的同名现值 */
+  clux_value_t *seed_n = clux_context_create_i32(ctx, 1, "n", NULL);
+  ASSERT_NE(seed_n, nullptr);
+  clux_value_t *seed_acc = clux_context_create_ptr(
+      ctx, ptr_i32, clux_value_get_data(seed_n), "acc", NULL);
+  ASSERT_NE(seed_acc, nullptr);
+
   /* 捕获列表：CAPTURES 的唯一子节点是含两个 FUNC_PARAM 的 FUNC_PARAMS */
   node_t *capture_entries = create_func_params_node(a);
   func_params_node_add_param(
@@ -4343,8 +4351,7 @@ TEST_F(ExecLiteralTest, FuncDeclCaptureValidationErrors) {
   ASSERT_NE(unnamed_result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(unnamed_result)),
             CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(unnamed_result),
-               "capture 0 requires a name and a type");
+  EXPECT_STREQ(error_message_of(unnamed_result), "capture 0 requires a name");
   delete_node(&unnamed);
 
   /* 重名：两个同名捕获 c */
@@ -4376,7 +4383,8 @@ TEST_F(ExecLiteralTest, FuncDeclCaptureValidationErrors) {
   EXPECT_STREQ(error_message_of(dup_result), "duplicate capture 'c'");
   delete_node(&dup_node);
 
-  /* 缺类型：FUNC_PARAM 的 TYPE 槽为 NULL */
+  /* 无标注捕获 |c| 且作用域无同名变量：定义路径按定义点作用域查询
+     现值推断类型，查询失败报上下文查找错误 */
   node_t *untyped_entries = create_func_params_node(a);
   func_params_node_add_param(
       untyped_entries,
@@ -4396,7 +4404,8 @@ TEST_F(ExecLiteralTest, FuncDeclCaptureValidationErrors) {
   ASSERT_NE(untyped_result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(untyped_result)),
             CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(untyped_result), "capture 'c' requires a type");
+  EXPECT_STREQ(error_message_of(untyped_result),
+               "use of undeclared identifier 'c'");
   delete_node(&untyped);
 
   /* 捕获类型非 type value：TYPE 槽是数值字面量 */
@@ -4482,6 +4491,147 @@ TEST_F(ExecLiteralTest, FuncDeclDuplicateNameErrors) {
   ASSERT_NE(lookup, nullptr);
   EXPECT_EQ(lookup, first_result);
   EXPECT_EQ(clux_func_param_count(clux_value_get_type(lookup)), (size_t)1);
+}
+
+/* 场景: 无标注捕获 |ic|——作用域先有 ic: i32 = 7
+   预期: 以查得现值的类型推断捕获类型（i32 builtin），exec_expr_func_decl
+         成功产出函数值且捕获槽已种入定义点现值 7 */
+TEST_F(ExecLiteralTest, FuncDeclUnannotatedCaptureInfersTypeFromScopeValue) {
+  clux_value_t *outer = clux_context_create_i32(ctx, 7, "ic", NULL);
+  ASSERT_NE(outer, nullptr);
+
+  node_t *capture_params = create_func_params_node(a);
+  func_params_node_add_param(
+      capture_params,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ic"), NULL));
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, capture_params);
+  node_t *decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_inf"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(func)), CLUX_TYPE_FUNC)
+      << "unannotated capture must infer the type from the scope value";
+
+  clux_type_t *func_type = clux_value_get_type(func);
+  const clux_func_capture_t *capture = clux_func_find_capture(func_type, "ic");
+  ASSERT_NE(capture, nullptr);
+  EXPECT_EQ(capture->type, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "inferred capture type must be the scope value's i32";
+
+  clux_value_t *seeded = clux_context_func_capture(ctx, func, "ic", NULL);
+  ASSERT_NE(seeded, nullptr);
+  EXPECT_EQ(read_i32(seeded), 7)
+      << "capture slot must hold the definition-point snapshot of the scope "
+         "value";
+  delete_node(&decl);
+}
+
+/* 场景: 带标注 |mm: i32| 但定义点作用域同名值是 bool
+   预期: 捕获类型照常经 exec_operand_type 求值为 i32；写入初值时
+         assign 的 safe_cast 拦截 bool→i32，定义失败返回 error */
+TEST_F(ExecLiteralTest, FuncDeclAnnotatedCaptureTypeMismatchErrors) {
+  clux_value_t *outer = clux_context_create_bool(ctx, true, "mm", NULL);
+  ASSERT_NE(outer, nullptr);
+
+  node_t *capture_params = create_func_params_node(a);
+  func_params_node_add_param(
+      capture_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "mm"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, capture_params);
+  node_t *decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_mm"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *result = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR)
+      << "safe_cast must reject snapping a bool scope value into an i32 "
+         "capture";
+  delete_node(&decl);
+}
+
+/* 场景: 默认值捕获 |dv: i32 = 30 + 12|——DEFAULT 槽填数值表达式 AST，
+        作用域无同名变量
+   预期: 初值取默认表达式求值结果（不查作用域），定义成功且捕获槽为 42 */
+TEST_F(ExecLiteralTest, FuncDeclCaptureDefaultExpressionUsedAsInitialValue) {
+  node_t *capture_param =
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "dv"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  func_param_node_set_default(
+      capture_param,
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "30"),
+                     make_node(CLUX_NODE_SYMBOL, "+"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "12")));
+  node_t *capture_params = create_func_params_node(a);
+  func_params_node_add_param(capture_params, capture_param);
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, capture_params);
+  node_t *decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_dv"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(func)), CLUX_TYPE_FUNC)
+      << "a capture with a default expression must not require a scope value";
+
+  clux_value_t *view = clux_context_func_capture(ctx, func, "dv", NULL);
+  ASSERT_NE(view, nullptr);
+  EXPECT_EQ(read_i32(view), 42)
+      << "the capture slot must hold the evaluated default expression";
+  delete_node(&decl);
+}
+
+/* 场景: 无标注捕获源是 TDZ 变量（已创建未初始化的 tz_f: i32）
+   预期: consume_value 校验拒绝，定义失败返回 error，消息精确为
+         "use of a value before initialization" */
+TEST_F(ExecLiteralTest, FuncDeclCaptureFromTdzSourceErrors) {
+  clux_value_t *tz_src = clux_context_create_i32(ctx, 0, "tz_f", NULL);
+  ASSERT_NE(tz_src, nullptr);
+  clux_value_set_tdz(tz_src, true);
+
+  node_t *capture_params = create_func_params_node(a);
+  func_params_node_add_param(
+      capture_params,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_f"), NULL));
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, capture_params);
+  node_t *decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fd_tz"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_node(CLUX_NODE_STMT_BLOCK, "{}"));
+  clux_value_t *result = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of a value before initialization");
+  delete_node(&decl);
 }
 
 /* ---- exec：函数调用（栈帧协议） ---- */
@@ -4674,7 +4824,7 @@ TEST_F(ExecLiteralTest, CallFrameUsesStaticScoping) {
    预期: 帧内对捕获名的赋值写穿函数值存储；外层同名变量不受影响（捕获
          存储属函数值，与外层变量相互独立） */
 TEST_F(ExecLiteralTest, CallWritesThroughCaptures) {
-  clux_value_t *outer_c = clux_context_create_i32(ctx, 1, "wpc_c", NULL);
+  clux_value_t *outer_c = clux_context_create_i32(ctx, 1, "c", NULL);
   ASSERT_NE(outer_c, nullptr);
 
   node_t *captures = create_func_captures_node(a);
@@ -4714,10 +4864,64 @@ TEST_F(ExecLiteralTest, CallWritesThroughCaptures) {
   EXPECT_EQ(read_i32(written), 42)
       << "capture assignment must write through to the function's storage";
 
-  clux_value_t *after = clux_context_lookup(ctx, "wpc_c", NULL);
+  clux_value_t *after = clux_context_lookup(ctx, "c", NULL);
   ASSERT_NE(after, nullptr);
   EXPECT_EQ(read_i32(after), 1)
       << "capture storage is independent of the outer variable";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: 定义点快照时机与独立性（无标注路径）——外层 sc = 1，无标注
+        捕获 |sc|，闭包体赋 42 后调用
+   预期: 无标注捕获在定义点快照外层现值 1；体内赋值写穿到函数捕获槽
+         （调用返回 42、capture view 为 42），外层变量保持定义点原值 1 */
+TEST_F(ExecLiteralTest, FuncDeclUnannotatedCaptureSnapshotsAtDefinitionPoint) {
+  clux_value_t *outer = clux_context_create_i32(ctx, 1, "sc", NULL);
+  ASSERT_NE(outer, nullptr);
+
+  node_t *capture_params = create_func_params_node(a);
+  func_params_node_add_param(
+      capture_params,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "sc"), NULL));
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, capture_params);
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body, make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "sc", "42"));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "sc"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "sc_fn"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(func)), CLUX_TYPE_FUNC);
+
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "sc_fn"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(read_i32(result), 42) << "body sees the captured snapshot, then "
+                                     "writes 42 through to the capture slot";
+
+  clux_value_t *view = clux_context_func_capture(ctx, func, "sc", NULL);
+  ASSERT_NE(view, nullptr);
+  EXPECT_EQ(read_i32(view), 42)
+      << "in-body assignment must write through to the function's storage";
+
+  clux_value_t *after = clux_context_lookup(ctx, "sc", NULL);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(read_i32(after), 1)
+      << "the outer variable keeps its definition-point value";
   delete_node(&call);
   delete_node(&decl);
 }
@@ -5863,4 +6067,579 @@ TEST_F(ExecLiteralTest, DecoratedValueNarrowingCastRejected) {
          "(lookup miss yields an error value)";
   delete_node(&node);
   delete_node(&twice_decl);
+}
+
+/* ---- exec_stmt_func：函数语句包装层（无装饰器直通 / 装饰器值级包装） ----
+   被测语义（conformance/09-metadata.cx 权威断言）：[[add100]] func raw
+   落地为 raw = add100(raw)，包装函数接管名字，raw(5) == 105。 */
+
+/* 合成 func(i32) -> i32 类型表达式结点（独立子树——节点不可跨父共享）。 */
+static node_t *make_i32_to_i32_type(allocator_t *allocator) {
+  node_t *params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      params, make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  return make_func_type_of(
+      allocator,
+      NULL,
+      params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+}
+
+/* 合成源函数声明 func name(x: i32): i32 { return x; }（identity）。 */
+static node_t *make_i32_identity_decl(allocator_t *allocator,
+                                      const char *name) {
+  node_t *params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *ret = create_stmt_return_node(allocator);
+  stmt_return_node_set_value(
+      ret, make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  node_t *body = create_stmt_block_node(allocator);
+  stmt_block_node_add_stmt(body, ret);
+  return make_func_decl_of(
+      allocator,
+      NULL,
+      NULL,
+      params,
+      name ? make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name)
+           : NULL,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+}
+
+/* 合成带捕获形态的函数类型节点 func |f: func(i32)->i32| (i32) -> i32
+   （类型层捕获项为 FUNC_CAPTURE，与声明层 FUNC_PARAMS 包装不同）——
+   链式装饰器第 2 个起形参用：包装产物类型带捕获，捕获表参与类型判等，
+   裸 func(i32)->i32 形参过不了 func_invoke 交验。 */
+static node_t *make_captured_i32_to_i32_type(allocator_t *allocator) {
+  node_t *ret_captures = create_func_captures_node(allocator);
+  func_captures_node_add_capture(
+      ret_captures,
+      make_capture_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_i32_to_i32_type(allocator)));
+  node_t *ret_params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      ret_params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  return make_func_type_of(
+      allocator,
+      ret_captures,
+      ret_params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+}
+
+/* 合成 add100 形状装饰器并 define 进当前作用域：
+   func name(f: <f_type 形态>): func |f| (i32) -> i32
+     { return func |f| w(x: i32): i32 { return f(x) <op> <k>; }; }
+   param_type_captures 选 f 形态：false = 裸 func(i32)->i32（链头装饰器，
+   实参是无捕获源函数）；true = func |f| (i32)->i32（链第 2 个起，实参是
+   前一装饰器带捕获的包装产物）。decl AST 被函数值借用，经 decl_out 交
+   调用方持有，调用全部结束后释放。 */
+static clux_value_t *define_func_decorator(clux_context_t *ctx,
+                                           allocator_t *allocator,
+                                           const char *name,
+                                           const char *op_text,
+                                           const char *k_text,
+                                           bool param_type_captures,
+                                           node_t **decl_out) {
+  /* 内层包装函数 w 的捕获 f——注意 DECL 捕获表的第 0 项必须是
+     FUNC_PARAMS 包装（FUNC_PARAM 列表） */
+  node_t *capture_params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      capture_params,
+      make_named_param_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          param_type_captures ? make_captured_i32_to_i32_type(allocator)
+                              : make_i32_to_i32_type(allocator)));
+  node_t *captures = create_func_captures_node(allocator);
+  func_captures_node_add_capture(captures, capture_params);
+  node_t *inner_params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      inner_params,
+      make_named_param_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  /* 内层体：return f(x) <op> k; */
+  node_t *inner_arg =
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "x");
+  node_t *inner_body_ret = create_stmt_return_node(allocator);
+  stmt_return_node_set_value(
+      inner_body_ret,
+      make_binary_of(
+          allocator,
+          make_call_of(
+              allocator,
+              make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+              1,
+              &inner_arg),
+          make_text_node(allocator, CLUX_NODE_SYMBOL, op_text),
+          make_text_node(allocator, CLUX_NODE_LITERAL_NUMERIC, k_text)));
+  node_t *inner_body = create_stmt_block_node(allocator);
+  stmt_block_node_add_stmt(inner_body, inner_body_ret);
+  node_t *inner_decl = make_func_decl_of(
+      allocator,
+      captures,
+      NULL,
+      inner_params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "w"),
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      inner_body);
+  /* 外层体：return func |f| w(...); */
+  node_t *outer_ret = create_stmt_return_node(allocator);
+  stmt_return_node_set_value(outer_ret, inner_decl);
+  node_t *outer_body = create_stmt_block_node(allocator);
+  stmt_block_node_add_stmt(outer_body, outer_ret);
+  /* 外层形参 f 与返回类型捕获项与内层捕获同形态（类型层捕获项为
+     FUNC_CAPTURE，与声明层 FUNC_PARAMS 包装不同） */
+  node_t *outer_params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      outer_params,
+      make_named_param_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          param_type_captures ? make_captured_i32_to_i32_type(allocator)
+                              : make_i32_to_i32_type(allocator)));
+  node_t *ret_captures = create_func_captures_node(allocator);
+  func_captures_node_add_capture(
+      ret_captures,
+      make_capture_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          param_type_captures ? make_captured_i32_to_i32_type(allocator)
+                              : make_i32_to_i32_type(allocator)));
+  node_t *ret_params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      ret_params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *ret_type = make_func_type_of(
+      allocator,
+      ret_captures,
+      ret_params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *decl = make_func_decl_of(
+      allocator,
+      NULL,
+      NULL,
+      outer_params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name),
+      ret_type,
+      outer_body);
+  *decl_out = decl;
+  return exec_expr_func_decl(ctx, decl);
+}
+
+/* 合成函数语句结点（FUNC_DECL 槽挂 decl，装饰器由调用方追加）。 */
+static node_t *make_stmt_func_of(allocator_t *allocator, node_t *decl) {
+  node_t *node = create_stmt_func_node(allocator);
+  stmt_func_node_set_func_decl(node, decl);
+  return node;
+}
+
+/* 合成 callee(arg_text) 调用并执行（call AST 经 call_out 交调用方释放）。 */
+static clux_value_t *call_unary_i32(clux_context_t *ctx,
+                                    allocator_t *allocator,
+                                    const char *callee,
+                                    const char *arg_text,
+                                    node_t **call_out) {
+  node_t *arg = make_text_node(allocator, CLUX_NODE_LITERAL_NUMERIC, arg_text);
+  node_t *call = make_call_of(
+      allocator,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, callee),
+      1,
+      &arg);
+  *call_out = call;
+  return exec_expr_call(ctx, call);
+}
+
+/* 场景: 端到端 conformance 语义——[[add100]] func raw(x: i32): i32
+        （add100 = func(f: func(i32)->i32): func |f| (i32) -> i32
+           { return func |f| w(x: i32): i32 { return f(x) + 100; }; }）
+   预期: raw = add100(raw)——包装函数接管名字；内层 |f| 捕获在定义点
+         （add100 帧内 f = raw 实参）由 exec 定义点捕获初始化自动种入；
+         raw(5) == 105、raw(0) == 100（捕获链真实走 invoke，非按名转发
+         源函数）；执行器懒安装。 */
+TEST_F(ExecLiteralTest, StmtFuncDecoratorWrapsFunctionEndToEnd) {
+  node_t *add100_decl = nullptr;
+  clux_value_t *add100 =
+      define_func_decorator(ctx, a, "add100", "+", "100", false, &add100_decl);
+  ASSERT_NE(add100, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(add100)), CLUX_TYPE_FUNC);
+
+  /* 装饰器调用时 raw 实参绑定进 add100 帧，内层 |f| 捕获由实现自动
+     在定义点快照，无需测试代垫种入。 */
+  node_t *raw_decl = make_i32_identity_decl(a, "raw");
+  node_t *stmt = make_stmt_func_of(a, raw_decl);
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "add100")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC)
+      << "the decorated function statement must yield the wrapper function";
+  EXPECT_EQ(clux_context_lookup(ctx, "raw", NULL), result)
+      << "the wrapper value must take over the declared name in place";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "decorator invoke must lazily install the frame executor";
+
+  node_t *call = nullptr;
+  clux_value_t *wrapped_call = call_unary_i32(ctx, a, "raw", "5", &call);
+  ASSERT_NE(wrapped_call, nullptr);
+  EXPECT_EQ(read_i32(wrapped_call), 105)
+      << "raw(5) must run through the wrapper: raw(5) + 100 == 105";
+  delete_node(&call);
+  /* 第二次调用换 0：证明 105 非常数折叠、捕获绑定在多次调用间稳定 */
+  node_t *call_zero = nullptr;
+  clux_value_t *zero_call = call_unary_i32(ctx, a, "raw", "0", &call_zero);
+  ASSERT_NE(zero_call, nullptr);
+  EXPECT_EQ(read_i32(zero_call), 100)
+      << "raw(0) must run the captured source function again: 0 + 100";
+  delete_node(&call_zero);
+  delete_node(&stmt);
+  delete_node(&add100_decl);
+}
+
+/* 场景: 无装饰器直通——func plain(x: i32): i32 语句经 exec_node 分派
+        （STMT_FUNC 已注册分派表）
+   预期: 等价 exec_expr_func_decl 具名路径——名字可查、可调用、
+         返回值即 lookup 到的同一值 */
+TEST_F(ExecLiteralTest, StmtFuncWithoutDecoratorDefinesByName) {
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "plain"));
+  clux_value_t *result = exec_node(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC);
+  EXPECT_EQ(clux_context_lookup(ctx, "plain", NULL), result)
+      << "undecorated function statement defines the name directly";
+  node_t *call = nullptr;
+  clux_value_t *called = call_unary_i32(ctx, a, "plain", "3", &call);
+  ASSERT_NE(called, nullptr);
+  EXPECT_EQ(read_i32(called), 3);
+  delete_node(&call);
+  delete_node(&stmt);
+}
+
+/* 场景: 多装饰器链式——[[add10f]] [[mul2f]] func raw(x: i32): i32
+   预期: 按源码顺序 raw = mul2f(add10f(raw))，raw(3) == (3+10)*2 == 26；
+         反序结果 16 必须被断言区分。链第 2 个装饰器形参须声明带捕获
+         形态（捕获表参与类型判等，包装产物类型带捕获）。两层 |f| 捕获
+         均由定义点捕获初始化自动种入（w1.f ← raw 帧实参、
+         result.f ← w1 帧实参），无需测试代垫。 */
+TEST_F(ExecLiteralTest, StmtFuncDecoratorChainAppliesInSourceOrder) {
+  node_t *add10f_decl = nullptr;
+  clux_value_t *add10f =
+      define_func_decorator(ctx, a, "add10f", "+", "10", false, &add10f_decl);
+  ASSERT_NE(add10f, nullptr);
+  node_t *mul2f_decl = nullptr;
+  clux_value_t *mul2f =
+      define_func_decorator(ctx, a, "mul2f", "*", "2", true, &mul2f_decl);
+  ASSERT_NE(mul2f, nullptr);
+
+  node_t *raw_decl = make_i32_identity_decl(a, "raw");
+  node_t *stmt = make_stmt_func_of(a, raw_decl);
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "add10f")));
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "mul2f")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC);
+
+  node_t *call = nullptr;
+  clux_value_t *called = call_unary_i32(ctx, a, "raw", "3", &call);
+  ASSERT_NE(called, nullptr);
+  EXPECT_EQ(read_i32(called), 26)
+      << "decorators must chain in source order: mul2f(add10f(raw))(3) == 26";
+  delete_node(&call);
+  delete_node(&stmt);
+  delete_node(&add10f_decl);
+  delete_node(&mul2f_decl);
+}
+
+/* 场景: 非 func 装饰器求值结果跳过——[[i32]]（type value 编译期标记）
+        与 [[7]]（整数字面量）混排 func raw(x: i32): i32
+   预期: 两类非 func 求值结果均不包装（raw(5) == 5 identity）；
+         全程无 invoke（帧执行器保持未安装） */
+TEST_F(ExecLiteralTest, StmtFuncNonFuncDecoratorsAreSkipped) {
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "raw"));
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  stmt_func_node_add_decorator(
+      stmt, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC)
+      << "non-func decorator results must leave the source function intact";
+  EXPECT_EQ(clux_context_lookup(ctx, "raw", NULL), result);
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "skipped decorators must never reach the invoke path";
+  node_t *call = nullptr;
+  clux_value_t *called = call_unary_i32(ctx, a, "raw", "5", &call);
+  ASSERT_NE(called, nullptr);
+  EXPECT_EQ(read_i32(called), 5)
+      << "identity body must run unwrapped: raw(5) == 5";
+  delete_node(&call);
+  delete_node(&stmt);
+}
+
+/* 场景: 装饰器表达式求值产出 error——[[missing_fn]] func raw(x: i32): i32
+   预期: 求值错误直接传播为语句结果，raw 不落地（lookup 拿到 error 值） */
+TEST_F(ExecLiteralTest, StmtFuncDecoratorExpressionErrorPropagates) {
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "raw"));
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "missing_fn")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'missing_fn'")
+      << "decorator expression evaluation error must propagate verbatim";
+  clux_value_t *declared = clux_context_lookup(ctx, "raw", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared))
+      << "the function must not be declared when decoration fails "
+         "(lookup miss yields an error value)";
+  delete_node(&stmt);
+}
+
+/* 场景: 装饰器 invoke 元数校验失败——双参函数 [[pair]] func raw(x: i32): i32
+   预期: func_invoke 校验实参个数（期望 2 实收 1）报 error 并传播，
+         raw 不落地 */
+TEST_F(ExecLiteralTest, StmtFuncDecoratorInvokeArityErrorPropagates) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pa"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pb"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pa"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *pair_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pair"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *pair = exec_expr_func_decl(ctx, pair_decl);
+  ASSERT_NE(pair, nullptr);
+
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "raw"));
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pair")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "function expects 2 arguments, got 1")
+      << "invoke arity validation failure must propagate";
+  clux_value_t *declared = clux_context_lookup(ctx, "raw", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared))
+      << "the function must not be declared when the wrapper signature "
+         "rejects the source function";
+  delete_node(&stmt);
+  delete_node(&pair_decl);
+}
+
+/* 场景: 装饰器 invoke 类型校验失败——接收 i32 的装饰器拿到函数值
+        （expect_i32 = func(y: i32): str，返回类型取 str 与 raw 的
+         (i32)->i32 结构错开，保证 raw 类型名的确定性）
+   预期: 报 "function argument 0 requires type 'i32', got 'raw'" 并传播；
+         函数体不被执行 */
+TEST_F(ExecLiteralTest, StmtFuncDecoratorInvokeTypeErrorPropagates) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "y"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, create_stmt_return_node(a));
+  node_t *expect_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "expect_i32"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str"),
+                        body);
+  clux_value_t *expect_i32 = exec_expr_func_decl(ctx, expect_decl);
+  ASSERT_NE(expect_i32, nullptr);
+
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "raw"));
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "expect_i32")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "function argument 0 requires type 'i32', got 'raw'")
+      << "invoke parameter type validation failure must propagate";
+  delete_node(&stmt);
+  delete_node(&expect_decl);
+}
+
+/* 场景: func_decl 槽缺失——手工造空 STMT_FUNC 结点
+   预期: 报 "function statement requires a function declaration" */
+TEST_F(ExecLiteralTest, StmtFuncMissingFuncDeclReports) {
+  node_t *stmt = create_stmt_func_node(a);
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "function statement requires a function declaration");
+  delete_node(&stmt);
+}
+
+/* 场景: 装饰器 + 匿名函数声明（NAME 槽为 NULL）
+   预期: 报 "decorated function declaration requires a name"，
+         匿名值不可命名化（报错在 exec_func_decl_value 求值之前） */
+TEST_F(ExecLiteralTest, StmtFuncDecoratedAnonymousRequiresName) {
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, nullptr));
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "decorated function declaration requires a name");
+  delete_node(&stmt);
+}
+
+/* 场景: export/comptime 标记存在——exec 层忽略（export 是 run 阶段产出、
+        comptime 解释执行下与普通函数等价）
+   预期: 函数正常定义并按名调用（raw(4) == 4），行为与无标记完全一致 */
+TEST_F(ExecLiteralTest, StmtFuncExportComptimeMarkersAreIgnored) {
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "raw"));
+  stmt_func_node_set_export(stmt, make_node(CLUX_NODE_SYMBOL, "export"));
+  stmt_func_node_set_comptime(stmt, make_node(CLUX_NODE_SYMBOL, "comptime"));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC)
+      << "export/comptime markers must not affect exec semantics";
+  EXPECT_EQ(clux_context_lookup(ctx, "raw", NULL), result);
+  node_t *call = nullptr;
+  clux_value_t *called = call_unary_i32(ctx, a, "raw", "4", &call);
+  ASSERT_NE(called, nullptr);
+  EXPECT_EQ(read_i32(called), 4)
+      << "a comptime-marked function must behave as a plain function";
+  delete_node(&call);
+  delete_node(&stmt);
+}
+
+/* 场景: 装饰器结点缺 expr（手工空造）——func 侧容错路径
+        （与 var 侧共用 apply_decorator）
+   预期: 报 "decorator requires an expression"，raw 不落地、不触发求值 */
+TEST_F(ExecLiteralTest, StmtFuncDecoratorMissingExpressionReports) {
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "raw"));
+  stmt_func_node_add_decorator(stmt, make_decorator_of(a, nullptr));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "decorator requires an expression");
+  clux_value_t *declared = clux_context_lookup(ctx, "raw", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared))
+      << "the function must not be declared on the malformed decorator path";
+  delete_node(&stmt);
+}
+
+/* 场景: 装饰路径源声明求值失败——func raw(x: i32) 缺返回类型（RETURN 槽
+        NULL），exec_func_decl_value 在装饰前报错
+   预期: 报 "function definition requires a return type" 并传播，
+         raw 不落地 */
+TEST_F(ExecLiteralTest, StmtFuncDecoratedDeclEvaluationErrorPropagates) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *bad_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "raw"),
+                        NULL,
+                        create_stmt_block_node(a));
+  node_t *stmt = make_stmt_func_of(a, bad_decl);
+  stmt_func_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_func(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "function definition requires a return type")
+      << "source declaration evaluation failure must propagate before "
+         "decoration";
+  clux_value_t *declared = clux_context_lookup(ctx, "raw", NULL);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_TRUE(clux_value_is_error(declared));
+  delete_node(&stmt);
+}
+
+/* 场景: exec_func_decl_value 匿名求值——求值 func fv(x: i32): i32 但
+        不按名 define；随后 declare_value 具名化；对照具名路径
+        exec_expr_func_decl 不回归
+   预期: 产出值 kind FUNC、AST 已挂接；作用域中无 fv 名（lookup 报
+         undeclared）；declare_value 后按名可调用（fv(2) == 2）；
+         具名路径 lookup 正常命中 */
+TEST_F(ExecLiteralTest, FuncDeclValueEvaluationYieldsUsableValueWithoutName) {
+  node_t *decl = make_i32_identity_decl(a, "fv");
+  clux_value_t *value = exec_func_decl_value(ctx, decl);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_FUNC);
+  EXPECT_EQ(clux_func_get_ast(value), decl)
+      << "the anonymous evaluation must still attach the declaration AST";
+  clux_value_t *probe = clux_context_lookup(ctx, "fv", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "the anonymous evaluation must not define the name";
+  EXPECT_STREQ(error_message_of(probe), "use of undeclared identifier 'fv'");
+
+  /* 具名化（exec_stmt_func 装饰路径的收尾通道）——就地命名不拷贝 */
+  clux_value_t *bound =
+      clux_context_declare_value(ctx, value, "fv", node_get_location(decl));
+  ASSERT_NE(bound, nullptr);
+  node_t *call = nullptr;
+  clux_value_t *called = call_unary_i32(ctx, a, "fv", "2", &call);
+  ASSERT_NE(called, nullptr);
+  EXPECT_EQ(read_i32(called), 2)
+      << "the anonymous value must be callable after naming";
+  delete_node(&call);
+  delete_node(&decl);
+
+  /* 具名路径回归：exec_expr_func_decl 仍按名 define */
+  node_t *named_decl = make_i32_identity_decl(a, "fv_named");
+  clux_value_t *named = exec_expr_func_decl(ctx, named_decl);
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(clux_context_lookup(ctx, "fv_named", NULL), named)
+      << "the named declaration path must not regress";
+  delete_node(&named_decl);
 }

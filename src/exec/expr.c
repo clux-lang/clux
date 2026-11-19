@@ -145,6 +145,61 @@ static bool exec_func_capture_entry(clux_context_t *ctx,
   return true;
 }
 
+/* 函数定义路径捕获项（区别于类型表达式的签名声明）：捕获的是定义点
+   作用域的现值。|f: T| 带标注约束类型；|f| 无标注从作用域查询现值
+   （shadow 亦可），以查得值的类型推断捕获类型。重名在引擎校验前
+   拦截以携带源位置。成功并入 captures[(*filled)++]；失败返回 false
+   且 *out_fail 携带 error（已并入的项由调用方统一释放）。 */
+static bool exec_func_decl_capture_entry(clux_context_t *ctx,
+                                         node_t *name_node,
+                                         node_t *type_node,
+                                         size_t idx,
+                                         clux_func_capture_t *captures,
+                                         size_t *filled,
+                                         clux_value_t **out_fail) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name =
+      name_node ? location_get(node_get_location(name_node), allocator) : NULL;
+  if (!name) {
+    *out_fail = clux_context_create_error_message(
+        ctx, NULL, "capture %zu requires a name", idx);
+    return false;
+  }
+  for (size_t prev = 0; prev < *filled; prev++) {
+    if (strcmp(name, captures[prev].name) == 0) {
+      *out_fail = clux_context_create_error_message(
+          ctx, node_get_location(name_node), "duplicate capture '%s'", name);
+      allocator_free(allocator, (void **)&name);
+      return false;
+    }
+  }
+  clux_type_t *type = NULL;
+  if (type_node) {
+    clux_value_t *err = NULL;
+    type = exec_operand_type(ctx, type_node, &err);
+    if (!type) {
+      *out_fail = err;
+      allocator_free(allocator, (void **)&name);
+      return false;
+    }
+  } else {
+    /* 无标注 |f|：以定义点作用域现值的类型推断捕获类型。 */
+    clux_value_t *found =
+        clux_context_lookup(ctx, name, node_get_location(name_node));
+    if (clux_value_is_error(found)) {
+      *out_fail = found;
+      allocator_free(allocator, (void **)&name);
+      return false;
+    }
+    type = clux_value_get_type(found);
+  }
+  captures[*filled].name = name;
+  captures[*filled].type = type;
+  (*filled)++;
+  *out_fail = NULL;
+  return true;
+}
+
 /* 一元类型定义前缀：运算符文本→引擎类型构造器。
    const/volatile 走限定通道单独处理（构造器签名不同）。 */
 static const struct {
@@ -477,8 +532,71 @@ clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node) {
    类型表达式产出的类型恒等），再创建函数零值、按名 define 进当前作用域
    （匿名函数 name 为 NULL 走匿名路径），最后挂接函数体 AST（借用）。
    捕获项默认值属于函数体（AST），不参与类型构造。泛型参数与 rest
-   参数包（变参函数）暂不支持，等泛型推断 / FFI 批次接入。 */
-clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
+   参数包（变参函数）暂不支持，等泛型推断 / FFI 批次接入。
+   declare_named=false 时仅求值出函数值不按名 define（装饰器包装路径：
+   具名化推迟到包装完成后的 declare_value）。 */
+/* 定义点捕获快照：类型构造完成后按捕获列表逐项写入初值。
+   |f: T = expr| 默认值求值结果作初值（不查作用域）；其余从定义点
+   作用域查询现值（TDZ 源拒绝），经捕获 view + assign 以 copy 语义
+   快照进函数值存储——写入独立于外层变量，类型不匹配由 assign 的
+   safe_cast 拦截。错误逐一向上传播。 */
+static clux_value_t *exec_func_decl_init_captures(clux_context_t *ctx,
+                                                  clux_value_t *func,
+                                                  node_t *node) {
+  node_t *captures_node = func_decl_node_get_captures(node);
+  if (!captures_node) {
+    return NULL;
+  }
+  node_t *capture_params = func_captures_node_get_capture(captures_node, 0);
+  if (!capture_params) {
+    return NULL;
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  size_t count = func_params_node_get_param_count(capture_params);
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *entry = func_params_node_get_param(capture_params, idx);
+    node_t *name_node = entry ? func_param_node_get_name(entry) : NULL;
+    char *name = name_node
+                     ? location_get(node_get_location(name_node), allocator)
+                     : NULL;
+    if (!name) {
+      return clux_context_create_error_message(
+          ctx, node_get_location(node), "capture %zu requires a name", idx);
+    }
+    clux_value_t *view = clux_context_func_capture(
+        ctx, func, name, node_get_location(name_node));
+    if (clux_value_is_error(view)) {
+      allocator_free(allocator, (void **)&name);
+      return view;
+    }
+    node_t *default_node = entry ? func_param_node_get_default(entry) : NULL;
+    clux_value_t *source = NULL;
+    if (default_node) {
+      source = exec_operand(ctx, default_node);
+    } else {
+      clux_value_t *found =
+          clux_context_lookup(ctx, name, node_get_location(name_node));
+      if (!clux_value_is_error(found)) {
+        found = clux_context_consume_value(
+            ctx, found, node_get_location(name_node));
+      }
+      source = found;
+    }
+    allocator_free(allocator, (void **)&name);
+    if (clux_value_is_error(source)) {
+      return source;
+    }
+    clux_value_t *assigned =
+        clux_context_assign(ctx, view, source, node_get_location(name_node));
+    if (clux_value_is_error(assigned)) {
+      return assigned;
+    }
+  }
+  return NULL;
+}
+
+static clux_value_t *
+exec_func_decl_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   const location_t *loc = node_get_location(node);
   node_t *return_node = func_decl_node_get_return(node);
@@ -522,13 +640,13 @@ clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
           ctx, loc, "generic capture is not supported yet");
       break;
     }
-    if (!exec_func_capture_entry(ctx,
-                                 func_param_node_get_name(entry),
-                                 func_param_node_get_type(entry),
-                                 idx,
-                                 captures,
-                                 &filled,
-                                 &fail)) {
+    if (!exec_func_decl_capture_entry(ctx,
+                                      func_param_node_get_name(entry),
+                                      func_param_node_get_type(entry),
+                                      idx,
+                                      captures,
+                                      &filled,
+                                      &fail)) {
       break;
     }
   }
@@ -602,7 +720,8 @@ clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
      匿名 name NULL 安全）；随后挂接整个声明节点 AST（借用，不拥有）——
      形参名只存在于 AST 不在类型（类型判等不含名），栈帧绑形参时
      需读到 PARAMS 槽。 */
-  clux_value_t *value = clux_context_create_func(ctx, type, name, loc);
+  clux_value_t *value =
+      clux_context_create_func(ctx, type, declare_named ? name : NULL, loc);
   allocator_free(allocator, (void **)&name);
   if (clux_value_is_error(value)) {
     return value;
@@ -611,7 +730,23 @@ clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
   if (clux_value_is_error(value)) {
     return value;
   }
+  /* 定义点捕获快照：函数值就绪后立即按定义点作用域写入捕获初值。 */
+  clux_value_t *capture_fail = exec_func_decl_init_captures(ctx, value, node);
+  if (capture_fail) {
+    return capture_fail;
+  }
   return value;
+}
+
+clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
+  return exec_func_decl_impl(ctx, node, true);
+}
+
+/* 匿名函数值求值：仅求值出函数值（带类型与 AST 挂接），不按名 define。
+   函数语句装饰器包装路径用——先匿名求值源函数值，包装完成后由
+   declare_value 具名化，避开 scope 的重名冲突（scope 无重绑定通道）。 */
+clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node) {
+  return exec_func_decl_impl(ctx, node, false);
 }
 
 /* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value

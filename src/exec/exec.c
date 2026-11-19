@@ -75,7 +75,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_SWITCH_BRANCH*/ NULL,
     /*CLUX_NODE_SWITCH_PATTERNS*/ NULL,
     /*CLUX_NODE_DECORATOR*/ NULL,
-    /*CLUX_NODE_STMT_FUNC*/ NULL,
+    /*CLUX_NODE_STMT_FUNC*/ exec_stmt_func,
     /*CLUX_NODE_STMT_VAR*/ exec_stmt_var,
     /*CLUX_NODE_STMT_TYPE*/ NULL,
     /*CLUX_NODE_STMT_ENUM*/ NULL,

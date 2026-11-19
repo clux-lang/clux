@@ -10,12 +10,45 @@
 #include "engine/value.h"
 #include "exec/call.h"
 #include "exec/exec.h"
+#include "exec/expr.h"
 #include "parser/node.h"
 #include "parser/node_decorator.h"
+#include "parser/node_func_decl.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_var.h"
+
+/* 单装饰器应用（白皮书 §3.2/§9.1）：普通装饰器是值级包装——装饰器表达式
+   求值为 func 值时以当前值为唯一实参调用（[[twice]] var x = 21 落地为
+   x = twice(21)；[[add100]] func raw 落地为 raw = add100(raw)）；
+   求值为其余值（编译期标记，如 metadata）不改当前值原样返回。
+   expr 缺失 / 装饰器求值 error / invoke error 均产出 error。 */
+static clux_value_t *apply_decorator(clux_context_t *ctx,
+                                     clux_value_t *value,
+                                     node_t *decorator,
+                                     const location_t *fallback_loc) {
+  node_t *decorator_expr =
+      decorator ? decorator_node_get_expr(decorator) : NULL;
+  if (!decorator_expr) {
+    return clux_context_create_error_message(
+        ctx,
+        decorator ? node_get_location(decorator) : fallback_loc,
+        "decorator requires an expression");
+  }
+  clux_value_t *wrapper = exec_operand(ctx, decorator_expr);
+  if (clux_value_is_error(wrapper)) {
+    return wrapper;
+  }
+  if (clux_type_kind_unwrap(clux_value_get_type(wrapper)) != CLUX_TYPE_FUNC) {
+    return value;
+  }
+  /* invoke 走帧协议执行器——先保证已挂（首次调用时懒安装） */
+  exec_call_install_executor(ctx);
+  return clux_context_invoke(
+      ctx, wrapper, 1, &value, node_get_location(decorator));
+}
 
 clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
@@ -40,38 +73,18 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
       return value;
     }
   }
-  /* 装饰器（白皮书 §3.2/§9.1）：普通装饰器是值级包装——装饰器表达式
-     求值为 func 值时按源码顺序依次调用包装初值（[[twice]] var x = 21
-     落地为 x = twice(21)）；求值为其余值（编译期标记，如 metadata）
-     不改初值。TDZ（= undefined）无初值可包装，装饰器不适用。 */
+  /* 装饰器按源码顺序链式包装（apply_decorator）。TDZ（= undefined）无
+     初值可包装，装饰器不适用。 */
   if (value) {
     size_t decorator_count = stmt_var_node_get_decorator_count(node);
     for (size_t idx = 0; idx < decorator_count; idx++) {
-      node_t *decorator = stmt_var_node_get_decorator(node, idx);
-      node_t *decorator_expr =
-          decorator ? decorator_node_get_expr(decorator) : NULL;
-      if (!decorator_expr) {
-        return clux_context_create_error_message(
-            ctx,
-            decorator ? node_get_location(decorator) : node_get_location(node),
-            "decorator requires an expression");
+      value = apply_decorator(ctx,
+                              value,
+                              stmt_var_node_get_decorator(node, idx),
+                              node_get_location(node));
+      if (clux_value_is_error(value)) {
+        return value;
       }
-      clux_value_t *wrapper = exec_operand(ctx, decorator_expr);
-      if (clux_value_is_error(wrapper)) {
-        return wrapper;
-      }
-      if (clux_type_kind_unwrap(clux_value_get_type(wrapper)) !=
-          CLUX_TYPE_FUNC) {
-        continue;
-      }
-      /* invoke 走帧协议执行器——先保证已挂（首次调用时懒安装） */
-      exec_call_install_executor(ctx);
-      clux_value_t *wrapped = clux_context_invoke(
-          ctx, wrapper, 1, &value, node_get_location(decorator));
-      if (clux_value_is_error(wrapped)) {
-        return wrapped;
-      }
-      value = wrapped;
     }
   }
   /* 类型标注可省略（var x = 10 按初值自身类型落地）。
@@ -183,4 +196,57 @@ clux_value_t *exec_stmt_return(clux_context_t *ctx, node_t *node) {
     }
   }
   return clux_context_create_return_signal(ctx, payload);
+}
+
+/* 函数语句 <decorator>* [export]? [comptime]? <func_decl>（白皮书 §3.3、
+   §3.4.1、§8.1）：无装饰器时直接执行声明本体——命名函数经
+   exec_expr_func_decl 自行 define。有装饰器时（§9.1 函数装饰器）：
+   先匿名求值源函数值（不按名 define——scope 无重绑定通道，先声明再
+   包装会撞 duplicate 或让名字继续指向源函数），装饰器按源码顺序以
+   函数值为实参链式调用（[[add100]] func raw 落地为 raw = add100(raw)，
+   包装后的函数值接管名字，后续 raw(x) 经包装函数走捕获调用源函数，
+   conformance/09-metadata.cx 断言 raw(5) == 105）；最后 declare_value
+   具名化（包装值已注册本作用域，就地命名不拷贝，捕获 view 无损）。
+   export（run 阶段产出）与 comptime（解释执行下与普通函数等价）是
+   编译期语义，exec 层不处理。 */
+clux_value_t *exec_stmt_func(clux_context_t *ctx, node_t *node) {
+  node_t *decl = stmt_func_node_get_func_decl(node);
+  if (!decl) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "function statement requires a function declaration");
+  }
+  size_t decorator_count = stmt_func_node_get_decorator_count(node);
+  if (decorator_count == 0) {
+    return exec_operand(ctx, decl);
+  }
+  node_t *name_node = func_decl_node_get_name(decl);
+  if (!name_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "decorated function declaration requires a name");
+  }
+  /* 匿名求值源函数值：注册进当前作用域但不具名——装饰失败无需回滚声明，
+     源函数值生命周期归作用域（被装饰函数捕获引用，不可提前销毁）。 */
+  clux_value_t *value = exec_func_decl_value(ctx, decl);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  for (size_t idx = 0; idx < decorator_count; idx++) {
+    value = apply_decorator(ctx,
+                            value,
+                            stmt_func_node_get_decorator(node, idx),
+                            node_get_location(node));
+    if (clux_value_is_error(value)) {
+      return value;
+    }
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name = location_get(node_get_location(name_node), allocator);
+  clux_value_t *bound = clux_context_declare_value(
+      ctx, value, name, node_get_location(name_node));
+  allocator_free(allocator, (void **)&name);
+  return bound;
 }
