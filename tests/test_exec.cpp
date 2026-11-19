@@ -35,6 +35,9 @@
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_union.h"
+#include "parser/node_union.h"
+#include "parser/node_field.h"
 #include "engine/scope.h"
 #include "exec/call.h"
 #include "parser/node_subscript.h"
@@ -827,7 +830,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_FUNC_TYPE || kind == CLUX_NODE_EXPR_FUNC_DECL ||
         kind == CLUX_NODE_EXPR_CALL || kind == CLUX_NODE_STMT_BLOCK ||
         kind == CLUX_NODE_STMT_EXPR || kind == CLUX_NODE_STMT_RETURN ||
-        kind == CLUX_NODE_STMT_VAR || kind == CLUX_NODE_STMT_FUNC;
+        kind == CLUX_NODE_STMT_VAR || kind == CLUX_NODE_STMT_FUNC ||
+        kind == CLUX_NODE_EXPR_UNION || kind == CLUX_NODE_STMT_UNION;
     if (synthetic_skip) {
       continue;
     }
@@ -6642,4 +6646,494 @@ TEST_F(ExecLiteralTest, FuncDeclValueEvaluationYieldsUsableValueWithoutName) {
   EXPECT_EQ(clux_context_lookup(ctx, "fv_named", NULL), named)
       << "the named declaration path must not regress";
   delete_node(&named_decl);
+}
+
+/* ---- exec_expr_union / exec_stmt_union：union 定义与语句（§3.7/§3.8） ---- */
+
+/* 合成 union 成员字段节点 name: type（type_text 为 NULL 构造缺类型容错
+   路径），delete 根结点时一并释放子结点。 */
+static node_t *make_union_field_of(allocator_t *allocator,
+                                   const char *name_text,
+                                   const char *type_text) {
+  node_t *field = create_field_node(allocator);
+  if (name_text) {
+    field_node_set_name(
+        field,
+        make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  }
+  if (type_text) {
+    field_node_set_type(
+        field,
+        make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, type_text));
+  }
+  return field;
+}
+
+/* 合成 union/cunion 声明节点 <keyword> NAME { body }：keyword_text 为
+   NULL 构造 KEYWORD 槽缺省（exec 默认走 tag union），name_text 为 NULL
+   构造缺名容错路径，generics/body 允许为 NULL。 */
+static node_t *make_union_decl_of(allocator_t *allocator,
+                                  const char *keyword_text,
+                                  const char *name_text,
+                                  node_t *generics,
+                                  node_t *body) {
+  node_t *node = create_union_node(allocator);
+  const char *loc_text = keyword_text ? keyword_text : "union";
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = loc_text;
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = loc_text + strlen(loc_text);
+  loc.end.column = 1;
+  loc.end.line = 1;
+  node_set_location(node, &loc);
+  if (keyword_text) {
+    union_node_set_keyword(
+        node, make_text_node(allocator, CLUX_NODE_SYMBOL, keyword_text));
+  }
+  if (name_text) {
+    union_node_set_name(
+        node,
+        make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  }
+  union_node_set_generics(node, generics);
+  union_node_set_body(node, body);
+  return node;
+}
+
+/* 合成两成员字段表 { a: i32; b: f64 }（e2e 与结构去重用例共用）。 */
+static node_t *make_two_member_fields(allocator_t *allocator) {
+  node_t *fields = create_fields_node(allocator);
+  fields_node_add_field(fields, make_union_field_of(allocator, "a", "i32"));
+  fields_node_add_field(fields, make_union_field_of(allocator, "b", "f64"));
+  return fields;
+}
+
+/* 场景: tag union 定义端到端——union U { a: i32; b: f64 }（KEYWORD 槽
+        文本 "union"）
+   预期: 产出 type value（类型 kind TYPE），lookup("U") 取回同一值；
+         被描述类型 kind UNION、类型名 "U"、成员数 2，find_member 按名
+         取回成员且成员类型与 i32/f64 builtin 恒等，未知成员查无 */
+TEST_F(ExecLiteralTest, UnionDefinesTagUnionEndToEnd) {
+  node_t *decl =
+      make_union_decl_of(a, "union", "U", NULL, make_two_member_fields(a));
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(clux_context_lookup(ctx, "U", NULL), result)
+      << "the named path must define the type value in the current scope";
+
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_UNION);
+  EXPECT_STREQ(clux_type_get_name(described), "U");
+  EXPECT_EQ(clux_union_member_count(described), 2u);
+  const clux_union_member_t *ma = clux_union_find_member(described, "a");
+  ASSERT_NE(ma, nullptr);
+  EXPECT_STREQ(ma->name, "a");
+  EXPECT_EQ(ma->type, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  const clux_union_member_t *mb = clux_union_find_member(described, "b");
+  ASSERT_NE(mb, nullptr);
+  EXPECT_STREQ(mb->name, "b");
+  EXPECT_EQ(mb->type, clux_context_builtin_type(ctx, CLUX_TYPE_F64));
+  EXPECT_EQ(clux_union_find_member(described, "zzz"), nullptr)
+      << "unknown member lookup must not match";
+  delete_node(&decl);
+}
+
+/* 场景: cunion 关键字分派——cunion CU { a: i32; b: f64 }（KEYWORD 槽
+        文本 "cunion"）
+   预期: 被描述类型走 C union 构造器：kind CUNION、成员按声明序可查
+         （get_member(0)="a"、(1)="b"，全部共享偏移 0 由构造器保证）、
+         lookup("CU") 取回同一值 */
+TEST_F(ExecLiteralTest, UnionCunionKeywordDispatchesToCunion) {
+  node_t *decl =
+      make_union_decl_of(a, "cunion", "CU", NULL, make_two_member_fields(a));
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "CU", NULL), result);
+
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_CUNION);
+  EXPECT_EQ(clux_cunion_member_count(described), 2u);
+  const clux_cunion_member_t *m0 = clux_cunion_get_member(described, 0);
+  ASSERT_NE(m0, nullptr);
+  EXPECT_STREQ(m0->name, "a");
+  EXPECT_EQ(m0->type, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  const clux_cunion_member_t *m1 = clux_cunion_get_member(described, 1);
+  ASSERT_NE(m1, nullptr);
+  EXPECT_STREQ(m1->name, "b");
+  EXPECT_EQ(m1->type, clux_context_builtin_type(ctx, CLUX_TYPE_F64));
+  ASSERT_NE(clux_cunion_find_member(described, "a"), nullptr);
+  EXPECT_EQ(clux_cunion_find_member(described, "zzz"), nullptr);
+  delete_node(&decl);
+}
+
+/* 场景: KEYWORD 槽缺省——union 声明节点不带关键字（容错形态）
+   预期: exec 按 tag union 处理（is_cunion=false），被描述类型 kind
+         UNION 与显式 "union" 关键字路径一致 */
+TEST_F(ExecLiteralTest, UnionNullKeywordDefaultsToTagUnion) {
+  node_t *decl =
+      make_union_decl_of(a, NULL, "NK", NULL, make_two_member_fields(a));
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_UNION);
+  delete_node(&decl);
+}
+
+/* 场景: 结构去重恒等——union U { a: i32; b: f64 } 与 union V { a: i32;
+        b: f64 } 成员表一致（类型名不同），对照 union W { a: i32 } 成员
+        表不同
+   预期: U/V 解出的被描述类型指针恒等（find-or-dedup 命中已存实例）；
+         W 与 U 指针不同（结构判等失败须新建实例） */
+TEST_F(ExecLiteralTest, UnionStructuralDedupYieldsIdenticalType) {
+  node_t *decl_u =
+      make_union_decl_of(a, "union", "U", NULL, make_two_member_fields(a));
+  clux_value_t *value_u = exec_expr_union(ctx, decl_u);
+  ASSERT_NE(value_u, nullptr);
+  clux_type_t *type_u = type_described_by(value_u);
+  ASSERT_NE(type_u, nullptr);
+
+  node_t *decl_v =
+      make_union_decl_of(a, "union", "V", NULL, make_two_member_fields(a));
+  clux_value_t *value_v = exec_expr_union(ctx, decl_v);
+  ASSERT_NE(value_v, nullptr);
+  clux_type_t *type_v = type_described_by(value_v);
+  ASSERT_NE(type_v, nullptr);
+  EXPECT_EQ(type_u, type_v)
+      << "identical member tables must dedup to the same type instance";
+
+  node_t *fields_w = create_fields_node(a);
+  fields_node_add_field(fields_w, make_union_field_of(a, "a", "i32"));
+  node_t *decl_w = make_union_decl_of(a, "union", "W", NULL, fields_w);
+  clux_value_t *value_w = exec_expr_union(ctx, decl_w);
+  ASSERT_NE(value_w, nullptr);
+  clux_type_t *type_w = type_described_by(value_w);
+  ASSERT_NE(type_w, nullptr);
+  EXPECT_NE(type_u, type_w)
+      << "different member tables must not dedup to the same instance";
+  delete_node(&decl_u);
+  delete_node(&decl_v);
+  delete_node(&decl_w);
+}
+
+/* 场景: 缺名——union { a: i32 } 无 NAME 槽
+   预期: 报 "union requires a name"，名字不落地 */
+TEST_F(ExecLiteralTest, UnionMissingNameReports) {
+  node_t *decl =
+      make_union_decl_of(a, "union", NULL, NULL, make_two_member_fields(a));
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "union requires a name");
+  delete_node(&decl);
+}
+
+/* 场景: 泛型暂不支持——union G<T> 带 GENERICS 槽（名与成员齐备，
+        证明泛型检查在缺名检查之前独立拦截）
+   预期: 报 "generic union is not supported yet" */
+TEST_F(ExecLiteralTest, UnionGenericsNotSupportedReports) {
+  node_t *decl =
+      make_union_decl_of(a,
+                         "union",
+                         "G",
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "T"),
+                         make_two_member_fields(a));
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "generic union is not supported yet");
+  delete_node(&decl);
+}
+
+/* 场景: 空成员表——BODY 为 NULL 与空字段节点 {} 两种容错形态
+   预期: 均报 "union 'UB' requires at least one member" */
+TEST_F(ExecLiteralTest, UnionEmptyBodyReports) {
+  node_t *null_body = make_union_decl_of(a, "union", "UB", NULL, NULL);
+  clux_value_t *null_result = exec_expr_union(ctx, null_body);
+  ASSERT_NE(null_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(null_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(null_result),
+               "union 'UB' requires at least one member");
+  delete_node(&null_body);
+
+  node_t *empty_body =
+      make_union_decl_of(a, "union", "UB", NULL, create_fields_node(a));
+  clux_value_t *empty_result = exec_expr_union(ctx, empty_body);
+  ASSERT_NE(empty_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(empty_result),
+               "union 'UB' requires at least one member");
+  delete_node(&empty_body);
+}
+
+/* 场景: 成员缺名——union MN { : i32 } 首成员无 NAME
+   预期: 报 "union 'MN' member 0 requires a name" */
+TEST_F(ExecLiteralTest, UnionMemberMissingNameReports) {
+  node_t *fields = create_fields_node(a);
+  fields_node_add_field(fields, make_union_field_of(a, NULL, "i32"));
+  node_t *decl = make_union_decl_of(a, "union", "MN", NULL, fields);
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "union 'MN' member 0 requires a name");
+  delete_node(&decl);
+}
+
+/* 场景: 成员缺类型——union MT { a } 首成员无 TYPE
+   预期: 报 "union 'MT' member 'a' requires a type" */
+TEST_F(ExecLiteralTest, UnionMemberMissingTypeReports) {
+  node_t *fields = create_fields_node(a);
+  fields_node_add_field(fields, make_union_field_of(a, "a", NULL));
+  node_t *decl = make_union_decl_of(a, "union", "MT", NULL, fields);
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "union 'MT' member 'a' requires a type");
+  delete_node(&decl);
+}
+
+/* 场景: 重名成员——union DP { a: i32; a: f64 } 同名成员两次
+   预期: 报 "union 'DP' has duplicate member 'a'" */
+TEST_F(ExecLiteralTest, UnionDuplicateMemberReports) {
+  node_t *fields = create_fields_node(a);
+  fields_node_add_field(fields, make_union_field_of(a, "a", "i32"));
+  fields_node_add_field(fields, make_union_field_of(a, "a", "f64"));
+  node_t *decl = make_union_decl_of(a, "union", "DP", NULL, fields);
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "union 'DP' has duplicate member 'a'");
+  delete_node(&decl);
+}
+
+/* 场景: 成员类型非 type value——union TN { a: 7 } 成员类型表达式求值
+        出 i32 数值
+   预期: 经公共类型通道拦截，报 "expected a type expression, got 'i32'" */
+TEST_F(ExecLiteralTest, UnionMemberTypeNotTypeValueReports) {
+  node_t *fields = create_fields_node(a);
+  node_t *numeric_field = create_field_node(a);
+  field_node_set_name(numeric_field,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"));
+  field_node_set_type(numeric_field,
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "7"));
+  fields_node_add_field(fields, numeric_field);
+  node_t *decl = make_union_decl_of(a, "union", "TN", NULL, fields);
+  clux_value_t *result = exec_expr_union(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected a type expression, got 'i32'");
+  delete_node(&decl);
+}
+
+/* 场景: 按名 define 重名——union DU 连续定义两次（成员表一致触发类型
+        去重，但名字重复触发 scope duplicate 拦截）
+   预期: 首次成功并按名 define；第二次报 "duplicate declaration 'DU'" */
+TEST_F(ExecLiteralTest, UnionDefineDuplicateNameReports) {
+  node_t *decl =
+      make_union_decl_of(a, "union", "DU", NULL, make_two_member_fields(a));
+  clux_value_t *first = exec_expr_union(ctx, decl);
+  ASSERT_NE(first, nullptr);
+  EXPECT_FALSE(clux_value_is_error(first));
+  EXPECT_EQ(clux_context_lookup(ctx, "DU", NULL), first);
+
+  clux_value_t *second = exec_expr_union(ctx, decl);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(second)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(second), "duplicate declaration 'DU'");
+  delete_node(&decl);
+}
+
+/* 场景: 匿名求值——exec_expr_union_value 求 union UV { a: i32; b: f64 }
+        但不按名 define；对照具名路径 exec_expr_union 仍按名 define
+   预期: 产出 type value 且被描述类型 kind UNION，作用域中无 UV 名
+         （lookup 返回 error 值）；具名路径 lookup 正常命中 */
+TEST_F(ExecLiteralTest, UnionValueEvaluationIsAnonymous) {
+  node_t *decl =
+      make_union_decl_of(a, "union", "UV", NULL, make_two_member_fields(a));
+  clux_value_t *value = exec_expr_union_value(ctx, decl);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(value);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_UNION);
+  clux_value_t *probe = clux_context_lookup(ctx, "UV", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_TRUE(clux_value_is_error(probe))
+      << "the anonymous evaluation must not define the name";
+  EXPECT_STREQ(error_message_of(probe), "use of undeclared identifier 'UV'");
+  delete_node(&decl);
+
+  /* 具名路径回归：exec_expr_union 按名 define */
+  node_t *named_decl =
+      make_union_decl_of(a, "union", "UV2", NULL, make_two_member_fields(a));
+  clux_value_t *named = exec_expr_union(ctx, named_decl);
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(clux_context_lookup(ctx, "UV2", NULL), named)
+      << "the named declaration path must not regress";
+  delete_node(&named_decl);
+}
+
+/* 场景: STMT_UNION 无装饰器——union 语句包装 union SU 声明，经 exec_node
+        顶层分派（覆盖 CLUX_NODE_STMT_UNION 槽位表注册）
+   预期: 与直接执行声明本体等价：lookup("SU") 取回同一 type value，
+         被描述类型 kind UNION */
+TEST_F(ExecLiteralTest, StmtUnionWithoutDecoratorDefinesByName) {
+  node_t *stmt = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt,
+      make_union_decl_of(a, "union", "SU", NULL, make_two_member_fields(a)));
+  clux_value_t *result = exec_node(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "SU", NULL), result)
+      << "the union statement must define the type value by name";
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_UNION);
+  delete_node(&stmt);
+}
+
+/* 场景: STMT_UNION 缺声明——union 语句 UNION_DECL 槽为 NULL
+   预期: 报 "union statement requires a union declaration" */
+TEST_F(ExecLiteralTest, StmtUnionMissingDeclReports) {
+  node_t *stmt = create_stmt_union_node(a);
+  clux_value_t *result = exec_stmt_union(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "union statement requires a union declaration");
+  delete_node(&stmt);
+}
+
+/* 场景: STMT_UNION 装饰器路径缺名——union {} 无名声明 + 一个装饰器
+        （装饰路径需名字做 declare_value 收尾）
+   预期: 报 "decorated union declaration requires a name"（在匿名求值
+         之前拦截） */
+TEST_F(ExecLiteralTest, StmtUnionDecoratedMissingNameReports) {
+  node_t *stmt = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt,
+      make_union_decl_of(a, "union", NULL, NULL, make_two_member_fields(a)));
+  stmt_union_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_union(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "decorated union declaration requires a name");
+  delete_node(&stmt);
+}
+
+/* 场景: STMT_UNION 装饰器链 e2e——装饰器是 comptime func 值
+        wrap_t(u: type): type { return i32; }，union DW { a: i32; b: f64 }
+        经 [[wrap_t]] 包装
+   预期: 匿名求值源类型值 → invoke wrap_t（type value 作实参进帧，
+         return i32 出帧）→ 最终名字 DW 绑定包装后的返回值：被描述
+         类型恒等于 i32 builtin（证明包装真实发生而非透传）；
+         invoke 前懒安装帧协议执行器 */
+TEST_F(ExecLiteralTest, StmtUnionDecoratorWrapsTypeValueEndToEnd) {
+  /* 元类型 type 不在 builtin 命名注册表（AST 无法表达"接收 type value
+     的形参类型"），装饰器函数经引擎直建：create_func_type 以 meta 为
+     形参/返回类型，AST 只被帧协议消费（形参类型槽惰性不读）。 */
+  clux_type_t *meta = clux_context_get_type_type(ctx);
+  clux_type_t *wrap_params[1] = {meta};
+  clux_type_t *wrap_type = clux_context_create_func_type(
+      ctx, "wrap_t", NULL, 0, wrap_params, 1, meta);
+  ASSERT_NE(wrap_type, nullptr);
+  /* AST 声明 func wrap_t(u: type): type { return i32; }——形参 u 的
+     类型槽放占位 identifier（帧协议只读形参名）。 */
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type")));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *wrap_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t"),
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type"),
+      body);
+  clux_value_t *wrap_func =
+      clux_context_create_func(ctx, wrap_type, NULL, NULL);
+  ASSERT_NE(wrap_func, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+            wrap_func);
+  clux_value_t *wrap_bound = clux_context_declare_value(
+      ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
+  ASSERT_NE(wrap_bound, nullptr);
+  EXPECT_FALSE(clux_value_is_error(wrap_bound));
+
+  node_t *stmt = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt,
+      make_union_decl_of(a, "union", "DW", NULL, make_two_member_fields(a)));
+  stmt_union_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t")));
+  clux_value_t *result = exec_stmt_union(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "DW", NULL), result)
+      << "the decorated path must bind the wrapped value under the name";
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "the decorator must substitute the source union type with its "
+         "return type";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "invoking the func decorator must lazily install the executor";
+  delete_node(&stmt);
+  delete_node(&wrap_decl);
+}
+
+/* 场景: STMT_UNION 非函数装饰器透传——[[7]]（数值）与 [[i32]]（type
+        value）都求值成功但非 func，按编译期标记跳过包装
+   预期: 源 type value 原样透传：被描述类型仍为 UNION（成员数 2），
+         lookup("DN") 取回同一值；不触发执行器安装（保持 NULL） */
+TEST_F(ExecLiteralTest, StmtUnionNonFuncDecoratorsAreSkipped) {
+  node_t *stmt = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt,
+      make_union_decl_of(a, "union", "DN", NULL, make_two_member_fields(a)));
+  stmt_union_node_add_decorator(
+      stmt, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  stmt_union_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_union(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "DN", NULL), result);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_UNION);
+  EXPECT_EQ(clux_union_member_count(described), 2u)
+      << "non-func decorators must pass the source type value through";
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "non-func decorators must not touch the executor";
+  delete_node(&stmt);
 }

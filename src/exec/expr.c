@@ -7,10 +7,13 @@
 #include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
+#include "engine/cunion.h"
+#include "engine/union.h"
 #include "exec/exec.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
+#include "parser/node_field.h"
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
@@ -20,6 +23,7 @@
 #include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
 #include "parser/node_tuple.h"
+#include "parser/node_union.h"
 #include <stdbool.h>
 #include <string.h>
 
@@ -747,6 +751,149 @@ clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
    declare_value 具名化，避开 scope 的重名冲突（scope 无重绑定通道）。 */
 clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node) {
   return exec_func_decl_impl(ctx, node, false);
+}
+
+/* union 定义（白皮书 §3.7 tag union、§3.8 C union）：tag union 与
+   cunion 语法阶段共用 EXPR_UNION，exec 按 KEYWORD 文本分派引擎构造器
+   （union → tag union，cunion → C union），成员表逐项求值为 type 后
+   整体构造，引擎结构去重恒等返回；产出 type value 并按名 define 进
+   当前作用域（重名报 duplicate）。成员重名/缺名/缺类型在引擎校验前
+   拦截以携带源位置。泛型参数（<>）暂不支持，等泛型推断引擎就绪后
+   接入。declare_named=false 时仅求值出不具名的 type value（装饰器
+   包装路径：具名化推迟到包装完成后的 declare_value）。 */
+static clux_value_t *
+exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  node_t *keyword_node = union_node_get_keyword(node);
+  bool is_cunion = false;
+  if (keyword_node) {
+    char *keyword = location_get(node_get_location(keyword_node), allocator);
+    is_cunion = keyword && strcmp(keyword, "cunion") == 0;
+    allocator_free(allocator, (void **)&keyword);
+  }
+  if (union_node_get_generics(node)) {
+    return clux_context_create_error_message(
+        ctx, loc, "generic union is not supported yet");
+  }
+  node_t *name_node = union_node_get_name(node);
+  char *name =
+      name_node ? location_get(node_get_location(name_node), allocator) : NULL;
+  if (!name) {
+    return clux_context_create_error_message(ctx, loc, "union requires a name");
+  }
+  node_t *body = union_node_get_body(node);
+  size_t count = body ? fields_node_get_field_count(body) : 0;
+  if (count == 0) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "union '%s' requires at least one member", name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  /* tag union 与 cunion 成员表同构（name+type 各一槽），构造器不同：
+     按 KEYWORD 选择填充其中一张（同一时刻只填一张，成员名生命周期
+     归调用方，构造时经 strs 驻留）。 */
+  clux_union_member_t union_members[count];
+  clux_cunion_member_t cunion_members[count];
+  size_t filled = 0;
+  clux_value_t *fail = NULL;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    node_t *field = fields_node_get_field(body, idx);
+    node_t *member_name_node = field ? field_node_get_name(field) : NULL;
+    char *member_name =
+        member_name_node
+            ? location_get(node_get_location(member_name_node), allocator)
+            : NULL;
+    if (!member_name) {
+      fail = clux_context_create_error_message(
+          ctx,
+          field ? node_get_location(field) : loc,
+          "union '%s' member %zu requires a name",
+          name,
+          idx);
+      break;
+    }
+    node_t *type_node = field ? field_node_get_type(field) : NULL;
+    clux_type_t *member_type = NULL;
+    if (!type_node) {
+      fail = clux_context_create_error_message(
+          ctx,
+          field ? node_get_location(field) : loc,
+          "union '%s' member '%s' requires a type",
+          name,
+          member_name);
+    } else {
+      clux_value_t *err = NULL;
+      member_type = exec_operand_type(ctx, type_node, &err);
+      if (!member_type) {
+        fail = err;
+      }
+    }
+    if (!fail) {
+      for (size_t prev = 0; prev < filled; prev++) {
+        const char *prev_name =
+            is_cunion ? cunion_members[prev].name : union_members[prev].name;
+        if (strcmp(member_name, prev_name) == 0) {
+          fail = clux_context_create_error_message(
+              ctx,
+              node_get_location(member_name_node),
+              "union '%s' has duplicate member '%s'",
+              name,
+              member_name);
+          break;
+        }
+      }
+    }
+    if (fail) {
+      allocator_free(allocator, (void **)&member_name);
+      break;
+    }
+    if (is_cunion) {
+      cunion_members[filled].name = member_name;
+      cunion_members[filled].type = member_type;
+    } else {
+      union_members[filled].name = member_name;
+      union_members[filled].type = member_type;
+    }
+    filled++;
+  }
+  clux_type_t *type = NULL;
+  if (!fail) {
+    type =
+        is_cunion
+            ? clux_context_create_cunion_type(ctx, name, cunion_members, filled)
+            : clux_context_create_union_type(ctx, name, union_members, filled);
+  }
+  /* 成员名经 context 路径 strs 驻留，本地拷贝统一释放。 */
+  for (size_t idx = 0; idx < filled; idx++) {
+    allocator_free(allocator,
+                   is_cunion ? (void **)&cunion_members[idx].name
+                             : (void **)&union_members[idx].name);
+  }
+  if (fail) {
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  if (!type) {
+    clux_value_t *create_fail = clux_context_create_error_message(
+        ctx, loc, "union type creation failed");
+    allocator_free(allocator, (void **)&name);
+    return create_fail;
+  }
+  clux_value_t *value = clux_context_create_type_value(
+      ctx, type, declare_named ? name : NULL, loc);
+  allocator_free(allocator, (void **)&name);
+  return value;
+}
+
+clux_value_t *exec_expr_union(clux_context_t *ctx, node_t *node) {
+  return exec_expr_union_impl(ctx, node, true);
+}
+
+/* 匿名 union 值求值：仅求值出不具名的 type value（不按名 define），
+   union 语句装饰器包装路径用——包装完成后由 declare_value 具名化。 */
+clux_value_t *exec_expr_union_value(clux_context_t *ctx, node_t *node) {
+  return exec_expr_union_impl(ctx, node, false);
 }
 
 /* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value

@@ -18,7 +18,9 @@
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_union.h"
 
 /* 单装饰器应用（白皮书 §3.2/§9.1）：普通装饰器是值级包装——装饰器表达式
    求值为 func 值时以当前值为唯一实参调用（[[twice]] var x = 21 落地为
@@ -238,6 +240,54 @@ clux_value_t *exec_stmt_func(clux_context_t *ctx, node_t *node) {
     value = apply_decorator(ctx,
                             value,
                             stmt_func_node_get_decorator(node, idx),
+                            node_get_location(node));
+    if (clux_value_is_error(value)) {
+      return value;
+    }
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name = location_get(node_get_location(name_node), allocator);
+  clux_value_t *bound = clux_context_declare_value(
+      ctx, value, name, node_get_location(name_node));
+  allocator_free(allocator, (void **)&name);
+  return bound;
+}
+
+/* union 语句 <decorator>* [export]? <union_decl>（白皮书 §3.7、§3.8、
+   §8.1）：与函数语句同构——无装饰器时直接执行声明本体（经
+   exec_expr_union 按名 define 出 type value）；有装饰器时先匿名求值
+   源类型值（不按名 define），装饰器按源码顺序链式应用（求值为 func
+   时以类型值为实参调用，编译期标记原样返回），最后 declare_value
+   具名化。export（run 阶段产出）是编译期语义，exec 层不处理。 */
+clux_value_t *exec_stmt_union(clux_context_t *ctx, node_t *node) {
+  node_t *decl = stmt_union_node_get_union_decl(node);
+  if (!decl) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "union statement requires a union declaration");
+  }
+  size_t decorator_count = stmt_union_node_get_decorator_count(node);
+  if (decorator_count == 0) {
+    return exec_operand(ctx, decl);
+  }
+  node_t *name_node = union_node_get_name(decl);
+  if (!name_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "decorated union declaration requires a name");
+  }
+  /* 匿名求值源类型值：不具名——type value 无捕获引用，装饰失败
+     直接返回 error，无需回滚声明。 */
+  clux_value_t *value = exec_expr_union_value(ctx, decl);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  for (size_t idx = 0; idx < decorator_count; idx++) {
+    value = apply_decorator(ctx,
+                            value,
+                            stmt_union_node_get_decorator(node, idx),
                             node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;
