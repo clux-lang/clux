@@ -6750,3 +6750,430 @@ TEST(EngineTest, ReturnSignalApiSemantics) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+TEST(EngineTest, EnumTypeStrUnderlyingDirectCreate) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
+  ASSERT_NE(str_type, nullptr);
+
+  /* 合法路径：str 底层全员有字符串常量 */
+  clux_enum_variant_t variants[] = {
+      {"Red", 0, "red"},
+      {"Green", 0, "green"},
+  };
+  clux_type_t *enum_type =
+      clux_context_create_enum_type(ctx, "Se", str_type, variants, 2);
+  ASSERT_NE(enum_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(enum_type), CLUX_TYPE_ENUM);
+  EXPECT_STREQ(clux_type_get_name(enum_type), "Se");
+  EXPECT_EQ(clux_enum_variant_count(enum_type), 2u);
+  EXPECT_EQ(clux_enum_get_underlying(enum_type), str_type);
+  EXPECT_EQ(clux_type_get_size(enum_type), sizeof(char *));
+  EXPECT_EQ(clux_type_get_size(enum_type), clux_type_get_size(str_type));
+  EXPECT_EQ(clux_type_get_align(enum_type), clux_type_get_align(str_type));
+  const clux_enum_variant_t *red = clux_enum_get_variant(enum_type, 0);
+  ASSERT_NE(red, nullptr);
+  EXPECT_STREQ(red->name, "Red");
+  EXPECT_STREQ(red->str, "red");
+  EXPECT_EQ(red->value, 0u) << "str variants must not use the value field";
+  const clux_enum_variant_t *found = clux_enum_find_variant(enum_type, "Green");
+  ASSERT_NE(found, nullptr);
+  EXPECT_STREQ(found->str, "green");
+
+  /* 结构去重：同一 str 成员表（声明名不同）恒等返回同一实例 */
+  clux_enum_variant_t same[] = {
+      {"Red", 0, "red"},
+      {"Green", 0, "green"},
+  };
+  EXPECT_EQ(clux_context_create_enum_type(ctx, "Other", str_type, same, 2),
+            enum_type);
+
+  /* str 底层缺字符串常量：返回 NULL 并记录 error（错误入 context 内部
+     队列，无公开 accessor，仅能断言 NULL 返回） */
+  clux_enum_variant_t missing_str[] = {
+      {"Red", 0, NULL},
+  };
+  EXPECT_EQ(clux_context_create_enum_type(ctx, "Ms", str_type, missing_str, 1),
+            nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- enum cast：vtable 委托 underlying 决定 cast/safe_cast 合法性 ---- */
+
+/* 构造持有指定位型的枚举值：存储块走 context 的 safe_allocator（context
+   销毁统一释放），bits 的低 size 字节即值表示（布局与 underlying 一致）。 */
+static clux_value_t *make_enum_value_with_bits(clux_context_t *ctx,
+                                               clux_type_t *enum_type,
+                                               const char *name,
+                                               uint64_t bits) {
+  size_t size = clux_type_get_size(enum_type);
+  ptr_handle_t data =
+      safe_alloc(clux_context_get_safe_allocator(ctx), size, NULL);
+  if (data == 0 || ptr_to_raw(data, 0) == NULL) {
+    return NULL;
+  }
+  memcpy(ptr_to_raw(data, 0), &bits, size);
+  return clux_context_create_value(ctx, enum_type, data, name, NULL);
+}
+
+/* 构造 i32 底层枚举类型 { Red=1, Green=2, Blue=4 } */
+static clux_type_t *make_i32_color_enum(clux_context_t *ctx, const char *name) {
+  clux_enum_variant_t variants[] = {
+      {"Red", 1, NULL},
+      {"Green", 2, NULL},
+      {"Blue", 4, NULL},
+  };
+  return clux_context_create_enum_type(
+      ctx, name, clux_context_builtin_type(ctx, CLUX_TYPE_I32), variants, 3);
+}
+
+/* 场景: 枚举 cast/safe_cast 宽化——enum Color: i32 值 2 as i64
+   预期: 委托底层 i32 的 vtable 通道，宽化成功，产出 i64 值且位型正确 */
+TEST(EngineTest, EnumCastWidensUnderlyingToLargerInteger) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, color, NULL, 2);
+  ASSERT_NE(value, nullptr);
+
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_value_t *safe_result =
+      clux_context_safe_cast(ctx, value, i64_type, NULL);
+  ASSERT_NE(safe_result, nullptr);
+  EXPECT_EQ(clux_value_get_type(safe_result), i64_type);
+  EXPECT_EQ(read_i64(safe_result), 2);
+
+  clux_value_t *result = clux_context_cast(ctx, value, i64_type, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), i64_type);
+  EXPECT_EQ(read_i64(result), 2);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: safe_cast narrowing 拒绝——enum Color: i32 as i8
+   预期: 消息以底层类型名报告 "cannot safely cast 'i32' to 'i8':
+         narrowing conversion"（underlying 决定规则，设计如此） */
+TEST(EngineTest, EnumSafeCastNarrowingRejectedByUnderlying) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, color, NULL, 300);
+  ASSERT_NE(value, nullptr);
+
+  clux_value_t *result = clux_context_safe_cast(
+      ctx, value, clux_context_builtin_type(ctx, CLUX_TYPE_I8), NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "cannot safely cast 'i32' to 'i8': narrowing conversion");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 显式 cast 允许 narrowing——enum Color: i32 值 300 as i8
+   预期: 宽松通道放行，位型按 i8 截断（300 & 0xFF == 44） */
+TEST(EngineTest, EnumCastExplicitNarrowingTruncates) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, color, NULL, 300);
+  ASSERT_NE(value, nullptr);
+
+  clux_value_t *result = clux_context_cast(
+      ctx, value, clux_context_builtin_type(ctx, CLUX_TYPE_I8), NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I8));
+  EXPECT_EQ(read_i8(result), 44);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 枚举 as 自身底层恒等——enum Color: i32 值 2 as i32
+   预期: 恒等委托命中（视图类型==effective target），复制位型重新注册为
+         i32 值；结果与原值不是同一实例但位型相同 */
+TEST(EngineTest, EnumCastToUnderlyingIdentityReregisters) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, color, NULL, 2);
+  ASSERT_NE(value, nullptr);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *safe_result =
+      clux_context_safe_cast(ctx, value, i32_type, NULL);
+  ASSERT_NE(safe_result, nullptr);
+  EXPECT_NE(safe_result, value)
+      << "identity delegation must re-register a copy";
+  EXPECT_EQ(clux_value_get_type(safe_result), i32_type);
+  EXPECT_EQ(read_i32(safe_result), 2);
+
+  clux_value_t *result = clux_context_cast(ctx, value, i32_type, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(result, value);
+  EXPECT_EQ(clux_value_get_type(result), i32_type);
+  EXPECT_EQ(read_i32(result), 2);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 枚举 as 同布局枚举——E1: i32 { A=1, B=2 } 值 7 as E2: i32
+        { C=1, D=2 }（成员名不同，结构判等不同实例）
+   预期: 产出 E2 类型的枚举值，位型保留（7） */
+TEST(EngineTest, EnumCastToAnotherEnumKeepsTargetLayout) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_enum_variant_t e1_variants[] = {
+      {"A", 1, NULL},
+      {"B", 2, NULL},
+  };
+  clux_type_t *e1 = clux_context_create_enum_type(
+      ctx, "E1", clux_context_builtin_type(ctx, CLUX_TYPE_I32), e1_variants, 2);
+  ASSERT_NE(e1, nullptr);
+  clux_enum_variant_t e2_variants[] = {
+      {"C", 1, NULL},
+      {"D", 2, NULL},
+  };
+  clux_type_t *e2 = clux_context_create_enum_type(
+      ctx, "E2", clux_context_builtin_type(ctx, CLUX_TYPE_I32), e2_variants, 2);
+  ASSERT_NE(e2, nullptr);
+  ASSERT_NE(e1, e2) << "different variant names must not dedup";
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, e1, NULL, 7);
+  ASSERT_NE(value, nullptr);
+
+  clux_value_t *safe_result = clux_context_safe_cast(ctx, value, e2, NULL);
+  ASSERT_NE(safe_result, nullptr);
+  EXPECT_EQ(clux_value_get_type(safe_result), e2);
+  EXPECT_EQ(read_i32(safe_result), 7);
+
+  clux_value_t *result = clux_context_cast(ctx, value, e2, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), e2);
+  EXPECT_EQ(read_i32(result), 7);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 枚举 as 更窄底层的枚举——E1: i32 值 300 as E2: i16
+   预期: 宽松 cast 允许（i32→i16 整数显式 narrowing 合法），产出 E2 枚举
+         值且布局按 i16 落地（值 300 i16 域内保留）；safe_cast 拒绝并按
+         底层名报 narrowing */
+TEST(EngineTest, EnumCastToEnumWithNarrowerUnderlying) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_enum_variant_t e1_variants[] = {
+      {"A", 1, NULL},
+  };
+  clux_type_t *e1 = clux_context_create_enum_type(
+      ctx, "E1", clux_context_builtin_type(ctx, CLUX_TYPE_I32), e1_variants, 1);
+  ASSERT_NE(e1, nullptr);
+  clux_enum_variant_t e2_variants[] = {
+      {"C", 1, NULL},
+  };
+  clux_type_t *e2 = clux_context_create_enum_type(
+      ctx, "E2", clux_context_builtin_type(ctx, CLUX_TYPE_I16), e2_variants, 1);
+  ASSERT_NE(e2, nullptr);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, e1, NULL, 300);
+  ASSERT_NE(value, nullptr);
+
+  clux_value_t *safe_result = clux_context_safe_cast(ctx, value, e2, NULL);
+  ASSERT_NE(safe_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(safe_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(safe_result),
+               "cannot safely cast 'i32' to 'i16': narrowing conversion");
+
+  clux_value_t *result = clux_context_cast(ctx, value, e2, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), e2);
+  EXPECT_EQ(clux_type_get_size(clux_value_get_type(result)),
+            clux_type_get_size(clux_context_builtin_type(ctx, CLUX_TYPE_I16)));
+  EXPECT_EQ(read_i16(result), 300);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: str 底层枚举 cast——underlying str 无 cast/safe_cast 槽位
+   预期: 报错且源/目标名用枚举自身名字（非 underlying 名） */
+TEST(EngineTest, EnumCastStrUnderlyingReportsEnumName) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_enum_variant_t variants[] = {
+      {"Red", 0, "red"},
+      {"Green", 0, "green"},
+  };
+  clux_type_t *se = clux_context_create_enum_type(
+      ctx, "Se", clux_context_builtin_type(ctx, CLUX_TYPE_STR), variants, 2);
+  ASSERT_NE(se, nullptr);
+
+  clux_value_t *value =
+      make_enum_value_with_bits(ctx, se, NULL, (uint64_t)(uintptr_t)"red");
+  ASSERT_NE(value, nullptr);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *safe_result =
+      clux_context_safe_cast(ctx, value, i32_type, NULL);
+  ASSERT_NE(safe_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(safe_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(safe_result),
+               "cannot safely cast 'Se' to 'i32'");
+
+  clux_value_t *result = clux_context_cast(ctx, value, i32_type, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "cannot cast 'Se' to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 枚举 as str——integer_cast 拒绝数值到字符串
+   预期: 委托产生的错误原样透传 "cannot cast 'i32' to 'str'"
+         （消息为底层类型名，underlying 决定规则） */
+TEST(EngineTest, EnumCastIntegerUnderlyingToStrRejected) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, color, NULL, 2);
+  ASSERT_NE(value, nullptr);
+
+  clux_value_t *result = clux_context_cast(
+      ctx, value, clux_context_builtin_type(ctx, CLUX_TYPE_STR), NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "cannot cast 'i32' to 'str'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: error 值透传 + source==target 恒等返回
+   预期: error 值原样返回（同一指针）；同枚举类型指针恒等路径直接返回原值 */
+TEST(EngineTest, EnumCastErrorPassthroughAndIdentity) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
+  ASSERT_NE(err, nullptr);
+  clux_value_t *from_error = clux_context_cast(ctx, err, color, NULL);
+  EXPECT_EQ(from_error, err) << "error value must pass through unchanged";
+  clux_value_t *from_error_safe = clux_context_safe_cast(ctx, err, color, NULL);
+  EXPECT_EQ(from_error_safe, err);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, color, NULL, 2);
+  ASSERT_NE(value, nullptr);
+  clux_value_t *identity = clux_context_cast(ctx, value, color, NULL);
+  EXPECT_EQ(identity, value) << "source == target must return the value itself";
+  clux_value_t *identity_safe = clux_context_safe_cast(ctx, value, color, NULL);
+  EXPECT_EQ(identity_safe, value);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: shadow 枚举值 cast——类型检查通道的 shadow 值
+   预期: 直接产出目标的 shadow 值（类型为目标类型，且仍为 shadow） */
+TEST(EngineTest, EnumCastShadowValueYieldsTargetShadow) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, color);
+  ASSERT_NE(shadow, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow));
+
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_value_t *safe_result =
+      clux_context_safe_cast(ctx, shadow, i64_type, NULL);
+  ASSERT_NE(safe_result, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(safe_result));
+  EXPECT_EQ(clux_value_get_type(safe_result), i64_type);
+
+  clux_value_t *result = clux_context_cast(ctx, shadow, i64_type, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(result));
+  EXPECT_EQ(clux_value_get_type(result), i64_type);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 枚举数值化 cast——enum Color: i32 值 2 as f64 / as bool / 值 0 as bool
+   预期: integer_cast 数值转换通道放行，f64 == 2.0，bool(2) == true，
+         bool(0) == false */
+TEST(EngineTest, EnumCastToF64AndBoolConvertsNumerically) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *value = make_enum_value_with_bits(ctx, color, NULL, 2);
+  ASSERT_NE(value, nullptr);
+  clux_type_t *f64_type = clux_context_builtin_type(ctx, CLUX_TYPE_F64);
+  clux_value_t *as_f64 = clux_context_cast(ctx, value, f64_type, NULL);
+  ASSERT_NE(as_f64, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_f64), f64_type);
+  EXPECT_DOUBLE_EQ(read_f64(as_f64), 2.0);
+
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
+  clux_value_t *as_bool = clux_context_cast(ctx, value, bool_type, NULL);
+  ASSERT_NE(as_bool, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_bool), bool_type);
+  EXPECT_TRUE(read_bool(as_bool));
+
+  clux_value_t *zero = make_enum_value_with_bits(ctx, color, NULL, 0);
+  ASSERT_NE(zero, nullptr);
+  clux_value_t *false_bool = clux_context_cast(ctx, zero, bool_type, NULL);
+  ASSERT_NE(false_bool, nullptr);
+  EXPECT_FALSE(read_bool(false_bool));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 反向 cast——i32 值 as 枚举（cast 由 source 类型 vtable 分派）
+   预期: 走 integer vtable 的 integer_cast，目标枚举非 numeric kind 被拒
+         "cannot cast 'i32' to 'Color'"（锁定 source 分派行为） */
+TEST(EngineTest, EnumCastIntegerSourceToEnumRejected) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *color = make_i32_color_enum(ctx, "Color");
+  ASSERT_NE(color, nullptr);
+
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 2, NULL, NULL);
+  ASSERT_NE(i32_value, nullptr);
+
+  clux_value_t *result = clux_context_cast(ctx, i32_value, color, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "cannot cast 'i32' to 'Color'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

@@ -8,11 +8,14 @@
 #include "engine/type.h"
 #include "engine/value.h"
 #include "engine/cunion.h"
+#include "engine/enum.h"
 #include "engine/union.h"
 #include "exec/exec.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
+#include "parser/node_enum_decl.h"
+#include "parser/node_enum_variant.h"
 #include "parser/node_field.h"
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
@@ -369,6 +372,20 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
     clux_type_t *array_type =
         clux_context_get_array_type(ctx, base, (size_t)count);
     return clux_context_create_type_value(ctx, array_type, NULL, op_loc);
+  }
+  /* 显式转换 as（白皮书 §5.7）：左操作数为值，右操作数为类型表达式，
+     走宽松 cast 通道——合法性由源类型 vtable 的 cast 规则裁决。 */
+  if (location_is(op_loc, "as")) {
+    clux_value_t *left = exec_operand(ctx, left_node);
+    if (clux_value_is_error(left)) {
+      return left;
+    }
+    clux_value_t *err = NULL;
+    clux_type_t *type = exec_operand_type(ctx, right_node, &err);
+    if (!type) {
+      return err;
+    }
+    return clux_context_cast(ctx, left, type, op_loc);
   }
   /* 二元形态：文本映射引擎槽位后交 clux_context_binary 分派。 */
   for (size_t i = 0; i < sizeof(k_binary_ops) / sizeof(k_binary_ops[0]); i++) {
@@ -899,6 +916,201 @@ clux_value_t *exec_expr_union(clux_context_t *ctx, node_t *node) {
    union 语句装饰器包装路径用——包装完成后由 declare_value 具名化。 */
 clux_value_t *exec_expr_union_value(clux_context_t *ctx, node_t *node) {
   return exec_expr_union_impl(ctx, node, false);
+}
+
+/* 整数 kind 判定（调用方先经 clux_type_kind_unwrap 去 qualifier）：
+   enum 底层类型与 variant 常量共用。 */
+static bool enum_integer_kind(clux_type_kind_t kind) {
+  switch (kind) {
+  case CLUX_TYPE_I8:
+  case CLUX_TYPE_I16:
+  case CLUX_TYPE_I32:
+  case CLUX_TYPE_I64:
+  case CLUX_TYPE_U8:
+  case CLUX_TYPE_U16:
+  case CLUX_TYPE_U32:
+  case CLUX_TYPE_U64:
+  case CLUX_TYPE_ISIZE:
+  case CLUX_TYPE_USIZE:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* enum 定义（白皮书 §3.6）：enum Name: Underlying { Variant = value, ... }，
+   底层类型必须是整数或 str 类型（求值 UNDERLYING 为 type value 后交引擎
+   构造），variant 值是编译期常量（底层为整数时须整数常量、按值自身宽度
+   取原始位型；底层为 str 时须字符串常量）。结构
+   去重恒等返回；产出 type value，具名（NAME 槽非空）时按名 define 进
+   当前作用域（重名报 duplicate），匿名（NAME 缺省）合法——引擎类型名
+   用关键字文本回退，不 define。variant 缺名/缺值/重名在引擎校验前拦截
+   以携带源位置。declare_named=false 时仅求值出不具名的 type value
+   （装饰器包装路径：具名化推迟到包装完成后的 declare_value）。 */
+static clux_value_t *exec_expr_enum_decl_impl(clux_context_t *ctx,
+                                              node_t *node,
+                                              bool declare_named) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  node_t *name_node = enum_decl_node_get_name(node);
+  char *name =
+      name_node ? location_get(node_get_location(name_node), allocator) : NULL;
+  /* 匿名 enum 合法：错误消息与引擎构造用关键字文本回退类型名，
+     define 只在具名（name 非空）时发生。 */
+  const char *type_name = name;
+  if (!type_name) {
+    type_name = "enum";
+  }
+  node_t *underlying_node = enum_decl_node_get_underlying(node);
+  if (!underlying_node) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "enum '%s' requires an underlying type", type_name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  clux_value_t *underlying_err = NULL;
+  clux_type_t *underlying =
+      exec_operand_type(ctx, underlying_node, &underlying_err);
+  if (!underlying) {
+    allocator_free(allocator, (void **)&name);
+    return underlying_err;
+  }
+  clux_type_kind_t underlying_kind = clux_type_kind_unwrap(underlying);
+  bool str_underlying = underlying_kind == CLUX_TYPE_STR;
+  if (!str_underlying && !enum_integer_kind(underlying_kind)) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx,
+        node_get_location(underlying_node),
+        "enum '%s' underlying type must be an integer or str type",
+        type_name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  node_t *body = enum_decl_node_get_body(node);
+  size_t count = body ? enum_variants_node_get_variant_count(body) : 0;
+  if (count == 0) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "enum '%s' requires at least one variant", type_name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  clux_enum_variant_t variants[count];
+  size_t filled = 0;
+  clux_value_t *fail = NULL;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    node_t *variant = enum_variants_node_get_variant(body, idx);
+    node_t *variant_name_node =
+        variant ? enum_variant_node_get_name(variant) : NULL;
+    char *variant_name =
+        variant_name_node
+            ? location_get(node_get_location(variant_name_node), allocator)
+            : NULL;
+    if (!variant_name) {
+      fail = clux_context_create_error_message(
+          ctx,
+          variant ? node_get_location(variant) : loc,
+          "enum '%s' variant %zu requires a name",
+          type_name,
+          idx);
+      break;
+    }
+    node_t *value_node = variant ? enum_variant_node_get_value(variant) : NULL;
+    if (!value_node) {
+      fail = clux_context_create_error_message(
+          ctx,
+          variant ? node_get_location(variant) : loc,
+          "enum '%s' variant '%s' requires a value",
+          type_name,
+          variant_name);
+      allocator_free(allocator, (void **)&variant_name);
+      break;
+    }
+    clux_value_t *value = exec_operand(ctx, value_node);
+    if (clux_value_is_error(value)) {
+      fail = value;
+      allocator_free(allocator, (void **)&variant_name);
+      break;
+    }
+    /* 编译期常量：shadow 无位型可取。底层为 str 时值表达式须是 str
+       值（取 C 字符串借用，经 context 创建路径 strs 驻留）；底层为
+       整数时须是整数常量（按值自身宽度取原始位型）。 */
+    clux_type_t *value_type = clux_value_get_type(value);
+    clux_type_kind_t value_kind = clux_type_kind_unwrap(value_type);
+    if (clux_value_is_shadow(value) ||
+        (str_underlying ? value_kind != CLUX_TYPE_STR
+                        : !enum_integer_kind(value_kind))) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(value_node),
+          str_underlying
+              ? "enum '%s' variant '%s' requires a string constant value"
+              : "enum '%s' variant '%s' requires an integer constant value",
+          type_name,
+          variant_name);
+      allocator_free(allocator, (void **)&variant_name);
+      break;
+    }
+    uint64_t bits = 0;
+    const char *str_bits = NULL;
+    if (str_underlying) {
+      str_bits = *(const char **)clux_value_get_raw(value, 0);
+    } else {
+      size_t width = clux_type_get_size(value_type);
+      (void)memcpy(&bits, clux_value_get_raw(value, 0), width);
+    }
+    for (size_t prev = 0; prev < filled; prev++) {
+      if (strcmp(variant_name, variants[prev].name) == 0) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(variant_name_node),
+            "enum '%s' has duplicate variant '%s'",
+            type_name,
+            variant_name);
+        break;
+      }
+    }
+    if (fail) {
+      allocator_free(allocator, (void **)&variant_name);
+      break;
+    }
+    variants[filled].name = variant_name;
+    variants[filled].value = bits;
+    variants[filled].str = str_bits;
+    filled++;
+  }
+  clux_type_t *type = NULL;
+  if (!fail) {
+    type = clux_context_create_enum_type(
+        ctx, type_name, underlying, variants, filled);
+  }
+  /* 成员名经 context 路径 strs 驻留，本地拷贝统一释放。 */
+  for (size_t idx = 0; idx < filled; idx++) {
+    allocator_free(allocator, (void **)&variants[idx].name);
+  }
+  if (fail) {
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  if (!type) {
+    clux_value_t *create_fail = clux_context_create_error_message(
+        ctx, loc, "enum type creation failed");
+    allocator_free(allocator, (void **)&name);
+    return create_fail;
+  }
+  clux_value_t *value = clux_context_create_type_value(
+      ctx, type, (declare_named && name) ? name : NULL, loc);
+  allocator_free(allocator, (void **)&name);
+  return value;
+}
+
+clux_value_t *exec_expr_enum_decl(clux_context_t *ctx, node_t *node) {
+  return exec_expr_enum_decl_impl(ctx, node, true);
+}
+
+/* 匿名 enum 值求值：仅求值出不具名的 type value（不按名 define），
+   enum 语句装饰器包装路径用——包装完成后由 declare_value 具名化。 */
+clux_value_t *exec_expr_enum_decl_value(clux_context_t *ctx, node_t *node) {
+  return exec_expr_enum_decl_impl(ctx, node, false);
 }
 
 /* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value

@@ -238,7 +238,7 @@ enum Color: u8 {
 enum Name : Underlying { Variant = value, ... }
 ```
 
-`Underlying` 必须是整数类型；variant 值是编译期整数常量。
+`Underlying` 必须是整数类型或 `str`；variant 值是编译期常量（整数或字符串），类型须与 `Underlying` 一致。
 
 ## 3.7 tag union
 

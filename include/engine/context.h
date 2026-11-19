@@ -5,6 +5,7 @@
 #include "core/location.h"
 #include "core/safe_alloc.h"
 #include "engine/cunion.h"
+#include "engine/enum.h"
 #include "engine/func.h"
 #include "engine/interface.h"
 #include "engine/struct.h"
@@ -257,6 +258,17 @@ clux_value_t *clux_context_create_union(clux_context_t *self,
                                         clux_type_t *type,
                                         const char *name,
                                         const location_t *loc);
+/* 创建具名 enum 类型（白皮书 §3.6）：布局与底层类型（整数或 str）一致，
+   variant 表整体拷入 meta，variant 名与 str 常量经 strs 驻留。结构判等
+   （底层类型 + 成员名 + 成员值按声明序一致即同一类型，str 按内容）：
+   已存在结构相同的实例时恒等返回之，类型由 context 的具名类型表托管
+   释放。入参非法（缺名/缺底层类型/底层非整数且非 str/空成员表/成员
+   缺名/重名/str 底层缺字符串常量）返回 NULL 并记录 error。 */
+clux_type_t *clux_context_create_enum_type(clux_context_t *self,
+                                           const char *name,
+                                           clux_type_t *underlying,
+                                           const clux_enum_variant_t *variants,
+                                           size_t count);
 /* 激活成员：切换 tag 为该成员声明序号并清零 payload，返回原值；未知
    成员返回语义化 error，shadow 值原样返回（无数据可变）。仅 tag union
    支持，其余类型返回 error。 */

@@ -859,6 +859,101 @@ clux_type_t *clux_context_create_union_type(clux_context_t *self,
   (void)vec_push(self->named_types, type);
   return type;
 }
+/* 创建具名 enum 类型（白皮书 §3.6）：布局与底层整数类型一致，variant
+   表整体拷入 meta，variant 名经 strs 驻留。结构去重：已存在底层类型 +
+   成员名 + 成员值按声明序一致的实例时恒等返回。 */
+clux_type_t *clux_context_create_enum_type(clux_context_t *self,
+                                           const char *name,
+                                           clux_type_t *underlying,
+                                           const clux_enum_variant_t *variants,
+                                           size_t count) {
+  if (!name || !underlying || !variants || count == 0) {
+    (void)clux_context_create_error_message(
+        self,
+        NULL,
+        "enum requires a name, an underlying type and at least one variant");
+    return NULL;
+  }
+  clux_type_kind_t underlying_kind = clux_type_kind_unwrap(underlying);
+  switch (underlying_kind) {
+  case CLUX_TYPE_I8:
+  case CLUX_TYPE_I16:
+  case CLUX_TYPE_I32:
+  case CLUX_TYPE_I64:
+  case CLUX_TYPE_U8:
+  case CLUX_TYPE_U16:
+  case CLUX_TYPE_U32:
+  case CLUX_TYPE_U64:
+  case CLUX_TYPE_ISIZE:
+  case CLUX_TYPE_USIZE:
+  case CLUX_TYPE_STR:
+    break;
+  default:
+    (void)clux_context_create_error_message(
+        self,
+        NULL,
+        "enum '%s' underlying type must be an integer or str type",
+        name);
+    return NULL;
+  }
+  bool str_underlying = underlying_kind == CLUX_TYPE_STR;
+  for (size_t idx = 0; idx < count; idx++) {
+    if (!variants[idx].name) {
+      (void)clux_context_create_error_message(
+          self, NULL, "enum '%s' variant %zu requires a name", name, idx);
+      return NULL;
+    }
+    if (str_underlying && !variants[idx].str) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "enum '%s' variant '%s' requires a string constant value",
+          name,
+          variants[idx].name);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(variants[idx].name, variants[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "enum '%s' has duplicate variant '%s'",
+            name,
+            variants[idx].name);
+        return NULL;
+      }
+    }
+  }
+  /* 结构去重：已存在底层类型与成员名/值按声明序一致的实例时恒等返回。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_enum_variants_equal(existing, underlying, variants, count)) {
+      return existing;
+    }
+  }
+  /* 成员名与 str 常量经 strs 驻留（随 context 释放），成员表由类型
+     meta 持有。 */
+  clux_enum_variant_t interned[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    char *variant_name =
+        clux_context_alloc_str(self, strlen(variants[idx].name));
+    (void)memcpy(variant_name, variants[idx].name, strlen(variants[idx].name));
+    interned[idx].name = variant_name;
+    interned[idx].value = str_underlying ? 0 : variants[idx].value;
+    interned[idx].str = NULL;
+    if (str_underlying) {
+      size_t len = strlen(variants[idx].str);
+      char *variant_str = clux_context_alloc_str(self, len);
+      (void)memcpy(variant_str, variants[idx].str, len);
+      interned[idx].str = variant_str;
+    }
+  }
+  clux_type_t *type =
+      create_clux_enum_type(self->allocator, name, underlying, interned, count);
+  (void)vec_push(self->named_types, type);
+  return type;
+}
+
 clux_value_t *clux_context_create_union(clux_context_t *self,
                                         clux_type_t *type,
                                         const char *name,

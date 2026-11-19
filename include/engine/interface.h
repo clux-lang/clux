@@ -85,6 +85,9 @@ typedef enum _clux_type_kind_t {
      function"。引擎级控制值（与 error 同级），不属于类型系统的用户
      可见面。 */
   CLUX_TYPE_RETURN_SIGNAL,
+  /* enum（枚举尾部追加，不打断既有序号）：具名整数常量集（白皮书
+     §3.6），布局与底层整数类型一致，variant 值是编译期整数常量。 */
+  CLUX_TYPE_ENUM,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

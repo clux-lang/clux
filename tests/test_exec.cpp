@@ -36,7 +36,11 @@
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_union.h"
+#include "parser/node_stmt_enum.h"
 #include "parser/node_union.h"
+#include "parser/node_enum_decl.h"
+#include "parser/node_enum_variant.h"
+#include "engine/enum.h"
 #include "parser/node_field.h"
 #include "engine/scope.h"
 #include "exec/call.h"
@@ -831,7 +835,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_CALL || kind == CLUX_NODE_STMT_BLOCK ||
         kind == CLUX_NODE_STMT_EXPR || kind == CLUX_NODE_STMT_RETURN ||
         kind == CLUX_NODE_STMT_VAR || kind == CLUX_NODE_STMT_FUNC ||
-        kind == CLUX_NODE_EXPR_UNION || kind == CLUX_NODE_STMT_UNION;
+        kind == CLUX_NODE_EXPR_UNION || kind == CLUX_NODE_STMT_UNION ||
+        kind == CLUX_NODE_EXPR_ENUM_DECL || kind == CLUX_NODE_STMT_ENUM;
     if (synthetic_skip) {
       continue;
     }
@@ -7151,4 +7156,1113 @@ TEST_F(ExecLiteralTest, StmtUnionNonFuncDecoratorsAreSkipped) {
   EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
       << "non-func decorators must not touch the executor";
   delete_node(&stmt);
+}
+
+/* ---- exec_expr_enum_decl / exec_stmt_enum：enum 定义与语句（§3.6） ---- */
+
+/* 合成 enum 成员节点 Name = value（name_text 为 NULL 构造缺名容错路径，
+   value_text 为 NULL 构造缺值容错路径），delete 根结点时一并释放。 */
+static node_t *make_enum_variant_of(allocator_t *allocator,
+                                    const char *name_text,
+                                    node_kind_t value_kind,
+                                    const char *value_text) {
+  node_t *variant = create_enum_variant_node(allocator);
+  if (name_text) {
+    enum_variant_node_set_name(
+        variant,
+        make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  }
+  if (value_text) {
+    enum_variant_node_set_value(
+        variant, make_text_node(allocator, value_kind, value_text));
+  }
+  return variant;
+}
+
+/* 合成 enum 声明节点 enum NAME: UNDERLYING { body }：name_text/underlying_text
+   为 NULL 构造缺名/缺底层类型容错路径，body 允许为 NULL，delete 根结点时
+   一并释放子结点。 */
+static node_t *make_enum_decl_of(allocator_t *allocator,
+                                 const char *name_text,
+                                 const char *underlying_text,
+                                 node_t *body) {
+  node_t *node = create_enum_decl_node(allocator);
+  const char *loc_text = "enum";
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = loc_text;
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = loc_text + strlen(loc_text);
+  loc.end.column = 1;
+  loc.end.line = 1;
+  node_set_location(node, &loc);
+  enum_decl_node_set_keyword(
+      node, make_text_node(allocator, CLUX_NODE_SYMBOL, "enum"));
+  if (name_text) {
+    enum_decl_node_set_name(
+        node,
+        make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  }
+  if (underlying_text) {
+    enum_decl_node_set_underlying(node,
+                                  make_text_node(allocator,
+                                                 CLUX_NODE_LITERAL_IDENTIFIER,
+                                                 underlying_text));
+  }
+  enum_decl_node_set_body(node, body);
+  return node;
+}
+
+/* 合成三成员成员表 { Red=1, Green=2, Blue=4 }（e2e 与结构去重用例共用）。 */
+static node_t *make_color_variants(allocator_t *allocator) {
+  node_t *variants = create_enum_variants_node(allocator);
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(allocator, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(allocator, "Green", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(allocator, "Blue", CLUX_NODE_LITERAL_NUMERIC, "4"));
+  return variants;
+}
+
+/* 场景: enum 定义端到端——enum Color: u8 { Red=1, Green=2, Blue=4 }
+   预期: 产出 type value（值类型 kind TYPE），lookup("Color") 取回同一值；
+         被描述类型 kind ENUM、名 "Color"、成员数 3，按声明序可查成员且
+         值为 1/2/4，find_variant 按名命中、未知名查无；底层类型恒等于
+         u8 builtin、布局（size/align）继承底层类型（1/1） */
+TEST_F(ExecLiteralTest, EnumDefinesColorEndToEnd) {
+  node_t *decl = make_enum_decl_of(a, "Color", "u8", make_color_variants(a));
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(clux_context_lookup(ctx, "Color", NULL), result)
+      << "the named path must define the type value in the current scope";
+
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ENUM);
+  EXPECT_STREQ(clux_type_get_name(described), "Color");
+  EXPECT_EQ(clux_enum_variant_count(described), 3u);
+  const clux_enum_variant_t *red = clux_enum_get_variant(described, 0);
+  ASSERT_NE(red, nullptr);
+  EXPECT_STREQ(red->name, "Red");
+  EXPECT_EQ(red->value, 1u);
+  const clux_enum_variant_t *green = clux_enum_get_variant(described, 1);
+  ASSERT_NE(green, nullptr);
+  EXPECT_STREQ(green->name, "Green");
+  EXPECT_EQ(green->value, 2u);
+  const clux_enum_variant_t *blue = clux_enum_get_variant(described, 2);
+  ASSERT_NE(blue, nullptr);
+  EXPECT_STREQ(blue->name, "Blue");
+  EXPECT_EQ(blue->value, 4u);
+  const clux_enum_variant_t *found = clux_enum_find_variant(described, "Green");
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->value, 2u);
+  EXPECT_EQ(clux_enum_find_variant(described, "zzz"), nullptr)
+      << "unknown variant lookup must not match";
+  EXPECT_EQ(clux_enum_get_variant(described, 3), nullptr)
+      << "out-of-bounds variant index must not match";
+  EXPECT_EQ(clux_enum_get_underlying(described),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U8));
+  EXPECT_EQ(clux_type_get_size(described),
+            clux_type_get_size(clux_context_builtin_type(ctx, CLUX_TYPE_U8)));
+  EXPECT_EQ(clux_type_get_align(described),
+            clux_type_get_align(clux_context_builtin_type(ctx, CLUX_TYPE_U8)));
+  delete_node(&decl);
+}
+
+/* 场景: 结构去重恒等——enum E1: u8 { Red=1; Green=2 } 与 enum E2: u8
+        { Red=1; Green=2 } 成员表一致（类型名不同），对照 enum E3: u8
+        { Red=1; Green=3 } 成员值不同
+   预期: E1/E2 解出的被描述类型指针恒等（结构判等不看类型名）；
+         E3 与 E1 指针不同 */
+TEST_F(ExecLiteralTest, EnumStructuralDedupYieldsIdenticalType) {
+  node_t *variants_12 = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants_12,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants_12,
+      make_enum_variant_of(a, "Green", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  node_t *decl_e1 = make_enum_decl_of(a, "E1", "u8", variants_12);
+  clux_value_t *value_e1 = exec_expr_enum_decl(ctx, decl_e1);
+  ASSERT_NE(value_e1, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value_e1));
+  clux_type_t *type_e1 = type_described_by(value_e1);
+  ASSERT_NE(type_e1, nullptr);
+
+  node_t *variants_12b = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants_12b,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants_12b,
+      make_enum_variant_of(a, "Green", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  node_t *decl_e2 = make_enum_decl_of(a, "E2", "u8", variants_12b);
+  clux_value_t *value_e2 = exec_expr_enum_decl(ctx, decl_e2);
+  ASSERT_NE(value_e2, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value_e2));
+  clux_type_t *type_e2 = type_described_by(value_e2);
+  ASSERT_NE(type_e2, nullptr);
+  EXPECT_EQ(type_e1, type_e2)
+      << "identical variant tables must dedup to the same type instance";
+
+  node_t *variants_13 = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants_13,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants_13,
+      make_enum_variant_of(a, "Green", CLUX_NODE_LITERAL_NUMERIC, "3"));
+  node_t *decl_e3 = make_enum_decl_of(a, "E3", "u8", variants_13);
+  clux_value_t *value_e3 = exec_expr_enum_decl(ctx, decl_e3);
+  ASSERT_NE(value_e3, nullptr);
+  clux_type_t *type_e3 = type_described_by(value_e3);
+  ASSERT_NE(type_e3, nullptr);
+  EXPECT_NE(type_e1, type_e3)
+      << "different variant values must not dedup to the same instance";
+  delete_node(&decl_e1);
+  delete_node(&decl_e2);
+  delete_node(&decl_e3);
+}
+
+namespace {
+
+/* 便捷构造：enum <name>: u8 { 指定成员表 } 并 exec 求值，返回被描述类型。 */
+clux_type_t *describe_enum_of(clux_context_t *ctx,
+                              allocator_t *a,
+                              const char *name,
+                              node_t *(*make_variants)(allocator_t *)) {
+  node_t *decl = make_enum_decl_of(a, name, "u8", make_variants(a));
+  clux_value_t *value = exec_expr_enum_decl(ctx, decl);
+  if (!value || clux_value_is_error(value)) {
+    delete_node(&decl);
+    return nullptr;
+  }
+  clux_type_t *described = type_described_by(value);
+  delete_node(&decl);
+  return described;
+}
+
+node_t *make_red_green_variants(allocator_t *a) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants, make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(a, "Green", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  return variants;
+}
+
+node_t *make_crimson_green_variants(allocator_t *a) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(a, "Crimson", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(a, "Green", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  return variants;
+}
+
+node_t *make_red_green_high_variants(allocator_t *a) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants, make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(a, "Green", CLUX_NODE_LITERAL_NUMERIC, "9"));
+  return variants;
+}
+
+} // namespace
+
+/* 场景: enum 类型经 vtable type_equal 通道的结构判等（enum_type_equal）
+   预期: 自反判等 true；与结构不同（值不同/成员名不同/成员数不同）的
+         enum 判等 false；与非 enum 类型（u8 builtin）判等 false；
+         find_variant 对 NULL name 走容错返回 NULL */
+TEST_F(ExecLiteralTest, EnumTypeEqualIsStructuralViaVtable) {
+  clux_type_t *type_self =
+      describe_enum_of(ctx, a, "TE1", make_red_green_variants);
+  ASSERT_NE(type_self, nullptr);
+  EXPECT_EQ(clux_type_get_kind(type_self), CLUX_TYPE_ENUM);
+
+  /* 自反：底层一致 + 成员名值全匹配 → true（相等路径） */
+  EXPECT_TRUE(clux_type_equal(type_self, type_self))
+      << "an enum type must be equal to itself via the vtable channel";
+
+  /* 值不同（Green=2 vs Green=9）→ false */
+  clux_type_t *type_value =
+      describe_enum_of(ctx, a, "TE2", make_red_green_high_variants);
+  ASSERT_NE(type_value, nullptr);
+  EXPECT_NE(type_self, type_value)
+      << "different variant values must not dedup to the same instance";
+  EXPECT_FALSE(clux_type_equal(type_self, type_value))
+      << "variant value mismatch must fail type equality";
+
+  /* 成员名不同（Red vs Crimson）→ false */
+  clux_type_t *type_name =
+      describe_enum_of(ctx, a, "TE3", make_crimson_green_variants);
+  ASSERT_NE(type_name, nullptr);
+  EXPECT_FALSE(clux_type_equal(type_self, type_name))
+      << "variant name mismatch must fail type equality";
+
+  /* 成员数不同（2 vs 3）→ false */
+  clux_type_t *type_count =
+      describe_enum_of(ctx, a, "TE4", make_color_variants);
+  ASSERT_NE(type_count, nullptr);
+  EXPECT_FALSE(clux_type_equal(type_self, type_count))
+      << "variant count mismatch must fail type equality";
+
+  /* 对端非 enum 类型（u8 builtin）→ false（enum_kind 检查分支） */
+  clux_type_t *u8_type = clux_context_builtin_type(ctx, CLUX_TYPE_U8);
+  ASSERT_NE(u8_type, nullptr);
+  EXPECT_FALSE(clux_type_equal(type_self, u8_type))
+      << "an enum type must not equal its underlying builtin type";
+
+  /* find_variant 的 NULL name 容错分支 */
+  EXPECT_EQ(clux_enum_find_variant(type_self, NULL), nullptr)
+      << "NULL variant name must be tolerated and miss";
+}
+
+/* 场景: 匿名 enum（无 NAME 槽）——表达式位置合法
+   预期: 成功产出 type value（描述 ENUM 类型、成员数 3），不按名 define
+         （lookup 报 undeclared） */
+TEST_F(ExecLiteralTest, EnumAnonymousDefinitionYieldsUnnamedTypeValue) {
+  node_t *decl = make_enum_decl_of(a, NULL, "u8", make_color_variants(a));
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ENUM);
+  EXPECT_EQ(clux_enum_variant_count(described), 3u);
+  clux_value_t *probe = clux_context_lookup(ctx, "AnonEnumProbe", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_TRUE(clux_value_is_error(probe))
+      << "the anonymous enum must not define any name";
+  EXPECT_STREQ(error_message_of(probe),
+               "use of undeclared identifier 'AnonEnumProbe'");
+  delete_node(&decl);
+}
+
+/* 场景: 匿名求值——exec_expr_enum_decl_value 求 enum EV: u8 { ... } 但
+        不按名 define；随后 declare_value 具名化；对照具名路径回归
+   预期: 产出 type value 且被描述类型 kind ENUM，作用域中无 EV 名；
+         具名化后 lookup 命中；具名路径 lookup 正常命中 */
+TEST_F(ExecLiteralTest, EnumValueEvaluationIsAnonymous) {
+  node_t *decl = make_enum_decl_of(a, "EV", "u8", make_color_variants(a));
+  clux_value_t *value = exec_expr_enum_decl_value(ctx, decl);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(value);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ENUM);
+  clux_value_t *probe = clux_context_lookup(ctx, "EV", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_TRUE(clux_value_is_error(probe))
+      << "the anonymous evaluation must not define the name";
+  EXPECT_STREQ(error_message_of(probe), "use of undeclared identifier 'EV'");
+
+  /* 具名化（exec_stmt_enum 装饰路径的收尾通道） */
+  clux_value_t *bound =
+      clux_context_declare_value(ctx, value, "EV", node_get_location(decl));
+  ASSERT_NE(bound, nullptr);
+  EXPECT_EQ(clux_context_lookup(ctx, "EV", NULL), bound);
+  delete_node(&decl);
+
+  /* 具名路径回归：exec_expr_enum_decl 按名 define */
+  node_t *named_decl =
+      make_enum_decl_of(a, "EV2", "u8", make_color_variants(a));
+  clux_value_t *named = exec_expr_enum_decl(ctx, named_decl);
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(clux_context_lookup(ctx, "EV2", NULL), named)
+      << "the named declaration path must not regress";
+  delete_node(&named_decl);
+}
+
+/* 场景: 缺底层类型——UNDERLYING 槽缺省，具名与匿名（回退名 "enum"）
+        两种形态
+   预期: 具名报 "enum 'NU' requires an underlying type"；
+         匿名报 "enum 'enum' requires an underlying type"（关键字回退名） */
+TEST_F(ExecLiteralTest, EnumMissingUnderlyingReports) {
+  node_t *named = make_enum_decl_of(a, "NU", NULL, make_color_variants(a));
+  clux_value_t *named_result = exec_expr_enum_decl(ctx, named);
+  ASSERT_NE(named_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(named_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(named_result),
+               "enum 'NU' requires an underlying type");
+  delete_node(&named);
+
+  node_t *anon = make_enum_decl_of(a, NULL, NULL, make_color_variants(a));
+  clux_value_t *anon_result = exec_expr_enum_decl(ctx, anon);
+  ASSERT_NE(anon_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(anon_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(anon_result),
+               "enum 'enum' requires an underlying type")
+      << "the anonymous form must fall back to the keyword text as type name";
+  delete_node(&anon);
+}
+
+/* 场景: 底层非整数且非 str——enum NI: f64 { ... } 底层类型求值为浮点类型
+   预期: 报 "enum 'NI' underlying type must be an integer or str type" */
+TEST_F(ExecLiteralTest, EnumUnderlyingNotIntegerReports) {
+  node_t *decl = make_enum_decl_of(a, "NI", "f64", make_color_variants(a));
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "enum 'NI' underlying type must be an integer or str type");
+  delete_node(&decl);
+}
+
+/* 场景: 底层类型表达式非 type value——enum NT: 7 底层求值出 i32 数值
+   预期: 经公共类型通道拦截，报 "expected a type expression, got 'i32'" */
+TEST_F(ExecLiteralTest, EnumUnderlyingNotTypeValueReports) {
+  node_t *decl = create_enum_decl_node(a);
+  const char *loc_text = "enum";
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = loc_text;
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = loc_text + strlen(loc_text);
+  loc.end.column = 1;
+  loc.end.line = 1;
+  node_set_location(decl, &loc);
+  enum_decl_node_set_keyword(decl, make_text_node(a, CLUX_NODE_SYMBOL, "enum"));
+  enum_decl_node_set_name(
+      decl, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "NT"));
+  enum_decl_node_set_underlying(
+      decl, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "7"));
+  enum_decl_node_set_body(decl, make_color_variants(a));
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected a type expression, got 'i32'");
+  delete_node(&decl);
+}
+
+/* 场景: 空成员表——BODY 为 NULL 与空成员节点 {} 两种容错形态
+   预期: 均报 "enum 'EB' requires at least one variant" */
+TEST_F(ExecLiteralTest, EnumEmptyBodyReports) {
+  node_t *null_body = make_enum_decl_of(a, "EB", "u8", NULL);
+  clux_value_t *null_result = exec_expr_enum_decl(ctx, null_body);
+  ASSERT_NE(null_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(null_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(null_result),
+               "enum 'EB' requires at least one variant");
+  delete_node(&null_body);
+
+  node_t *empty_body =
+      make_enum_decl_of(a, "EB", "u8", create_enum_variants_node(a));
+  clux_value_t *empty_result = exec_expr_enum_decl(ctx, empty_body);
+  ASSERT_NE(empty_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(empty_result),
+               "enum 'EB' requires at least one variant");
+  delete_node(&empty_body);
+}
+
+/* 场景: 成员缺名——enum MN: u8 { = 1 } 首成员无 NAME
+   预期: 报 "enum 'MN' variant 0 requires a name" */
+TEST_F(ExecLiteralTest, EnumVariantMissingNameReports) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants, make_enum_variant_of(a, NULL, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  node_t *decl = make_enum_decl_of(a, "MN", "u8", variants);
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "enum 'MN' variant 0 requires a name");
+  delete_node(&decl);
+}
+
+/* 场景: 成员缺值——enum MV: u8 { Red } 首成员无 VALUE
+   预期: 报 "enum 'MV' variant 'Red' requires a value" */
+TEST_F(ExecLiteralTest, EnumVariantMissingValueReports) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, NULL));
+  node_t *decl = make_enum_decl_of(a, "MV", "u8", variants);
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "enum 'MV' variant 'Red' requires a value");
+  delete_node(&decl);
+}
+
+/* 场景: 成员值非整数常量——enum VT: u8 { Red = 1.5f64 }（浮点后缀字面量；
+        无后缀浮点由语法层强制禁止，exec 整数通道对 "1.5" 宽容截断为 1，
+        故须带 f64 后缀才能求值出浮点 kind）与 enum VS: u8 { Red = i32 }
+        （type value，shadow 值无位型可取）
+   预期: 均报 "enum '%s' variant 'Red' requires an integer constant value" */
+TEST_F(ExecLiteralTest, EnumVariantValueNotIntegerReports) {
+  node_t *float_variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      float_variants,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1.5f64"));
+  node_t *float_decl = make_enum_decl_of(a, "VT", "u8", float_variants);
+  clux_value_t *float_result = exec_expr_enum_decl(ctx, float_decl);
+  ASSERT_NE(float_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(float_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(float_result),
+               "enum 'VT' variant 'Red' requires an integer constant value");
+  delete_node(&float_decl);
+
+  node_t *shadow_variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      shadow_variants,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *shadow_decl = make_enum_decl_of(a, "VS", "u8", shadow_variants);
+  clux_value_t *shadow_result = exec_expr_enum_decl(ctx, shadow_decl);
+  ASSERT_NE(shadow_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(shadow_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(shadow_result),
+               "enum 'VS' variant 'Red' requires an integer constant value");
+  delete_node(&shadow_decl);
+}
+
+/* 场景: 成员值求值错误透传——enum VE: u8 { Red = <STMT_EMPTY> } 值表达式
+        求值即失败
+   预期: 值求值错误原样透传，报 "unsupported node kind: STMT_EMPTY" */
+TEST_F(ExecLiteralTest, EnumVariantValueErrorPropagates) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants, make_enum_variant_of(a, "Red", CLUX_NODE_STMT_EMPTY, "stmt"));
+  node_t *decl = make_enum_decl_of(a, "VE", "u8", variants);
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_EMPTY")
+      << "the variant value evaluation failure must propagate unchanged";
+  delete_node(&decl);
+}
+
+/* 场景: 重名成员——enum DP: u8 { Red = 1; Red = 2 } 同名成员两次
+   预期: 报 "enum 'DP' has duplicate variant 'Red'" */
+TEST_F(ExecLiteralTest, EnumDuplicateVariantReports) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants, make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      variants, make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  node_t *decl = make_enum_decl_of(a, "DP", "u8", variants);
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "enum 'DP' has duplicate variant 'Red'");
+  delete_node(&decl);
+}
+
+/* 场景: 按名 define 重名——enum DU: u8 { ... } 连续定义两次（成员表一致
+        触发类型去重，但名字重复触发 scope duplicate 拦截）
+   预期: 首次成功并按名 define；第二次报 "duplicate declaration 'DU'" */
+TEST_F(ExecLiteralTest, EnumDefineDuplicateNameReports) {
+  node_t *decl = make_enum_decl_of(a, "DU", "u8", make_color_variants(a));
+  clux_value_t *first = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(first, nullptr);
+  EXPECT_FALSE(clux_value_is_error(first));
+  EXPECT_EQ(clux_context_lookup(ctx, "DU", NULL), first);
+
+  clux_value_t *second = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(second)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(second), "duplicate declaration 'DU'");
+  delete_node(&decl);
+}
+
+/* 场景: STMT_ENUM 无装饰器——enum 语句包装 enum SE: u8 { ... } 声明，
+        经 exec_node 顶层分派（覆盖 CLUX_NODE_STMT_ENUM 槽位表注册）
+   预期: 与直接执行声明本体等价：lookup("SE") 取回同一 type value，
+         被描述类型 kind ENUM */
+TEST_F(ExecLiteralTest, StmtEnumWithoutDecoratorDefinesByName) {
+  node_t *stmt = create_stmt_enum_node(a);
+  stmt_enum_node_set_enum_decl(
+      stmt, make_enum_decl_of(a, "SE", "u8", make_color_variants(a)));
+  clux_value_t *result = exec_node(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "SE", NULL), result)
+      << "the enum statement must define the type value by name";
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ENUM);
+  delete_node(&stmt);
+}
+
+/* 场景: STMT_ENUM 缺声明——enum 语句 ENUM_DECL 槽为 NULL
+   预期: 报 "enum statement requires an enum declaration" */
+TEST_F(ExecLiteralTest, StmtEnumMissingDeclReports) {
+  node_t *stmt = create_stmt_enum_node(a);
+  clux_value_t *result = exec_stmt_enum(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "enum statement requires an enum declaration");
+  delete_node(&stmt);
+}
+
+/* 场景: STMT_ENUM 语句层声明必须具名——enum {} 无名声明，
+        无装饰器与带装饰器两种形态
+   预期: 均报 "enum statement requires a named enum declaration"
+        （语句包裹层强制具名，匿名只在表达式位置合法） */
+TEST_F(ExecLiteralTest, StmtEnumMissingNameReports) {
+  node_t *bare = create_stmt_enum_node(a);
+  stmt_enum_node_set_enum_decl(
+      bare, make_enum_decl_of(a, NULL, "u8", make_color_variants(a)));
+  clux_value_t *bare_result = exec_stmt_enum(ctx, bare);
+  ASSERT_NE(bare_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bare_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bare_result),
+               "enum statement requires a named enum declaration");
+  delete_node(&bare);
+
+  node_t *stmt = create_stmt_enum_node(a);
+  stmt_enum_node_set_enum_decl(
+      stmt, make_enum_decl_of(a, NULL, "u8", make_color_variants(a)));
+  stmt_enum_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_enum(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "enum statement requires a named enum declaration");
+  delete_node(&stmt);
+}
+
+/* 场景: STMT_ENUM 装饰器链 e2e——装饰器是 comptime func 值
+        wrap_t(u: type): type { return i32; }，enum DW: u8 { Red = 1 }
+        经 [[wrap_t]] 包装
+   预期: 匿名求值源类型值 → invoke wrap_t（type value 作实参进帧，
+         return i32 出帧）→ 最终名字 DW 绑定包装后的返回值：被描述
+         类型恒等于 i32 builtin（证明包装真实发生而非透传）；
+         invoke 前懒安装帧协议执行器 */
+TEST_F(ExecLiteralTest, StmtEnumDecoratorWrapsTypeValueEndToEnd) {
+  clux_type_t *meta = clux_context_get_type_type(ctx);
+  clux_type_t *wrap_params[1] = {meta};
+  clux_type_t *wrap_type = clux_context_create_func_type(
+      ctx, "wrap_t", NULL, 0, wrap_params, 1, meta);
+  ASSERT_NE(wrap_type, nullptr);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type")));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *wrap_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t"),
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type"),
+      body);
+  clux_value_t *wrap_func =
+      clux_context_create_func(ctx, wrap_type, NULL, NULL);
+  ASSERT_NE(wrap_func, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+            wrap_func);
+  clux_value_t *wrap_bound = clux_context_declare_value(
+      ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
+  ASSERT_NE(wrap_bound, nullptr);
+  EXPECT_FALSE(clux_value_is_error(wrap_bound));
+
+  node_t *stmt = create_stmt_enum_node(a);
+  node_t *dw_variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      dw_variants,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_enum_node_set_enum_decl(stmt,
+                               make_enum_decl_of(a, "DW", "u8", dw_variants));
+  stmt_enum_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t")));
+  clux_value_t *result = exec_stmt_enum(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "DW", NULL), result)
+      << "the decorated path must bind the wrapped value under the name";
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "the decorator must substitute the source enum type with its "
+         "return type";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "invoking the func decorator must lazily install the executor";
+  delete_node(&stmt);
+  delete_node(&wrap_decl);
+}
+
+/* 场景: STMT_ENUM 非函数装饰器透传——[[7]]（数值）与 [[i32]]（type
+        value）都求值成功但非 func，按编译期标记跳过包装
+   预期: 源 type value 原样透传：被描述类型仍为 ENUM（成员数 3），
+         lookup("DN") 取回同一值；不触发执行器安装（保持 NULL） */
+TEST_F(ExecLiteralTest, StmtEnumNonFuncDecoratorsAreSkipped) {
+  node_t *stmt = create_stmt_enum_node(a);
+  stmt_enum_node_set_enum_decl(
+      stmt, make_enum_decl_of(a, "DN", "u8", make_color_variants(a)));
+  stmt_enum_node_add_decorator(
+      stmt, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  stmt_enum_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_enum(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "DN", NULL), result);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ENUM);
+  EXPECT_EQ(clux_enum_variant_count(described), 3u)
+      << "non-func decorators must pass the source type value through";
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "non-func decorators must not touch the executor";
+  delete_node(&stmt);
+}
+
+/* 合成两成员 str 成员表 { Red="red", Green="green" }：VALUE 槽放字符串
+   字面量节点（str 底层 e2e 与结构去重用例共用）。 */
+static node_t *make_str_variants_red_green(allocator_t *allocator) {
+  node_t *variants = create_enum_variants_node(allocator);
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(
+          allocator, "Red", CLUX_NODE_LITERAL_STRING, "\"red\""));
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(
+          allocator, "Green", CLUX_NODE_LITERAL_STRING, "\"green\""));
+  return variants;
+}
+
+/* 场景: str 底层 enum 端到端——enum S: str { Red="red", Green="green" }
+   预期: 产出 type value 并按名 define；被描述类型 kind ENUM、名 "S"；
+         成员数 2，按声明序可查成员且 str 内容正确、value 恒 0；
+         find_variant 按名命中、未知名查无；底层为 str builtin，布局
+         取 underlying 的 size/align（即一个 char* 的大小与对齐） */
+TEST_F(ExecLiteralTest, EnumStrUnderlyingDefinesEndToEnd) {
+  node_t *decl =
+      make_enum_decl_of(a, "S", "str", make_str_variants_red_green(a));
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(clux_context_lookup(ctx, "S", NULL), result)
+      << "the named path must define the type value in the current scope";
+
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ENUM);
+  EXPECT_STREQ(clux_type_get_name(described), "S");
+  EXPECT_EQ(clux_enum_variant_count(described), 2u);
+  const clux_enum_variant_t *red = clux_enum_get_variant(described, 0);
+  ASSERT_NE(red, nullptr);
+  EXPECT_STREQ(red->name, "Red");
+  EXPECT_STREQ(red->str, "red");
+  EXPECT_EQ(red->value, 0u) << "str variants must not use the value field";
+  const clux_enum_variant_t *green = clux_enum_get_variant(described, 1);
+  ASSERT_NE(green, nullptr);
+  EXPECT_STREQ(green->name, "Green");
+  EXPECT_STREQ(green->str, "green");
+  EXPECT_EQ(green->value, 0u);
+  const clux_enum_variant_t *found = clux_enum_find_variant(described, "Red");
+  ASSERT_NE(found, nullptr);
+  EXPECT_STREQ(found->str, "red");
+  EXPECT_EQ(clux_enum_find_variant(described, "zzz"), nullptr)
+      << "unknown variant lookup must not match";
+  EXPECT_EQ(clux_enum_get_variant(described, 2), nullptr)
+      << "out-of-bounds variant index must not match";
+
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
+  ASSERT_NE(str_type, nullptr);
+  EXPECT_EQ(clux_enum_get_underlying(described), str_type)
+      << "the underlying type must resolve to the str builtin";
+  EXPECT_EQ(clux_type_get_size(described), sizeof(char *))
+      << "a str enum must be laid out as one char*";
+  EXPECT_EQ(clux_type_get_size(described), clux_type_get_size(str_type));
+  EXPECT_EQ(clux_type_get_align(described), clux_type_get_align(str_type));
+  delete_node(&decl);
+}
+
+/* 场景: str 底层结构去重——enum SD1: str { Red="red"; Green="green" }
+        与 enum SD2: str { Red="red"; Green="green" } 成员表一致（声明名
+        不同、字面量节点独立），对照 enum SD3: str { Red="scarlet";
+        Green="green" } str 内容不同
+   预期: SD1/SD2 解出的被描述类型指针恒等（str 按内容判等、类型名不
+         参与去重）；SD3 与 SD1 指针不同 */
+TEST_F(ExecLiteralTest, EnumStrStructuralDedupYieldsIdenticalType) {
+  node_t *decl_s1 =
+      make_enum_decl_of(a, "SD1", "str", make_str_variants_red_green(a));
+  clux_value_t *value_s1 = exec_expr_enum_decl(ctx, decl_s1);
+  ASSERT_NE(value_s1, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value_s1));
+  clux_type_t *type_s1 = type_described_by(value_s1);
+  ASSERT_NE(type_s1, nullptr);
+
+  node_t *decl_s2 =
+      make_enum_decl_of(a, "SD2", "str", make_str_variants_red_green(a));
+  clux_value_t *value_s2 = exec_expr_enum_decl(ctx, decl_s2);
+  ASSERT_NE(value_s2, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value_s2));
+  clux_type_t *type_s2 = type_described_by(value_s2);
+  ASSERT_NE(type_s2, nullptr);
+  EXPECT_EQ(type_s1, type_s2)
+      << "identical str variant tables must dedup to the same type instance";
+
+  node_t *scarlet_variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      scarlet_variants,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_STRING, "\"scarlet\""));
+  enum_variants_node_add_variant(
+      scarlet_variants,
+      make_enum_variant_of(a, "Green", CLUX_NODE_LITERAL_STRING, "\"green\""));
+  node_t *decl_s3 = make_enum_decl_of(a, "SD3", "str", scarlet_variants);
+  clux_value_t *value_s3 = exec_expr_enum_decl(ctx, decl_s3);
+  ASSERT_NE(value_s3, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value_s3));
+  clux_type_t *type_s3 = type_described_by(value_s3);
+  ASSERT_NE(type_s3, nullptr);
+  EXPECT_NE(type_s1, type_s3)
+      << "different str contents must not dedup to the same instance";
+  delete_node(&decl_s1);
+  delete_node(&decl_s2);
+  delete_node(&decl_s3);
+}
+
+/* 场景: str 底层配整数值——enum SI: str { Red = 1 } 成员值是整数常量
+   预期: 报 "enum 'SI' variant 'Red' requires a string constant value" */
+TEST_F(ExecLiteralTest, EnumStrUnderlyingWithIntegerValueReports) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants, make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  node_t *decl = make_enum_decl_of(a, "SI", "str", variants);
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "enum 'SI' variant 'Red' requires a string constant value");
+  delete_node(&decl);
+}
+
+/* 场景: 整数底层配字符串值——enum IS: u8 { Red = "red" } 成员值是
+        字符串常量（integer 通道的 str kind 分支）
+   预期: 报 "enum 'IS' variant 'Red' requires an integer constant value" */
+TEST_F(ExecLiteralTest, EnumIntegerUnderlyingWithStringValueReports) {
+  node_t *variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      variants,
+      make_enum_variant_of(a, "Red", CLUX_NODE_LITERAL_STRING, "\"red\""));
+  node_t *decl = make_enum_decl_of(a, "IS", "u8", variants);
+  clux_value_t *result = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "enum 'IS' variant 'Red' requires an integer constant value");
+  delete_node(&decl);
+}
+
+/* 场景: STMT_ENUM + str 底层——bare 形态（无装饰器）语句包装具名
+        enum SS: str { Red="red", Green="green" }，经 exec_node 顶层分派
+   预期: lookup("SS") 取回 type value；被描述类型 kind ENUM、str 成员
+         内容正确 */
+TEST_F(ExecLiteralTest, StmtEnumWithStrUnderlyingDefinesByName) {
+  node_t *stmt = create_stmt_enum_node(a);
+  stmt_enum_node_set_enum_decl(
+      stmt, make_enum_decl_of(a, "SS", "str", make_str_variants_red_green(a)));
+  clux_value_t *result = exec_node(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "SS", NULL), result)
+      << "the bare enum statement must define the str enum type by name";
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ENUM);
+  EXPECT_EQ(clux_enum_variant_count(described), 2u);
+  const clux_enum_variant_t *red = clux_enum_get_variant(described, 0);
+  ASSERT_NE(red, nullptr);
+  EXPECT_STREQ(red->str, "red");
+  EXPECT_EQ(red->value, 0u);
+  delete_node(&stmt);
+}
+
+/* ---- exec "as"：EXPR_BINARY 接线显式转换（enum 值经 underlying 委托） ---- */
+
+namespace {
+
+/* 经 exec 定义 enum <name>: <underlying_text> { Red=1, Green=2, Blue=4 }
+   并返回被描述类型（失败返回 nullptr，节点已释放）。 */
+clux_type_t *describe_color_underlying(clux_context_t *ctx,
+                                       allocator_t *a,
+                                       const char *name,
+                                       const char *underlying_text) {
+  node_t *decl =
+      make_enum_decl_of(a, name, underlying_text, make_color_variants(a));
+  clux_value_t *value = exec_expr_enum_decl(ctx, decl);
+  clux_type_t *described = value ? type_described_by(value) : nullptr;
+  delete_node(&decl);
+  if (!value || clux_value_is_error(value)) {
+    return nullptr;
+  }
+  return described;
+}
+
+/* 构造持有指定位型的具名枚举值（i32 位型），lookup 按名可达。 */
+clux_value_t *make_named_enum_bits_i32(clux_context_t *ctx,
+                                       clux_type_t *enum_type,
+                                       const char *name,
+                                       int32_t bits) {
+  ptr_handle_t data =
+      safe_alloc(clux_context_get_safe_allocator(ctx), sizeof(int32_t), NULL);
+  if (data == 0) {
+    return nullptr;
+  }
+  void *raw = ptr_to_raw(data, 0);
+  if (!raw) {
+    return nullptr;
+  }
+  *(int32_t *)raw = bits;
+  return clux_context_create_value(ctx, enum_type, data, name, NULL);
+}
+
+} /* namespace */
+
+/* 场景: exec e2e 宽化——var ev: Color(i32) = 2; ev as i64
+   预期: "as" 左操作数求值、右操作数走类型表达式通道，经 clux_context_cast
+         委托 underlying 宽化成功，产出 i64 值 2 */
+TEST_F(ExecLiteralTest, EnumAsWidensToI64) {
+  clux_type_t *color = describe_color_underlying(ctx, a, "Color", "i32");
+  ASSERT_NE(color, nullptr);
+  clux_value_t *ev = make_named_enum_bits_i32(ctx, color, "ev", 2);
+  ASSERT_NE(ev, nullptr);
+
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev"),
+                                make_node(CLUX_NODE_SYMBOL, "as"),
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i64"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I64));
+  EXPECT_EQ(read_i64(result), 2);
+  delete_node(&node);
+}
+
+/* 场景: exec e2e 显式 narrowing——ev(300) as i8（exec 走宽松 cast 通道）
+   预期: 截断为 i8（300 & 0xFF == 44），类型 i8 */
+TEST_F(ExecLiteralTest, EnumAsExplicitNarrowingTruncates) {
+  clux_type_t *color = describe_color_underlying(ctx, a, "Color", "i32");
+  ASSERT_NE(color, nullptr);
+  clux_value_t *ev = make_named_enum_bits_i32(ctx, color, "ev", 300);
+  ASSERT_NE(ev, nullptr);
+
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev"),
+                                make_node(CLUX_NODE_SYMBOL, "as"),
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i8"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I8));
+  EXPECT_EQ(read_i8(result), 44);
+  delete_node(&node);
+}
+
+/* 场景: exec e2e 枚举 as 同布局枚举——E1(i32) 值 7 as E2(i32)
+   预期: 产出 E2 被描述类型的枚举值，位型保留 */
+TEST_F(ExecLiteralTest, EnumAsToSameLayoutEnumPreservesBits) {
+  clux_type_t *e1 = describe_color_underlying(ctx, a, "E1", "i32");
+  ASSERT_NE(e1, nullptr);
+  /* E2 成员表不同名，结构判等不去重为 E1 */
+  node_t *e2_variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      e2_variants,
+      make_enum_variant_of(a, "Crimson", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      e2_variants,
+      make_enum_variant_of(a, "Emerald", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  enum_variants_node_add_variant(
+      e2_variants,
+      make_enum_variant_of(a, "Azure", CLUX_NODE_LITERAL_NUMERIC, "4"));
+  node_t *decl_e2 = make_enum_decl_of(a, "E2", "i32", e2_variants);
+  clux_value_t *e2_value = exec_expr_enum_decl(ctx, decl_e2);
+  ASSERT_NE(e2_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(e2_value));
+  clux_type_t *e2 = type_described_by(e2_value);
+  ASSERT_NE(e2, nullptr);
+  ASSERT_NE(e2, e1) << "different variant names must not dedup";
+
+  clux_value_t *ev = make_named_enum_bits_i32(ctx, e1, "ev_se", 7);
+  ASSERT_NE(ev, nullptr);
+
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev_se"),
+                     make_node(CLUX_NODE_SYMBOL, "as"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "E2"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_value_get_type(result), e2);
+  EXPECT_EQ(read_i32(result), 7);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ENUM);
+  EXPECT_STREQ(clux_type_get_name(clux_value_get_type(result)), "E2");
+  delete_node(&node);
+  delete_node(&decl_e2);
+}
+
+/* 场景: exec e2e 枚举 as 更窄底层枚举——E1(i32) 值 300 as E2(i16)
+   预期: 宽松通道放行（i32→i16 显式 narrowing 合法），产出 E2 枚举值，
+         按 i16 布局落地（值 300 域内保留） */
+TEST_F(ExecLiteralTest, EnumAsToEnumWithNarrowerUnderlying) {
+  clux_type_t *e1 = describe_color_underlying(ctx, a, "E1", "i32");
+  ASSERT_NE(e1, nullptr);
+  node_t *e2_variants = create_enum_variants_node(a);
+  enum_variants_node_add_variant(
+      e2_variants,
+      make_enum_variant_of(a, "Crimson", CLUX_NODE_LITERAL_NUMERIC, "1"));
+  enum_variants_node_add_variant(
+      e2_variants,
+      make_enum_variant_of(a, "Emerald", CLUX_NODE_LITERAL_NUMERIC, "2"));
+  node_t *decl_e2 = make_enum_decl_of(a, "E2", "i16", e2_variants);
+  clux_value_t *e2_value = exec_expr_enum_decl(ctx, decl_e2);
+  ASSERT_NE(e2_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(e2_value));
+  clux_type_t *e2 = type_described_by(e2_value);
+  ASSERT_NE(e2, nullptr);
+
+  clux_value_t *ev = make_named_enum_bits_i32(ctx, e1, "ev_nw", 300);
+  ASSERT_NE(ev, nullptr);
+
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev_nw"),
+                     make_node(CLUX_NODE_SYMBOL, "as"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "E2"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_value_get_type(result), e2);
+  EXPECT_EQ(read_i16(result), 300);
+  delete_node(&node);
+  delete_node(&decl_e2);
+}
+
+/* 场景: exec e2e 数值化转换——ev(2) as f64 / ev(2) as bool
+   预期: integer_cast 数值通道放行：f64 == 2.0、bool == true */
+TEST_F(ExecLiteralTest, EnumAsToF64AndBoolConvertsNumerically) {
+  clux_type_t *color = describe_color_underlying(ctx, a, "Color", "i32");
+  ASSERT_NE(color, nullptr);
+  clux_value_t *ev = make_named_enum_bits_i32(ctx, color, "ev_num", 2);
+  ASSERT_NE(ev, nullptr);
+
+  node_t *f64_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev_num"),
+                     make_node(CLUX_NODE_SYMBOL, "as"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f64"));
+  clux_value_t *as_f64 = exec_expr_binary(ctx, f64_node);
+  ASSERT_NE(as_f64, nullptr);
+  EXPECT_FALSE(clux_value_is_error(as_f64));
+  EXPECT_EQ(clux_value_get_type(as_f64),
+            clux_context_builtin_type(ctx, CLUX_TYPE_F64));
+  EXPECT_DOUBLE_EQ(read_f64(as_f64), 2.0);
+  delete_node(&f64_node);
+
+  node_t *bool_node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev_num"),
+                     make_node(CLUX_NODE_SYMBOL, "as"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "bool"));
+  clux_value_t *as_bool = exec_expr_binary(ctx, bool_node);
+  ASSERT_NE(as_bool, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_bool),
+            clux_context_builtin_type(ctx, CLUX_TYPE_BOOL));
+  EXPECT_TRUE(read_bool(as_bool));
+  delete_node(&bool_node);
+}
+
+/* 场景: exec e2e 枚举 as str——integer_cast 拒绝，错误透传
+   预期: "cannot cast 'i32' to 'str'"（底层类型名，underlying 决定规则） */
+TEST_F(ExecLiteralTest, EnumAsToStrRejectedViaUnderlying) {
+  clux_type_t *color = describe_color_underlying(ctx, a, "Color", "i32");
+  ASSERT_NE(color, nullptr);
+  clux_value_t *ev = make_named_enum_bits_i32(ctx, color, "ev_str", 2);
+  ASSERT_NE(ev, nullptr);
+
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev_str"),
+                     make_node(CLUX_NODE_SYMBOL, "as"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "cannot cast 'i32' to 'str'");
+  delete_node(&node);
+}
+
+/* 场景: "as" 右操作数不是类型表达式——ev as 5（数值字面量）
+   预期: 报 "expected a type expression, got 'i32'"（右值类型名） */
+TEST_F(ExecLiteralTest, EnumAsRightOperandNotTypeExpressionReports) {
+  clux_type_t *color = describe_color_underlying(ctx, a, "Color", "i32");
+  ASSERT_NE(color, nullptr);
+  clux_value_t *ev = make_named_enum_bits_i32(ctx, color, "ev_ty", 2);
+  ASSERT_NE(ev, nullptr);
+
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ev_ty"),
+                     make_node(CLUX_NODE_SYMBOL, "as"),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected a type expression, got 'i32'");
+  delete_node(&node);
+}
+
+/* 场景: "as" 左操作数 error 传播——未声明标识符 as i64
+   预期: lookup 失败的 error 原样返回："use of undeclared identifier ..." */
+TEST_F(ExecLiteralTest, EnumAsLeftOperandErrorPropagates) {
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "missing_ev"),
+                     make_node(CLUX_NODE_SYMBOL, "as"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i64"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'missing_ev'");
+  delete_node(&node);
 }
