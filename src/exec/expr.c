@@ -756,11 +756,13 @@ clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node) {
 /* union 定义（白皮书 §3.7 tag union、§3.8 C union）：tag union 与
    cunion 语法阶段共用 EXPR_UNION，exec 按 KEYWORD 文本分派引擎构造器
    （union → tag union，cunion → C union），成员表逐项求值为 type 后
-   整体构造，引擎结构去重恒等返回；产出 type value 并按名 define 进
-   当前作用域（重名报 duplicate）。成员重名/缺名/缺类型在引擎校验前
-   拦截以携带源位置。泛型参数（<>）暂不支持，等泛型推断引擎就绪后
-   接入。declare_named=false 时仅求值出不具名的 type value（装饰器
-   包装路径：具名化推迟到包装完成后的 declare_value）。 */
+   整体构造，引擎结构去重恒等返回；产出 type value，具名（NAME 槽
+   非空）时按名 define 进当前作用域（重名报 duplicate），匿名（NAME
+   缺省）合法——引擎类型名用关键字文本回退，不 define。成员重名/
+   缺名/缺类型在引擎校验前拦截以携带源位置。泛型参数（<>）暂不
+   支持，等泛型推断引擎就绪后接入。declare_named=false 时仅求值出
+   不具名的 type value（装饰器包装路径：具名化推迟到包装完成后的
+   declare_value）。 */
 static clux_value_t *
 exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
@@ -779,14 +781,17 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
   node_t *name_node = union_node_get_name(node);
   char *name =
       name_node ? location_get(node_get_location(name_node), allocator) : NULL;
-  if (!name) {
-    return clux_context_create_error_message(ctx, loc, "union requires a name");
+  /* 匿名 union 合法：错误消息与引擎构造用关键字文本回退类型名，
+     define 只在具名（name 非空）时发生。 */
+  const char *type_name = name;
+  if (!type_name) {
+    type_name = is_cunion ? "cunion" : "union";
   }
   node_t *body = union_node_get_body(node);
   size_t count = body ? fields_node_get_field_count(body) : 0;
   if (count == 0) {
     clux_value_t *fail = clux_context_create_error_message(
-        ctx, loc, "union '%s' requires at least one member", name);
+        ctx, loc, "union '%s' requires at least one member", type_name);
     allocator_free(allocator, (void **)&name);
     return fail;
   }
@@ -809,7 +814,7 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
           ctx,
           field ? node_get_location(field) : loc,
           "union '%s' member %zu requires a name",
-          name,
+          type_name,
           idx);
       break;
     }
@@ -820,7 +825,7 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
           ctx,
           field ? node_get_location(field) : loc,
           "union '%s' member '%s' requires a type",
-          name,
+          type_name,
           member_name);
     } else {
       clux_value_t *err = NULL;
@@ -838,7 +843,7 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
               ctx,
               node_get_location(member_name_node),
               "union '%s' has duplicate member '%s'",
-              name,
+              type_name,
               member_name);
           break;
         }
@@ -859,10 +864,10 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
   }
   clux_type_t *type = NULL;
   if (!fail) {
-    type =
-        is_cunion
-            ? clux_context_create_cunion_type(ctx, name, cunion_members, filled)
-            : clux_context_create_union_type(ctx, name, union_members, filled);
+    type = is_cunion ? clux_context_create_cunion_type(
+                           ctx, type_name, cunion_members, filled)
+                     : clux_context_create_union_type(
+                           ctx, type_name, union_members, filled);
   }
   /* 成员名经 context 路径 strs 驻留，本地拷贝统一释放。 */
   for (size_t idx = 0; idx < filled; idx++) {
@@ -881,7 +886,7 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
     return create_fail;
   }
   clux_value_t *value = clux_context_create_type_value(
-      ctx, type, declare_named ? name : NULL, loc);
+      ctx, type, (declare_named && name) ? name : NULL, loc);
   allocator_free(allocator, (void **)&name);
   return value;
 }

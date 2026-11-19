@@ -6824,15 +6824,18 @@ TEST_F(ExecLiteralTest, UnionStructuralDedupYieldsIdenticalType) {
   delete_node(&decl_w);
 }
 
-/* 场景: 缺名——union { a: i32 } 无 NAME 槽
-   预期: 报 "union requires a name"，名字不落地 */
-TEST_F(ExecLiteralTest, UnionMissingNameReports) {
+/* 场景: 匿名 union（无 NAME 槽）——表达式位置合法
+   预期: 成功产出 type value（描述 tag union 类型），不按名 define */
+TEST_F(ExecLiteralTest, UnionAnonymousDefinitionYieldsUnnamedTypeValue) {
   node_t *decl =
       make_union_decl_of(a, "union", NULL, NULL, make_two_member_fields(a));
   clux_value_t *result = exec_expr_union(ctx, decl);
   ASSERT_NE(result, nullptr);
-  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(result), "union requires a name");
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_UNION);
+  EXPECT_EQ(clux_union_member_count(described), (size_t)2);
   delete_node(&decl);
 }
 
@@ -7018,11 +7021,23 @@ TEST_F(ExecLiteralTest, StmtUnionMissingDeclReports) {
   delete_node(&stmt);
 }
 
-/* 场景: STMT_UNION 装饰器路径缺名——union {} 无名声明 + 一个装饰器
-        （装饰路径需名字做 declare_value 收尾）
-   预期: 报 "decorated union declaration requires a name"（在匿名求值
-         之前拦截） */
-TEST_F(ExecLiteralTest, StmtUnionDecoratedMissingNameReports) {
+/* 场景: STMT_UNION 语句层声明必须具名——union {} 无名声明，
+        无装饰器与带装饰器两种形态
+   预期: 均报 "union statement requires a named union declaration"
+        （语句包裹层强制具名，匿名只在表达式位置合法） */
+TEST_F(ExecLiteralTest, StmtUnionMissingNameReports) {
+  node_t *bare = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      bare,
+      make_union_decl_of(a, "union", NULL, NULL, make_two_member_fields(a)));
+  clux_value_t *bare_result = exec_stmt_union(ctx, bare);
+  ASSERT_NE(bare_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bare_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bare_result),
+               "union statement requires a named union declaration");
+  delete_node(&bare);
+
   node_t *stmt = create_stmt_union_node(a);
   stmt_union_node_set_union_decl(
       stmt,
@@ -7034,7 +7049,7 @@ TEST_F(ExecLiteralTest, StmtUnionDecoratedMissingNameReports) {
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(result),
-               "decorated union declaration requires a name");
+               "union statement requires a named union declaration");
   delete_node(&stmt);
 }
 

@@ -258,7 +258,8 @@ clux_value_t *exec_stmt_func(clux_context_t *ctx, node_t *node) {
    exec_expr_union 按名 define 出 type value）；有装饰器时先匿名求值
    源类型值（不按名 define），装饰器按源码顺序链式应用（求值为 func
    时以类型值为实参调用，编译期标记原样返回），最后 declare_value
-   具名化。export（run 阶段产出）是编译期语义，exec 层不处理。 */
+   具名化。语句层的声明必须具名（匿名 union 类型只在表达式位置合法）；
+   export（run 阶段产出）是编译期语义，exec 层不处理。 */
 clux_value_t *exec_stmt_union(clux_context_t *ctx, node_t *node) {
   node_t *decl = stmt_union_node_get_union_decl(node);
   if (!decl) {
@@ -267,16 +268,16 @@ clux_value_t *exec_stmt_union(clux_context_t *ctx, node_t *node) {
         node_get_location(node),
         "union statement requires a union declaration");
   }
-  size_t decorator_count = stmt_union_node_get_decorator_count(node);
-  if (decorator_count == 0) {
-    return exec_operand(ctx, decl);
-  }
   node_t *name_node = union_node_get_name(decl);
   if (!name_node) {
     return clux_context_create_error_message(
         ctx,
         node_get_location(node),
-        "decorated union declaration requires a name");
+        "union statement requires a named union declaration");
+  }
+  size_t decorator_count = stmt_union_node_get_decorator_count(node);
+  if (decorator_count == 0) {
+    return exec_operand(ctx, decl);
   }
   /* 匿名求值源类型值：不具名——type value 无捕获引用，装饰失败
      直接返回 error，无需回滚声明。 */
