@@ -1998,7 +1998,8 @@ TEST(EngineTest, PtrTypeIsInternedByBase) {
   EXPECT_EQ(vt->index, nullptr);
   EXPECT_EQ(vt->add, nullptr);
   EXPECT_NE(vt->safe_cast, nullptr);
-  EXPECT_EQ(vt->cast, nullptr);
+  /* 显式 as 通道：指针 ↔ 指针一律放行（*void 恢复 / 不相关指针互转） */
+  EXPECT_NE(vt->cast, nullptr);
 
   clux_type_t *ptr_f64 = clux_context_get_ptr_type(
       ctx, clux_context_builtin_type(ctx, CLUX_TYPE_F64));
@@ -2828,49 +2829,59 @@ TEST(EngineTest, DerefThroughVolatilePointer) {
   delete_allocator(&a);
 }
 
-/* ---- opaque：无类型载荷（FFI / 显式类型擦除边界，白皮书 §2.1）---- */
+/* ---- *void：类型擦除边界（C 风格吸收，白皮书 §2.1）----
+   opaque 类型已移除：擦除载荷由 *void 承载。语义规则：
+   - 任意 *T → *void 隐式放行（吸收，handle 不变）；
+   - *void → *T 必须显式 as（指针 ↔ 指针一律放行）；
+   - *void 不可解引用——base void 永不 seal，deref 创建 void 值被
+     完整性门禁拒绝（"cannot create a value of incomplete type"）。 */
 
-TEST(EngineTest, OpaqueLayoutAndNameLookup) {
+TEST(EngineTest, VoidPtrLayoutAndNameLookup) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
-  ASSERT_NE(opaque, nullptr);
-  EXPECT_STREQ(clux_type_get_name(opaque), "opaque");
-  EXPECT_EQ(clux_type_get_size(opaque), sizeof(ptr_handle_t));
-  EXPECT_EQ(clux_type_get_align(opaque), alignof(ptr_handle_t));
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(ctx, void_type);
+  ASSERT_NE(void_ptr, nullptr);
+  EXPECT_STREQ(clux_type_get_name(void_ptr), "*void");
+  EXPECT_EQ(clux_type_get_size(void_ptr), sizeof(ptr_handle_t));
+  EXPECT_EQ(clux_type_get_align(void_ptr), alignof(ptr_handle_t));
+  /* 指针即时定局：构造完成即 seal（定宽不依赖 base 完整） */
+  EXPECT_TRUE(clux_type_is_seal(void_ptr));
 
-  /* 类型名与 identifier 合一：opaque 作为 type value 按名注册进 global */
-  clux_value_t *found = clux_context_lookup(ctx, "opaque", NULL);
-  ASSERT_NE(found, nullptr);
-  EXPECT_EQ(clux_value_get_type(found), clux_context_get_type_type(ctx));
-  void *raw = ptr_to_raw(clux_value_get_data(found), 0);
-  ASSERT_NE(raw, nullptr);
-  EXPECT_EQ(*(clux_type_t **)raw, opaque);
+  /* *void 是派生类型而非内建：同一 base 去重，跨查询返回同一实例 */
+  EXPECT_EQ(clux_context_get_ptr_type(ctx, void_type), void_ptr);
+
+  /* "opaque" 名字已随类型一起移除：按名查找落入未声明错误 */
+  clux_value_t *gone = clux_context_lookup(ctx, "opaque", NULL);
+  ASSERT_NE(gone, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(gone)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(gone), "use of undeclared identifier 'opaque'");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
 
-TEST(EngineTest, OpaqueImplicitFromAnyPointer) {
+TEST(EngineTest, VoidPtrImplicitFromAnyPointer) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
   clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
-  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(ctx, void_type);
   clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
 
   clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
   clux_value_t *p =
       clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
   ASSERT_NE(p, nullptr);
-  clux_value_t *slot = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  clux_value_t *slot = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
   ASSERT_NE(slot, nullptr);
 
-  /* 任何指针隐式转 opaque：assign 经 ptr 的 safe_cast 放行 */
+  /* 任何指针隐式吸收进 *void：assign 经 ptr 的 safe_cast 放行 */
   clux_value_t *assigned = clux_context_assign(ctx, slot, p, NULL);
   EXPECT_EQ(assigned, slot);
-  EXPECT_EQ(clux_value_get_type(slot), opaque);
+  EXPECT_EQ(clux_value_get_type(slot), void_ptr);
 
   /* 显式转回具体指针后 handle 未丢：可解引用读回原值 */
   clux_value_t *back = clux_context_cast(ctx, slot, ptr_i32, NULL);
@@ -2880,16 +2891,24 @@ TEST(EngineTest, OpaqueImplicitFromAnyPointer) {
   ASSERT_NE(read, nullptr);
   EXPECT_EQ(read_i32(read), 10);
 
-  /* const 限定指针同样可隐式擦除 */
+  /* *void 不可解引用：base void 永不 seal，deref 落入完整性门禁 */
+  clux_value_t *bad_deref = clux_context_deref(ctx, slot, NULL);
+  ASSERT_NE(bad_deref, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_deref)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_deref),
+               "cannot create a value of incomplete type 'void'");
+
+  /* const 限定指针同样可隐式吸收 */
   clux_type_t *const_i32 =
       clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
   clux_type_t *ptr_const = clux_context_get_ptr_type(ctx, const_i32);
   clux_value_t *pcx = clux_context_create_ptr(
       ctx, ptr_const, clux_value_get_data(x), NULL, NULL);
-  clux_value_t *slot2 = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  clux_value_t *slot2 = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
   EXPECT_EQ(clux_context_assign(ctx, slot2, pcx, NULL), slot2);
 
-  /* opaque 也可显式转成限定指针（unwrap 分派） */
+  /* *void 也可显式转成限定指针（unwrap 分派） */
   clux_value_t *back_const = clux_context_cast(ctx, slot2, ptr_const, NULL);
   ASSERT_NE(back_const, nullptr);
   EXPECT_EQ(clux_value_get_type(back_const), ptr_const);
@@ -2901,66 +2920,72 @@ TEST(EngineTest, OpaqueImplicitFromAnyPointer) {
   delete_allocator(&a);
 }
 
-TEST(EngineTest, OpaqueCastRejectsNonPointer) {
+TEST(EngineTest, VoidPtrCastRules) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
   clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
-  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *u8_type = clux_context_builtin_type(ctx, CLUX_TYPE_U8);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(ctx, void_type);
   clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+  clux_type_t *ptr_u8 = clux_context_get_ptr_type(ctx, u8_type);
 
   clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
   clux_value_t *p =
       clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
-  clux_value_t *slot = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  clux_value_t *slot = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
   ASSERT_EQ(clux_context_assign(ctx, slot, p, NULL), slot);
 
   /* 显式 as 只放行指针族：转基础类型拒绝 */
   clux_value_t *bad = clux_context_cast(ctx, slot, i32_type, NULL);
   ASSERT_NE(bad, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(bad), "cannot cast 'opaque' to 'i32'");
+  EXPECT_STREQ(error_message_of(bad), "cannot cast '*void' to 'i32'");
 
-  /* 隐式转出拒绝：opaque → *i32 赋值必须显式 as */
+  /* 隐式转出拒绝：*void → *i32 赋值必须显式 as */
   clux_value_t *ptr_slot = clux_context_create_ptr(ctx, ptr_i32, 0, NULL, NULL);
   clux_value_t *bad2 = clux_context_assign(ctx, ptr_slot, slot, NULL);
   ASSERT_NE(bad2, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad2)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(bad2), "cannot safely cast 'opaque' to '*i32'");
+  EXPECT_STREQ(error_message_of(bad2), "cannot safely cast '*void' to '*i32'");
 
   /* 转自身是恒等 */
-  EXPECT_EQ(clux_context_cast(ctx, slot, opaque, NULL), slot);
+  EXPECT_EQ(clux_context_cast(ctx, slot, void_ptr, NULL), slot);
 
-  /* 非 opaque 源经 i32 的 safe_cast 走到 opaque 也不放行：
-     opaque 只从指针族隐式接收 */
+  /* 不相关指针显式互转放行：*i32 as *u8（显式 as 是担责通道） */
+  clux_value_t *cross = clux_context_cast(ctx, p, ptr_u8, NULL);
+  ASSERT_NE(cross, nullptr);
+  EXPECT_EQ(clux_value_get_type(cross), ptr_u8);
+
+  /* 非指针源走到 *void 也不放行：*void 只从指针族隐式吸收 */
   clux_value_t *n = clux_context_create_i32(ctx, 1, NULL, NULL);
   clux_value_t *bad3 = clux_context_assign(ctx, slot, n, NULL);
   ASSERT_NE(bad3, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad3)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(bad3), "cannot safely cast 'i32' to 'opaque'");
+  EXPECT_STREQ(error_message_of(bad3), "cannot safely cast 'i32' to '*void'");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
 
-TEST(EngineTest, OpaqueEqNe) {
+TEST(EngineTest, VoidPtrEqNe) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
-  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(ctx, void_type);
   clux_type_t *ptr_i32 = clux_context_get_ptr_type(
       ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
 
   clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
   clux_value_t *y = clux_context_create_i32(ctx, 2, NULL, NULL);
-  /* opaque 载荷是 ptr_handle_t：须走 create_ptr 把 handle 存进定宽块，
-     直接 create_value 借用 i32 的 4 字节块会越界读 */
-  clux_value_t *ox =
-      clux_context_create_ptr(ctx, opaque, clux_value_get_data(x), NULL, NULL);
-  clux_value_t *ox2 =
-      clux_context_create_ptr(ctx, opaque, clux_value_get_data(x), NULL, NULL);
-  clux_value_t *oy =
-      clux_context_create_ptr(ctx, opaque, clux_value_get_data(y), NULL, NULL);
+  clux_value_t *ox = clux_context_create_ptr(
+      ctx, void_ptr, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *ox2 = clux_context_create_ptr(
+      ctx, void_ptr, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *oy = clux_context_create_ptr(
+      ctx, void_ptr, clux_value_get_data(y), NULL, NULL);
   ASSERT_NE(ox, nullptr);
   ASSERT_NE(ox2, nullptr);
   ASSERT_NE(oy, nullptr);
@@ -2978,17 +3003,22 @@ TEST(EngineTest, OpaqueEqNe) {
   ASSERT_NE(ne2, nullptr);
   EXPECT_EQ(read_bool(ne2), true);
 
-  /* 与指针比较拒绝：opaque 与 *T 不是同一类型 */
+  /* 与具体指针可比较：同为指针族，按 handle 判等（语义对齐 ptr 家族） */
   clux_value_t *p =
       clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
-  clux_value_t *bad = clux_context_binary(ctx, CLUX_OP_EQ, ox, p, NULL);
+  clux_value_t *cross_eq = clux_context_binary(ctx, CLUX_OP_EQ, ox, p, NULL);
+  ASSERT_NE(cross_eq, nullptr);
+  EXPECT_EQ(read_bool(cross_eq), true);
+
+  /* i32 值不是指针族：比较拒绝 */
+  clux_value_t *bad = clux_context_binary(ctx, CLUX_OP_EQ, ox, y, NULL);
   ASSERT_NE(bad, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(bad),
                "operator '==' requires operands of the same type");
 
   /* shadow 比较产出 shadow bool */
-  clux_value_t *shadow = clux_context_create_shadow_value(ctx, opaque);
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, void_ptr);
   clux_value_t *shadow_eq =
       clux_context_binary(ctx, CLUX_OP_EQ, shadow, ox, NULL);
   ASSERT_NE(shadow_eq, nullptr);
@@ -2998,32 +3028,425 @@ TEST(EngineTest, OpaqueEqNe) {
   delete_allocator(&a);
 }
 
-TEST(EngineTest, OpaqueShadowPassthrough) {
+TEST(EngineTest, VoidPtrShadowPassthrough) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
   clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
-  clux_type_t *opaque = clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(ctx, void_type);
   clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
 
-  /* shadow 指针隐式擦除：产出 shadow opaque，assign 静默返回目标 */
+  /* shadow 指针隐式擦除：assign 静默返回目标 */
   clux_value_t *shadow_ptr = clux_context_create_shadow_value(ctx, ptr_i32);
-  clux_value_t *slot = clux_context_create_ptr(ctx, opaque, 0, NULL, NULL);
+  clux_value_t *slot = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
   EXPECT_EQ(clux_context_assign(ctx, slot, shadow_ptr, NULL), slot);
 
-  /* shadow opaque 显式转出：产出目标类型的 shadow */
-  clux_value_t *shadow_opaque = clux_context_create_shadow_value(ctx, opaque);
-  clux_value_t *out = clux_context_cast(ctx, shadow_opaque, ptr_i32, NULL);
+  /* shadow *void 显式转出：产出目标类型的 shadow */
+  clux_value_t *shadow_void_ptr =
+      clux_context_create_shadow_value(ctx, void_ptr);
+  clux_value_t *out = clux_context_cast(ctx, shadow_void_ptr, ptr_i32, NULL);
   ASSERT_NE(out, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(out));
   EXPECT_EQ(clux_value_get_type(out), ptr_i32);
 
-  /* shadow opaque 隐式转出依旧拒绝（shadow 不改变转换合法性） */
+  /* shadow *void 隐式转出依旧拒绝（shadow 不改变转换合法性） */
   clux_value_t *ptr_slot = clux_context_create_ptr(ctx, ptr_i32, 0, NULL, NULL);
-  clux_value_t *bad = clux_context_assign(ctx, ptr_slot, shadow_opaque, NULL);
+  clux_value_t *bad = clux_context_assign(ctx, ptr_slot, shadow_void_ptr, NULL);
   ASSERT_NE(bad, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(bad), "cannot safely cast 'opaque' to '*i32'");
+  EXPECT_STREQ(error_message_of(bad), "cannot safely cast '*void' to '*i32'");
+
+  /* shadow *void 解引用同样落入完整性门禁：编译期静态拒绝 */
+  clux_value_t *bad_deref = clux_context_deref(ctx, shadow_void_ptr, NULL);
+  ASSERT_NE(bad_deref, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_deref)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_deref),
+               "cannot create a value of incomplete type 'void'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: ?*void 边界语义——optional 是独立类型而非指针包装：转换通道
+   （safe_cast/cast）不穿透 optional 壁，?*i32 → ?*void 无隐式通道，
+   ?*void 整体 as 也无通道；#some 边界内做 safe_cast 吸收（v as-if
+   safe_cast T 后提升为 ?T），恢复则发生在离开边界之后（先 #take 再 as）
+   预期: 直连通道报精确错误；边界外链路 #none/#is_none/#some/#take/as 全通 */
+TEST(EngineTest, VoidPtrOptionalWrapChannels) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(ctx, void_type);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+  clux_type_t *opt_void_ptr = clux_context_get_optional_type(ctx, void_ptr);
+  ASSERT_NE(opt_void_ptr, nullptr);
+  EXPECT_STREQ(clux_type_get_name(opt_void_ptr), "?*void");
+
+  clux_value_t *x = clux_context_create_i32(ctx, 30, NULL, NULL);
+  clux_value_t *p =
+      clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
+  ASSERT_NE(p, nullptr);
+
+  /* #some 边界内做 safe_cast 吸收: *i32 直接提升为 ?*void */
+  clux_value_t *some =
+      clux_context_create_optional_some(ctx, void_ptr, p, NULL, NULL);
+  ASSERT_NE(some, nullptr);
+  EXPECT_EQ(clux_value_get_type(some), opt_void_ptr);
+
+  /* 反向不可吸收: *void 载荷进 #some(*i32) 被 safe_cast 拒绝 */
+  clux_value_t *erased = clux_context_safe_cast(ctx, p, void_ptr, NULL);
+  ASSERT_NE(erased, nullptr);
+  EXPECT_EQ(clux_value_get_type(erased), void_ptr);
+  clux_value_t *bad_some =
+      clux_context_create_optional_some(ctx, ptr_i32, erased, NULL, NULL);
+  ASSERT_NE(bad_some, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_some)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_some),
+               "cannot safely cast '*void' to '*i32'");
+
+  /* 边界规则: ?*i32 → ?*void 无隐式通道——转换不穿透 optional 壁 */
+  clux_value_t *some_pi32 =
+      clux_context_create_optional_some(ctx, ptr_i32, p, NULL, NULL);
+  ASSERT_NE(some_pi32, nullptr);
+  clux_value_t *opt_slot =
+      clux_context_create_optional_none(ctx, void_ptr, NULL, NULL);
+  ASSERT_NE(opt_slot, nullptr);
+  clux_value_t *bad_assign =
+      clux_context_assign(ctx, opt_slot, some_pi32, NULL);
+  ASSERT_NE(bad_assign, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_assign)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_assign),
+               "type '?*i32' cannot be safely cast to '?*void'");
+
+  /* #none 字面 + #is_none 判空 */
+  clux_value_t *none_q =
+      clux_context_create_optional_none(ctx, void_ptr, NULL, NULL);
+  ASSERT_NE(none_q, nullptr);
+  EXPECT_EQ(clux_value_get_type(none_q), opt_void_ptr);
+  EXPECT_TRUE(read_bool(clux_context_is_none(ctx, none_q, NULL)));
+  EXPECT_FALSE(read_bool(clux_context_is_none(ctx, some, NULL)));
+
+  /* #take 解包回 *void，显式 as 恢复具体指针，handle 未丢 */
+  clux_value_t *taken = clux_context_take(ctx, some, NULL);
+  ASSERT_NE(taken, nullptr);
+  EXPECT_EQ(clux_value_get_type(taken), void_ptr);
+  clux_value_t *restored = clux_context_cast(ctx, taken, ptr_i32, NULL);
+  ASSERT_NE(restored, nullptr);
+  EXPECT_EQ(clux_value_get_type(restored), ptr_i32);
+  EXPECT_EQ(read_i32(clux_context_deref(ctx, restored, NULL)), 30);
+
+  /* 边界规则: ?*void 整体 as *i32 无通道——解包（#take）后方可行 as */
+  clux_value_t *bad_cast = clux_context_cast(ctx, some, ptr_i32, NULL);
+  ASSERT_NE(bad_cast, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_cast)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_cast),
+               "type '?*void' cannot be cast to '*i32'");
+
+  /* none 的 #take 是运行期错误，消息携带 ?*void 类型名 */
+  clux_value_t *bad_take = clux_context_take(ctx, none_q, NULL);
+  ASSERT_NE(bad_take, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_take)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_take),
+               "cannot take a value from a none optional of type '?*void'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: *const void（指向 const void 的指针）——限定 base 经 kind_unwrap
+   仍是 void，吸收/转出通道放行；限定 void 与 void 同命运永不 seal，
+   deref(*const void) 落回完整性门禁
+   预期: *i32 → *const void 隐式吸收成功；显式转出解引用读回原值；
+         deref(*const void) 产出 error 且消息含 'void' 不完整 */
+TEST(EngineTest, VoidPtrConstVoidBaseSemantics) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(ctx, void_type);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+  clux_type_t *const_void =
+      clux_type_get_qualified_type(void_type, CLUX_TYPE_CONST);
+  clux_type_t *ptr_const_void = clux_context_get_ptr_type(ctx, const_void);
+  ASSERT_NE(ptr_const_void, nullptr);
+  EXPECT_STREQ(clux_type_get_name(ptr_const_void), "*const void");
+
+  clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
+  clux_value_t *p =
+      clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
+  ASSERT_NE(p, nullptr);
+
+  /* 限定 base 不影响吸收: *i32 → *const void 隐式放行 */
+  clux_value_t *slot =
+      clux_context_create_ptr(ctx, ptr_const_void, 0, NULL, NULL);
+  ASSERT_NE(slot, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, slot, p, NULL), slot);
+  EXPECT_EQ(clux_value_get_type(slot), ptr_const_void);
+
+  /* *void 值同样吸收进 *const void */
+  clux_value_t *erased = clux_context_create_ptr(
+      ctx, void_ptr, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *slot2 =
+      clux_context_create_ptr(ctx, ptr_const_void, 0, NULL, NULL);
+  ASSERT_NE(erased, nullptr);
+  ASSERT_NE(slot2, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, slot2, erased, NULL), slot2);
+
+  /* 显式转出解引用读回原值 */
+  clux_value_t *back = clux_context_cast(ctx, slot, ptr_i32, NULL);
+  ASSERT_NE(back, nullptr);
+  EXPECT_EQ(clux_value_get_type(back), ptr_i32);
+  EXPECT_EQ(read_i32(clux_context_deref(ctx, back, NULL)), 10);
+
+  /* deref(*const void) 落入完整性门禁：限定 void 永不 seal，
+     创建 const void 值被拒绝，产出 error 且消息含 'void' */
+  EXPECT_FALSE(clux_type_is_seal(const_void));
+  clux_value_t *const_view = clux_context_deref(ctx, slot, NULL);
+  ASSERT_NE(const_view, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(const_view)),
+            CLUX_TYPE_ERROR);
+
+  /* const 修饰指针本体（const *void）: const 目标不可再赋值 */
+  clux_type_t *const_void_ptr =
+      clux_type_get_qualified_type(void_ptr, CLUX_TYPE_CONST);
+  clux_value_t *frozen =
+      clux_context_create_ptr(ctx, const_void_ptr, 0, NULL, NULL);
+  ASSERT_NE(frozen, nullptr);
+  clux_value_t *frozen_assign = clux_context_assign(ctx, frozen, p, NULL);
+  ASSERT_NE(frozen_assign, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(frozen_assign)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(frozen_assign),
+               "cannot assign to a value of type 'const *void'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 复合 base（slice/array/optional）的指针 → *void 吸收——
+   擦除通道只判目标，任意指针 base 一律放行且 handle 不变
+   预期: 三类复合 base 全部吸收成功，转出后解引用/len/take 读回原值 */
+TEST(EngineTest, VoidPtrCompositeBaseAbsorption) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_VOID));
+  clux_value_t *x = clux_context_create_i32(ctx, 7, NULL, NULL);
+
+  /* slice base: *[]i32 → *void，转出后 len 读回 */
+  clux_type_t *slice_i32 = clux_context_get_slice_type(ctx, i32_type);
+  clux_value_t *s = clux_context_create_slice(
+      ctx, slice_i32, clux_value_get_data(x), 4, NULL, NULL);
+  ASSERT_NE(s, nullptr);
+  clux_type_t *ptr_slice = clux_context_get_ptr_type(ctx, slice_i32);
+  clux_value_t *ps = clux_context_create_ptr(
+      ctx, ptr_slice, clux_value_get_data(s), NULL, NULL);
+  ASSERT_NE(ps, nullptr);
+  clux_value_t *slot1 = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
+  ASSERT_NE(slot1, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, slot1, ps, NULL), slot1);
+  EXPECT_EQ(clux_value_get_type(slot1), void_ptr);
+  clux_value_t *back_s = clux_context_cast(ctx, slot1, ptr_slice, NULL);
+  ASSERT_NE(back_s, nullptr);
+  clux_value_t *view_s = clux_context_deref(ctx, back_s, NULL);
+  ASSERT_NE(view_s, nullptr);
+  EXPECT_EQ(read_usize(clux_context_slice_len(ctx, view_s, NULL)), 4u);
+
+  /* array base: *[2]i32 → *void，转出后类型往返恒等 */
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32_type, 2);
+  clux_value_t *arr = clux_context_create_array(ctx, arr_type, NULL, NULL);
+  ASSERT_NE(arr, nullptr);
+  clux_type_t *ptr_arr = clux_context_get_ptr_type(ctx, arr_type);
+  clux_value_t *pa = clux_context_create_ptr(
+      ctx, ptr_arr, clux_value_get_data(arr), NULL, NULL);
+  ASSERT_NE(pa, nullptr);
+  clux_value_t *slot2 = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
+  ASSERT_NE(slot2, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, slot2, pa, NULL), slot2);
+  clux_value_t *back_a = clux_context_cast(ctx, slot2, ptr_arr, NULL);
+  ASSERT_NE(back_a, nullptr);
+  EXPECT_EQ(clux_value_get_type(back_a), ptr_arr);
+  clux_value_t *view_a = clux_context_deref(ctx, back_a, NULL);
+  ASSERT_NE(view_a, nullptr);
+  EXPECT_EQ(clux_value_get_type(view_a), arr_type);
+
+  /* optional base: *?i32 → *void，转出后 deref + #take 读回载荷 */
+  clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
+  clux_value_t *v5 = clux_context_create_i32(ctx, 5, NULL, NULL);
+  clux_value_t *ov =
+      clux_context_create_optional_some(ctx, i32_type, v5, NULL, NULL);
+  ASSERT_NE(ov, nullptr);
+  clux_type_t *ptr_opt = clux_context_get_ptr_type(ctx, opt_i32);
+  clux_value_t *po = clux_context_create_ptr(
+      ctx, ptr_opt, clux_value_get_data(ov), NULL, NULL);
+  ASSERT_NE(po, nullptr);
+  clux_value_t *slot3 = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
+  ASSERT_NE(slot3, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, slot3, po, NULL), slot3);
+  clux_value_t *back_o = clux_context_cast(ctx, slot3, ptr_opt, NULL);
+  ASSERT_NE(back_o, nullptr);
+  clux_value_t *view_o = clux_context_deref(ctx, back_o, NULL);
+  ASSERT_NE(view_o, nullptr);
+  EXPECT_EQ(read_i32(clux_context_take(ctx, view_o, NULL)), 5);
+
+  /* 双重指针 base: **i32 → *void，指针的指针同样吸收 */
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+  clux_type_t *ptr_ptr_i32 = clux_context_get_ptr_type(ctx, ptr_i32);
+  clux_value_t *pp = clux_context_create_ptr(
+      ctx, ptr_ptr_i32, clux_value_get_data(ps), NULL, NULL);
+  ASSERT_NE(pp, nullptr);
+  clux_value_t *slot4 = clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
+  ASSERT_NE(slot4, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, slot4, pp, NULL), slot4);
+  clux_value_t *back_pp = clux_context_cast(ctx, slot4, ptr_ptr_i32, NULL);
+  ASSERT_NE(back_pp, nullptr);
+  EXPECT_EQ(clux_value_get_type(back_pp), ptr_ptr_i32);
+  clux_value_t *back_inner = clux_context_cast(ctx, back_pp, ptr_i32, NULL);
+  ASSERT_NE(back_inner, nullptr);
+  EXPECT_EQ(clux_value_get_type(back_inner), ptr_i32);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 结构体指针协变与 *void 擦除叠加——*Derived 既可协变 upcast 进
+   *Base（回归保护），也可吸收进 *void；从 *void 恢复时可直接 as *Base
+   预期: 协变隐式通道不受改动影响；*void 恢复的 Base/Derived 视图
+         读到同一实例的字段 */
+TEST(EngineTest, VoidPtrStructCovarianceInterplay) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_VOID));
+
+  /* Base{a,b} ← Derived{a,b,c} 字段前缀兼容 */
+  clux_struct_field_t base_fields[] = {
+      {"a", i32_type},
+      {"b", i32_type},
+  };
+  clux_struct_decl_t base_decl = {base_fields, 2, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *base_type =
+      clux_context_create_struct_type(ctx, "Base", &base_decl);
+  ASSERT_NE(base_type, nullptr);
+  clux_struct_field_t derived_fields[] = {
+      {"a", i32_type},
+      {"b", i32_type},
+      {"c", i32_type},
+  };
+  clux_struct_decl_t derived_decl = {
+      derived_fields, 3, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *derived_type =
+      clux_context_create_struct_type(ctx, "Derived", &derived_decl);
+  ASSERT_NE(derived_type, nullptr);
+
+  clux_type_t *base_ptr_type = clux_context_get_ptr_type(ctx, base_type);
+  clux_type_t *derived_ptr_type = clux_context_get_ptr_type(ctx, derived_type);
+
+  clux_value_t *d = clux_context_create_struct(ctx, derived_type, "d", NULL);
+  ASSERT_NE(d, nullptr);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  clux_value_t *nine = clux_context_create_i32(ctx, 9, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  ASSERT_NE(nine, nullptr);
+  clux_value_t *field_a = clux_context_field(ctx, d, "a", NULL);
+  clux_value_t *field_c = clux_context_field(ctx, d, "c", NULL);
+  ASSERT_NE(field_a, nullptr);
+  ASSERT_NE(field_c, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, field_a, five, NULL), field_a);
+  EXPECT_EQ(clux_context_assign(ctx, field_c, nine, NULL), field_c);
+
+  clux_value_t *d_ptr = clux_context_ref(ctx, d, NULL);
+  ASSERT_NE(d_ptr, nullptr);
+  EXPECT_EQ(clux_value_get_type(d_ptr), derived_ptr_type);
+
+  /* 协变回归保护: *Derived → *Base 隐式 upcast 仍工作 */
+  clux_value_t *base_slot =
+      clux_context_create_ptr(ctx, base_ptr_type, 0, NULL, NULL);
+  ASSERT_NE(base_slot, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, base_slot, d_ptr, NULL), base_slot);
+
+  /* 擦除叠加: *Derived → *void 吸收 */
+  clux_value_t *void_slot =
+      clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
+  ASSERT_NE(void_slot, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, void_slot, d_ptr, NULL), void_slot);
+  EXPECT_EQ(clux_value_get_type(void_slot), void_ptr);
+
+  /* 从 *void 直接 as *Base: Base 视图读到同一实例 */
+  clux_value_t *as_base =
+      clux_context_cast(ctx, void_slot, base_ptr_type, NULL);
+  ASSERT_NE(as_base, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_base), base_ptr_type);
+  EXPECT_EQ(read_i32(clux_context_field(
+                ctx, clux_context_deref(ctx, as_base, NULL), "a", NULL)),
+            5);
+
+  /* 从 *void 直接 as *Derived: 派生字段不丢 */
+  clux_value_t *as_derived =
+      clux_context_cast(ctx, void_slot, derived_ptr_type, NULL);
+  ASSERT_NE(as_derived, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_derived), derived_ptr_type);
+  EXPECT_EQ(read_i32(clux_context_field(
+                ctx, clux_context_deref(ctx, as_derived, NULL), "c", NULL)),
+            9);
+
+  /* *Base 值（协变产物）吸收进 *void 同样放行 */
+  clux_value_t *void_slot2 =
+      clux_context_create_ptr(ctx, void_ptr, 0, NULL, NULL);
+  ASSERT_NE(void_slot2, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, void_slot2, base_slot, NULL), void_slot2);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: *void 相关 cast 通道边界——error 源自传播、恒等转换返回原值、
+   零 handle 指针解引用拒绝
+   预期: safe_cast/cast 对 error 源原样返回不进入分支逻辑；源目标同型
+         直接返回原值；handle 无效的 deref 报带类型名的错误 */
+TEST(EngineTest, VoidPtrCastBoundaryPaths) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_ptr = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_VOID));
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+
+  /* error 源在转换入口原样传播（safe_cast 与 cast 两个通道） */
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
+  ASSERT_NE(err, nullptr);
+  EXPECT_EQ(clux_context_safe_cast(ctx, err, void_ptr, NULL), err);
+  EXPECT_EQ(clux_context_cast(ctx, err, ptr_i32, NULL), err);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *p =
+      clux_context_create_ptr(ctx, ptr_i32, clux_value_get_data(x), NULL, NULL);
+  ASSERT_NE(p, nullptr);
+
+  /* 同型转换是恒等：直接返回原值（不走位重建） */
+  EXPECT_EQ(clux_context_safe_cast(ctx, p, ptr_i32, NULL), p);
+  EXPECT_EQ(clux_context_cast(ctx, p, ptr_i32, NULL), p);
+
+  /* 零 handle 指针 deref 拒绝，消息携带指针类型名 */
+  clux_value_t *null_ptr = clux_context_create_ptr(ctx, ptr_i32, 0, NULL, NULL);
+  ASSERT_NE(null_ptr, nullptr);
+  clux_value_t *bad_deref = clux_context_deref(ctx, null_ptr, NULL);
+  ASSERT_NE(bad_deref, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_deref)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_deref),
+               "cannot dereference a value of type '*i32'");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -4252,13 +4675,13 @@ TEST(EngineTest, OptionalConstructionAndAssign) {
   EXPECT_FALSE(read_bool(clux_context_is_none(ctx, some, NULL)));
   EXPECT_EQ(read_i32(clux_context_take(ctx, some, NULL)), 7);
 
-  /* #some 的 value 类型自检 */
+  /* #some 的载荷 safe_cast 自检：i64 → i32 窄化拒绝 */
   clux_value_t *bad_some = clux_context_create_optional_some(
       ctx, i32_type, clux_context_create_i64(ctx, 1, NULL, NULL), NULL, NULL);
   ASSERT_NE(bad_some, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_some)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(bad_some),
-               "#some requires a value of type 'i32', got 'i64'");
+               "cannot safely cast 'i64' to 'i32': narrowing conversion");
 
   /* 同类型 optional 赋值：整体拷贝（含 present 标志） */
   EXPECT_EQ(clux_context_assign(ctx, opt, some, NULL), opt);
@@ -7476,7 +7899,7 @@ TEST(EngineTest, VoidNeverSealsRejectsValueCreation) {
   delete_allocator(&a);
 }
 
-/* 场景: 内建类型全部创建即 seal——数值/str/opaque/type/模板单例与
+/* 场景: 内建类型全部创建即 seal——数值/str/type/模板单例与
    error 类型经各自通道断言；return_signal 类型经信号值反查
    预期: 所有内建类型 is_seal=true */
 TEST(EngineTest, BuiltinTypesSealedOnCreation) {
@@ -7491,8 +7914,6 @@ TEST(EngineTest, BuiltinTypesSealedOnCreation) {
   EXPECT_TRUE(
       clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_BOOL)));
   EXPECT_TRUE(clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_STR)));
-  EXPECT_TRUE(
-      clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE)));
   /* PTR 不是 builtin_type 的标量分支（无 case 返回 NULL），指针类型经
      get_ptr_type 复合构造，seal 断言由 CompositeTypesSealOnConstruction 与
      PtrOverVoidSealedAndValueCreatable 覆盖。 */

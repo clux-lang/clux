@@ -24,7 +24,6 @@
 #include "engine/floating.h"
 #include "engine/func.h"
 #include "engine/optional.h"
-#include "engine/opaque.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
 #include "engine/slice.h"
@@ -71,7 +70,6 @@ struct _clux_context_t {
     clux_type_t *type_type;
     clux_type_t *type_type_template;
     clux_type_t *type_void;
-    clux_type_t *type_opaque;
     clux_type_t *type_func_template;
     clux_type_t *type_return_signal;
   } builtin_types;
@@ -228,13 +226,6 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                             get_clux_func_template_vtable());
   ctx->builtin_types.type_void = create_clux_type(
       allocator, CLUX_TYPE_VOID, "void", 0, 1, get_clux_void_vtable());
-  ctx->builtin_types.type_opaque =
-      create_sealed_builtin(allocator,
-                            CLUX_TYPE_OPAQUE,
-                            "opaque",
-                            sizeof(ptr_handle_t),
-                            alignof(ptr_handle_t),
-                            get_clux_opaque_vtable());
   /* return signal：引擎级控制值，载荷为返回值借用指针。vtable 全空
      （无运算、无成员），仅在调用边界构造/判定/取载荷后即消费。 */
   ctx->builtin_types.type_return_signal =
@@ -264,7 +255,6 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
       CLUX_TYPE_BOOL,
       CLUX_TYPE_STR,
       CLUX_TYPE_VOID,
-      CLUX_TYPE_OPAQUE,
   };
   for (size_t idx = 0; idx < sizeof(named_kinds) / sizeof(named_kinds[0]);
        idx++) {
@@ -314,7 +304,6 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_i8);
   delete_clux_type(&ctx->builtin_types.type_error);
   delete_clux_type(&ctx->builtin_types.type_void);
-  delete_clux_type(&ctx->builtin_types.type_opaque);
   delete_clux_type(&ctx->builtin_types.type_return_signal);
   delete_vec(&ctx->errors);
   rbtree_foreach(ctx->strs, (rbtree_callback_t)strs_dispose, ctx->allocator);
@@ -679,8 +668,9 @@ clux_type_t *clux_context_get_optional_type(clux_context_t *self,
   (void)self;
   return base ? clux_type_get_optional_type(base) : NULL;
 }
-/* #some(T, v) -> ?T{v}：T 是载荷类型，内部提升为 ?T。
-   value 类型须与 T 语义相等，不满足时返回语义化 error。 */
+/* #some(T, v) -> ?T{v}：T 是载荷类型，内部提升为 ?T。载荷经 safe_cast
+   通道吸收到 T（如 *i32 → *void 擦除吸收、协变 extends），不可吸收时
+   透传其语义化 error——optional 不引入独立的类型检验规则。 */
 clux_value_t *clux_context_create_optional_some(clux_context_t *self,
                                                 clux_type_t *base,
                                                 clux_value_t *value,
@@ -690,25 +680,17 @@ clux_value_t *clux_context_create_optional_some(clux_context_t *self,
     return clux_context_create_error_message(
         self, loc, "#some requires a type and a value");
   }
-  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
-    return value;
-  }
-  if (!clux_type_equal(base, clux_value_get_type(value))) {
-    const char *base_name = clux_type_get_name(base);
-    const char *value_name = clux_type_get_name(clux_value_get_type(value));
-    return clux_context_create_error_message(
-        self,
-        loc,
-        "#some requires a value of type '%s', got '%s'",
-        base_name ? base_name : "<unknown>",
-        value_name ? value_name : "<unknown>");
+  clux_value_t *payload = clux_context_safe_cast(self, value, base, loc);
+  if (!payload ||
+      clux_type_get_kind(clux_value_get_type(payload)) == CLUX_TYPE_ERROR) {
+    return payload;
   }
   clux_type_t *type = clux_type_get_optional_type(base);
   size_t size = clux_type_get_size(type);
   ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
   memset(ptr_to_raw(data, 0), 0, size);
   *(bool *)ptr_to_raw(data, 0) = true;
-  void *src = ptr_to_raw(clux_value_get_data(value), 0);
+  void *src = ptr_to_raw(clux_value_get_data(payload), 0);
   void *dst = ptr_to_raw(data, clux_optional_payload_offset(base));
   if (src && dst) {
     (void)memcpy(dst, src, clux_type_get_size(base));
@@ -2134,8 +2116,6 @@ clux_type_t *clux_context_builtin_type(clux_context_t *ctx,
     return ctx->builtin_types.type_str;
   case CLUX_TYPE_VOID:
     return ctx->builtin_types.type_void;
-  case CLUX_TYPE_OPAQUE:
-    return ctx->builtin_types.type_opaque;
   case CLUX_TYPE_TYPE:
     return ctx->builtin_types.type_type;
   case CLUX_TYPE_TYPE_TEMPLATE:

@@ -2771,7 +2771,7 @@ TEST(StmtExternDeclTest, BasicExternCfunc) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *node =
-      parse_stmt(a, &p, "extern cfunc libc::malloc(size: usize): opaque;");
+      parse_stmt(a, &p, "extern cfunc libc::malloc(size: usize): *void;");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_CFUNC);
   EXPECT_EQ(vec_get_size(node_get_children(node)),

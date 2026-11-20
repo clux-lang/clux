@@ -48,7 +48,7 @@ undefined union     var       volatile  while
 using
 ```
 
-内建类型名（`bool`、`str`、`void`、`opaque`、`i8`..`i64`、`u8`..`u64`、
+内建类型名（`bool`、`str`、`void`、`i8`..`i64`、`u8`..`u64`、
 `isize`、`usize`、`f32`、`f64`）不是关键字——与 identifier 合一（§2.1），
 词法层按普通标识符产出，类型经作用域查找到 global 注册的 type value。
 这只是底层机制上的统一处理：sema 阶段仍会拒绝对这些类型的遮蔽，

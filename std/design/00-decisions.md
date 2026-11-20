@@ -22,12 +22,12 @@
 | D-B7 | 分配器**不用 vtable**：显式持有函数指针（+ 状态指针 `ctx`） | [需求] |
 | D-C5 | 容器内嵌 `Allocator` 字段可以接受（每容器 +16~24 字节） | [需求] |
 | D-B8 | 分配器用**基类 + 显式函数指针**（模式 A）：`Allocator{_alloc,_free}`，`self` 即上下文，**不要 ctx**；具体分配器 `...Allocator;` 继承并在 `new()` 里填指针 | [需求] |
-| D-B9 | 无类型内存用 `opaque` / `?opaque`（不用 `*u8`）：分配器/回调整理层不解释字节 | [需求] |
+| D-B9 | 无类型内存用 `*void` / `?*void`（不用 `*u8`）：分配器/回调整理层不解释字节 | [需求] |
 | D-C2 | `Map` 当前用**有序映射**；API 按"换 HashMap 零调用点改动"的契约写 | [需求] |
 | D-B5a | `Arena.chunk` 默认 **64 KiB** | [需求] |
 | D-C6 | `Map.get` / `Vec.at` 返回**借用指针**（`?*V` / `*T`），修改后失效 | [需求] |
 | D-C7 | `Vec`/`Map` 初始容量 **8**、增长**翻倍** | [需求] |
-| D-E3 | `fmt.Writer` = `{ ctx: opaque, write: func(ctx, []u8) -> void }` 能力值（与 `Allocator` 同构） | [需求] |
+| D-E3 | `fmt.Writer` = `{ ctx: *void, write: func(ctx, []u8) -> void }` 能力值（与 `Allocator` 同构） | [需求] |
 | D-C8 | **暂不引入** `std::iter`：`foreach` 已支持切片与实现 `__len__`/`__index__` 的类型 | [需求] |
 
 ---
@@ -75,9 +75,9 @@
 
 ```clux
 struct Allocator {
-    ctx: opaque,                                             // 状态指针（libc 填 nil）
-    alloc: func(ctx: opaque, size: usize, align: usize) -> opaque,  // 0 = 失败
-    free:  func(ctx: opaque, ptr: opaque) -> void,           // free(nil) = no-op
+    ctx: *void,                                             // 状态指针（libc 填 nil）
+    alloc: func(ctx: *void, size: usize, align: usize) -> *void,  // 0 = 失败
+    free:  func(ctx: *void, ptr: *void) -> void,           // free(nil) = no-op
 }
 ```
 
@@ -85,7 +85,7 @@ struct Allocator {
 `ctx` 是必要的——Arena/统计分配器有状态，纯函数指针无法携带；libc 分配器把 `ctx` 设为 `nil`。
 `alloc` 带 `align`（Arena/SIMD 需要），`free` 不带 size/align（需要记账的分配器在块头存元数据）。
 详细设计见 [`01-mem.md`](01-mem.md)。
-- `Allocator` 是**值类型**：`struct Allocator { vtable: *AllocatorVTable; data: opaque; }`（可拷贝）。
+- `Allocator` 是**值类型**：`struct Allocator { vtable: *AllocatorVTable; data: *void; }`（可拷贝）。
 - 所有会分配的 API 都要求传入：`Vec[i32].new(alloc)`、`String.new(alloc)`、`Map[K,V].new(alloc)`。
 - 容器把 `Allocator` **存成字段**（自身不拥有分配器，分配器生命周期由调用方保证）。
 - 不提供"默认堆分配器"的隐式回退；需要堆就显式写 `std::mem.heap()`（返回一个 `Allocator` 值），由调用方决定是否复用它。
@@ -150,7 +150,7 @@ struct Allocator {
 `sys` 暴露原始返回值 + `sys.errno()`；`std::io` 包成 `?T` 并把 errno 映射为 `tag union Error`。
 
 ## D-D4 句柄 —— 暂定
-外部不透明句柄包进 `struct`（如 `File { handle: opaque; }`）并实现 `__dispose__`；不对外暴露裸 `opaque` 字段。
+外部不透明句柄包进 `struct`（如 `File { handle: *void; }`）并实现 `__dispose__`；不对外暴露裸 `*void` 字段。
 
 ## D-D5 回调 —— 暂定
 需要时用 `cfunc` 函数类型 + 显式 `env` 参数；S0–S4 不需要。

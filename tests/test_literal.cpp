@@ -602,7 +602,6 @@ TEST(LiteralTest, NoLeakAcrossAllReaders) {
                            "'c'",
                            "true",
                            "i32",
-                           "opaque",
                            "123i32",
                            "foo",
                            nullptr};
@@ -784,7 +783,6 @@ TEST(LiteralDispatchTest, AttachesParent) {
 static const char *kTypeNames[] = {"bool",
                                    "str",
                                    "void",
-                                   "opaque",
                                    "i8",
                                    "i16",
                                    "i32",

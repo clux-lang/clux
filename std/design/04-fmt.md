@@ -18,13 +18,13 @@
 namespace std::fmt
 
 struct Writer {
-    ctx: opaque,
-    write: func(ctx: opaque, data: []u8) -> void,
+    ctx: *void,
+    write: func(ctx: *void, data: []u8) -> void,
     /* 写入失败由 sink 记录；Display 实现不返回错误，避免每个实现都处理 ? */
     failed: bool,
 }
 
-func Writer.new(ctx: opaque, write: func(opaque, []u8) -> void) -> Writer
+func Writer.new(ctx: *void, write: func(*void, []u8) -> void) -> Writer
 func (w: *Writer) write_bytes(self: *Writer, data: []u8): void
 func (w: *Writer) write_str(self: *Writer, s: str): void          /* 原样写字节，不转义 */
 func (w: *Writer) write_byte(self: *Writer, b: u8): void

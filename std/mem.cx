@@ -6,28 +6,28 @@
  */
 
 extern lib libc from "*";
-extern cfunc libc::malloc(n: usize): opaque;
-extern cfunc libc::free(p: opaque): void;
+extern cfunc libc::malloc(n: usize): *void;
+extern cfunc libc::free(p: *void): void;
 
 /* ------------------------------------------------------------------ */
 /* Allocator（基类）                                                    */
 /* ------------------------------------------------------------------ */
 
 export struct Allocator {
-    _alloc: func(*Allocator, usize, usize) -> ?opaque;
-    _free: func(*Allocator, opaque) -> void;
+    _alloc: func(*Allocator, usize, usize) -> ?*void;
+    _free: func(*Allocator, *void) -> void;
 
     /* 分配 size 字节、按 align 对齐；size == 0 或失败返回 nil。 */
-    func alloc(self: *Allocator, size: usize, align: usize): ?opaque {
+    func alloc(self: *Allocator, size: usize, align: usize): ?*void {
         if (size == 0usize) {
-            var none: ?opaque = nil;
+            var none: ?*void = nil;
             return none;
         }
         return self._alloc(self, size, align);
     }
 
     /* 释放；ptr 必须来自同一分配器。 */
-    func free(self: *Allocator, ptr: opaque): void {
+    func free(self: *Allocator, ptr: *void): void {
         self._free(self, ptr);
     }
 }
@@ -54,17 +54,17 @@ export func align_up(n: usize, align: usize): usize {
 export struct HeapAllocator {
     ...Allocator;
 
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
-        var raw: opaque = libc::malloc(size);
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*void {
+        var raw: *void = libc::malloc(size);
         if (raw as usize == 0usize) {
-            var none: ?opaque = nil;
+            var none: ?*void = nil;
             return none;
         }
         return raw as *u8;
     }
 
-    func do_free(self: *Allocator, ptr: opaque): void {
-        libc::free(ptr as opaque);
+    func do_free(self: *Allocator, ptr: *void): void {
+        libc::free(ptr as *void);
     }
 
     func new(): HeapAllocator {
@@ -79,12 +79,12 @@ export struct HeapAllocator {
 export struct NullAllocator {
     ...Allocator;
 
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
-        var none: ?opaque = nil;
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*void {
+        var none: ?*void = nil;
         return none;
     }
 
-    func do_free(self: *Allocator, ptr: opaque): void {}
+    func do_free(self: *Allocator, ptr: *void): void {}
 
     func new(): NullAllocator {
         return .NullAllocator{
@@ -132,11 +132,11 @@ export struct Arena {
         if (want < need) {
             want = need;
         }
-        var hp: ?opaque = self.backing.alloc(#sizeof(ArenaChunk), #alignof(ArenaChunk));
+        var hp: ?*void = self.backing.alloc(#sizeof(ArenaChunk), #alignof(ArenaChunk));
         if (hp == nil) {
             return false;
         }
-        var bp: ?opaque = self.backing.alloc(want, 16usize);
+        var bp: ?*void = self.backing.alloc(want, 16usize);
         if (bp == nil) {
             self.backing.free(hp.!);
             return false;
@@ -152,18 +152,18 @@ export struct Arena {
         return true;
     }
 
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*void {
         var a: *Arena = self as *Arena;
         if (a.cur == nil) {
             if (!a.new_chunk(align_up(size, 16usize))) {
-                var none: ?opaque = nil;
+                var none: ?*void = nil;
                 return none;
             }
         }
         var off: usize = align_up(a.used, align);
         if (off + size > a.cur_size) {
             if (!a.new_chunk(align_up(size, 16usize))) {
-                var none: ?opaque = nil;
+                var none: ?*void = nil;
                 return none;
             }
             off = 0usize;
@@ -174,7 +174,7 @@ export struct Arena {
         return view[off].&;
     }
 
-    func do_free(self: *Allocator, ptr: opaque): void {
+    func do_free(self: *Allocator, ptr: *void): void {
     /* 整块释放：单次 free 是 no-op。 */
 }
 
@@ -182,8 +182,8 @@ export struct Arena {
         var c: ?*ArenaChunk = self.head;
         while (c != nil) {
             var nxt: ?*ArenaChunk = c.!.next;
-            self.backing.free(c.!.payload as opaque);
-            self.backing.free(c.! as opaque);
+            self.backing.free(c.!.payload as *void);
+            self.backing.free(c.! as *void);
             c = nxt;
         }
         self.head = nil;
@@ -203,7 +203,7 @@ export struct Arena {
 
 test "mem.heapAllocFree" {
     var h: HeapAllocator = HeapAllocator::new();
-    var p: ?opaque = h.alloc(32usize, 8usize);
+    var p: ?*void = h.alloc(32usize, 8usize);
     assert(p != nil);
     var b: []u8 = #slice(p.! as *u8, 32usize);
     b[0] = 7 as u8;
@@ -213,13 +213,13 @@ test "mem.heapAllocFree" {
 
 test "mem.zeroSize" {
     var h: HeapAllocator = HeapAllocator::new();
-    var p: ?opaque = h.alloc(0usize, 8usize);
+    var p: ?*void = h.alloc(0usize, 8usize);
     assert(p == nil);
 }
 
 test "mem.nullAllocatorFails" {
     var n: NullAllocator = NullAllocator::new();
-    var p: ?opaque = n.alloc(16usize, 8usize);
+    var p: ?*void = n.alloc(16usize, 8usize);
     assert(p == nil);
 }
 
@@ -235,8 +235,8 @@ test "mem.arenaBump" {
     var h: HeapAllocator = HeapAllocator::new();
     var ar: Arena = Arena::new(h.& as *Allocator, 256usize);
 
-    var p1: ?opaque = ar.alloc(16usize, 8usize);
-    var p2: ?opaque = ar.alloc(16usize, 8usize);
+    var p1: ?*void = ar.alloc(16usize, 8usize);
+    var p2: ?*void = ar.alloc(16usize, 8usize);
     assert(p1 != nil);
     assert(p2 != nil);
     assert(p1.! != p2.!);
@@ -249,7 +249,7 @@ test "mem.arenaBump" {
     assert(b2[0] == 2 as u8);
 
     ar.reset();
-    var p3: ?opaque = ar.alloc(16usize, 8usize);
+    var p3: ?*void = ar.alloc(16usize, 8usize);
     assert(p3 != nil);
     ar.__dispose__();
 }
@@ -259,7 +259,7 @@ test "mem.arenaGrow" {
     var ar: Arena = Arena::new(h.& as *Allocator, 64usize);
     var i: usize = 0usize;
     while (i < 40usize) {
-        var p: ?opaque = ar.alloc(32usize, 8usize);
+        var p: ?*void = ar.alloc(32usize, 8usize);
         assert(p != nil);
         var bv: []u8 = #slice(p.! as *u8, 32usize);
         bv[0] = i as u8;

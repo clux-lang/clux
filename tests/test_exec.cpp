@@ -724,17 +724,15 @@ TEST_F(ExecLiteralTest, IdentifierBuiltinIntegerName) {
   delete_node(&node);
 }
 
-/* 场景: 内建类型名 "opaque"
-   预期: 同上，data 指向 opaque 内建类型 */
-TEST_F(ExecLiteralTest, IdentifierBuiltinOpaqueName) {
+/* 场景: opaque 类型已移除，"opaque" 不再是内建类型名
+   预期: 返回 error 值——类型擦除边界改由 *void 复合类型承载 */
+TEST_F(ExecLiteralTest, IdentifierOpaqueNameRemoved) {
   node_t *node = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "opaque");
   clux_value_t *value = exec_literal_identifier(ctx, node);
   ASSERT_NE(value, nullptr);
-  EXPECT_EQ(clux_value_get_type(value), clux_context_get_type_type(ctx));
-  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
-  ASSERT_NE(raw, nullptr);
-  EXPECT_EQ(*(clux_type_t **)raw,
-            clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE));
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value),
+               "use of undeclared identifier 'opaque'");
   delete_node(&node);
 }
 
@@ -8299,4 +8297,124 @@ TEST_F(ExecLiteralTest, VarVoidAnnotationIncompleteRejected) {
             clux_context_builtin_type(ctx, CLUX_TYPE_I32));
   EXPECT_TRUE(clux_value_is_tdz(tdz));
   delete_node(&good);
+}
+
+/* ---- *void 类型擦除边界（exec e2e） ---- */
+
+/* 场景: var pv: *void = undefined——类型标注是 * void 前缀类型节点
+   预期: 标注通道消费前缀节点产出 *void（seal 完整），创建 TDZ 变量；
+         对照裸 void 标注被完整性门禁拒绝（见上方用例） */
+TEST_F(ExecLiteralTest, VarVoidPtrAnnotationCreatesVoidPtrTdz) {
+  node_t *type_node =
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "void"));
+  node_t *var_node = create_stmt_var_node(a);
+  stmt_var_node_set_keyword(var_node, make_node(CLUX_NODE_SYMBOL, "var"));
+  stmt_var_node_set_name(var_node,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pvz"));
+  stmt_var_node_set_type(var_node, type_node);
+  stmt_var_node_set_value(
+      var_node, make_node(CLUX_NODE_LITERAL_UNDEFINED, kUndefinedText));
+  clux_value_t *result = exec_stmt_var(ctx, var_node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result))
+      << "*void is sealed (ptr layout is immediate), TDZ creation must pass";
+  EXPECT_EQ(clux_value_get_type(result),
+            clux_context_get_ptr_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_VOID)));
+  EXPECT_STREQ(clux_type_get_name(clux_value_get_type(result)), "*void");
+  EXPECT_TRUE(clux_value_is_tdz(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "pvz", NULL), result);
+  delete_node(&var_node);
+}
+
+/* 场景: exec e2e *void 显式恢复——vpv as *i32 转出具体指针；
+   对照 vpv as i32 落入指针族拒绝
+   预期: as *i32 产出 *i32 且解引用读回原值；as i32 报
+         "cannot cast '*void' to 'i32'"（ptr_cast 指针↔非指针拒绝） */
+TEST_F(ExecLiteralTest, VoidPtrExplicitAsRecoversTypedPointer) {
+  clux_type_t *void_ptr = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_VOID));
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  clux_value_t *x = clux_context_create_i32(ctx, 21, "wpx", NULL);
+  ASSERT_NE(x, nullptr);
+  clux_value_t *vpv = clux_context_create_ptr(
+      ctx, void_ptr, clux_value_get_data(x), "vpv", NULL);
+  ASSERT_NE(vpv, nullptr);
+
+  /* 显式 as 恢复: 右操作数是 *i32 前缀类型节点 */
+  node_t *recover = make_binary_of(
+      a,
+      make_node(CLUX_NODE_LITERAL_IDENTIFIER, "vpv"),
+      make_node(CLUX_NODE_SYMBOL, "as"),
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *typed = exec_expr_binary(ctx, recover);
+  ASSERT_NE(typed, nullptr);
+  EXPECT_EQ(clux_value_get_type(typed), ptr_i32);
+  clux_value_t *view = clux_context_deref(ctx, typed, NULL);
+  ASSERT_NE(view, nullptr);
+  EXPECT_EQ(read_i32(view), 21) << "recover must keep the original handle";
+  delete_node(&recover);
+
+  /* as 非指针类型拒绝: 指针↔非指针无转换通道 */
+  node_t *bad = make_binary_of(a,
+                               make_node(CLUX_NODE_LITERAL_IDENTIFIER, "vpv"),
+                               make_node(CLUX_NODE_SYMBOL, "as"),
+                               make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *bad_result = exec_expr_binary(ctx, bad);
+  ASSERT_NE(bad_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_result),
+               "cannot cast '*void' to 'i32'");
+  delete_node(&bad);
+}
+
+/* 场景: exec e2e assign 通道——*i32 值隐式吸收进 *void 变量放行；
+   反向 *void 值隐式写回 *i32 变量被拒
+   预期: 正向 result 是目标本身且类型变为 *void；反向报
+         "cannot safely cast '*void' to '*i32'"（隐式转出必须显式 as） */
+TEST_F(ExecLiteralTest, VoidPtrAssignAbsorbsInAndRejectsImplicitOut) {
+  clux_type_t *void_ptr = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_VOID));
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  clux_value_t *x = clux_context_create_i32(ctx, 7, "vqx", NULL);
+  ASSERT_NE(x, nullptr);
+  clux_value_t *vpi = clux_context_create_ptr(
+      ctx, ptr_i32, clux_value_get_data(x), "vpi", NULL);
+  ASSERT_NE(vpi, nullptr);
+  clux_value_t *vpw = clux_context_create_ptr(ctx, void_ptr, 0, "vpw", NULL);
+  ASSERT_NE(vpw, nullptr);
+  clux_value_t *vpd = clux_context_create_ptr(ctx, void_ptr, 0, "vpd", NULL);
+  ASSERT_NE(vpd, nullptr);
+
+  /* 正向: *i32 → *void 变量隐式吸收（safe_cast ptr_base_is_void 分支） */
+  node_t *absorb =
+      make_assign(CLUX_NODE_LITERAL_IDENTIFIER, "=", "vpw", "vpi");
+  clux_value_t *absorbed = exec_expr_assign(ctx, absorb);
+  ASSERT_NE(absorbed, nullptr);
+  EXPECT_EQ(absorbed, vpw) << "absorb must return the target identity";
+  EXPECT_EQ(clux_value_get_type(vpw), void_ptr);
+  delete_node(&absorb);
+
+  /* 反向: *void → *i32 变量隐式写回拒绝 */
+  node_t *leak =
+      make_assign(CLUX_NODE_LITERAL_IDENTIFIER, "=", "vqi_slot", "vpd");
+  clux_value_t *vqi_slot =
+      clux_context_create_ptr(ctx, ptr_i32, 0, "vqi_slot", NULL);
+  ASSERT_NE(vqi_slot, nullptr);
+  clux_value_t *rejected = exec_expr_assign(ctx, leak);
+  ASSERT_NE(rejected, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rejected)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(rejected),
+               "cannot safely cast '*void' to '*i32'");
+  delete_node(&leak);
 }

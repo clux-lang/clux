@@ -95,8 +95,8 @@ C 源文件（含最小运行时支持）
 
 ```clux
 tag union Type {
-    Prim(kind: PrimKind, bits: u16)        // i8..i64/u8..u64/usize/isize/f32/f64/bool/void/opaque/str
-    Ptr(to: TypeId, quals: Quals)          // *T / *const T
+    Prim(kind: PrimKind, bits: u16)        // i8..i64/u8..u64/usize/isize/f32/f64/bool/void/str
+    Ptr(to: TypeId, quals: Quals)          // *T / *const T；*void 为擦除边界
     Slice(elem: TypeId)                    // []T
     Array(elem: TypeId, n: u64)            // [N]T
     Option(inner: TypeId)                  // ?T

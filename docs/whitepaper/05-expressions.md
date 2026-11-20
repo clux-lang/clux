@@ -195,8 +195,8 @@ var u = .User{ ...base, .age = 2 };
 ```clux
 // 堆分配通过 FFI 完成：
 extern lib libc from "*";
-extern cfunc libc::malloc(size: usize): opaque;
-var raw: opaque = libc::malloc(16);
+extern cfunc libc::malloc(size: usize): *void;
+var raw: *void = libc::malloc(16);
 var p: *User = raw as *User;
 
 // #slice 把“已有指针 + 长度”包成切片视图，不分配：

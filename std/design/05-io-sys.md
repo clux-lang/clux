@@ -23,22 +23,22 @@ std::sys  唯一允许 extern 的模块：libc 文件/进程/时间；错误码�
 namespace std::sys
 
 /* 内存：供 mem.heap() 封装 */
-func malloc(size: usize) -> opaque          /* 0 = 失败 */
-func free(ptr: opaque): void
+func malloc(size: usize) -> *void          /* 0 = 失败 */
+func free(ptr: *void): void
 
 /* 文件 */
-func open_read(path: CStr) -> opaque        /* 返回句柄；0 = 失败 */
-func open_write(path: CStr, truncate: bool) -> opaque
-func open_append(path: CStr) -> opaque
-func read(handle: opaque, buf: *u8, len: usize) -> isize    /* <0 = 错误；0 = EOF */
-func write(handle: opaque, buf: *u8, len: usize) -> isize
-func seek(handle: opaque, offset: i64, whence: u8) -> ?u64  /* whence: 0=set 1=cur 2=end */
-func close(handle: opaque): void
+func open_read(path: CStr) -> *void        /* 返回句柄；0 = 失败 */
+func open_write(path: CStr, truncate: bool) -> *void
+func open_append(path: CStr) -> *void
+func read(handle: *void, buf: *u8, len: usize) -> isize    /* <0 = 错误；0 = EOF */
+func write(handle: *void, buf: *u8, len: usize) -> isize
+func seek(handle: *void, offset: i64, whence: u8) -> ?u64  /* whence: 0=set 1=cur 2=end */
+func close(handle: *void): void
 
 /* 标准流 */
-func stdout_handle() -> opaque
-func stderr_handle() -> opaque
-func stdin_handle() -> opaque
+func stdout_handle() -> *void
+func stderr_handle() -> *void
+func stdin_handle() -> *void
 
 /* 错误 */
 func errno() -> i32
@@ -74,7 +74,7 @@ tag union Error {
 }
 
 struct File {
-    handle: opaque,
+    handle: *void,
     alloc: mem.Allocator,
     closed: bool,
 }

@@ -21,14 +21,14 @@
 ```clux
 /* 分配器是**基类**：`self` 就是上下文，不另设 ctx 字段。 */
 export struct Allocator {
-    _alloc: func(*Allocator, usize, usize) -> ?opaque;
-    _free: func(*Allocator, opaque) -> void;
+    _alloc: func(*Allocator, usize, usize) -> ?*void;
+    _free: func(*Allocator, *void) -> void;
 
-    func alloc(self: *Allocator, size: usize, align: usize): ?opaque {
-        if (size == 0usize) { return .?opaque{nil}; }
+    func alloc(self: *Allocator, size: usize, align: usize): ?*void {
+        if (size == 0usize) { return .?*void{nil}; }
         return self._alloc(self, size, align);
     }
-    func free(self: *Allocator, ptr: opaque): void {
+    func free(self: *Allocator, ptr: *void): void {
         self._free(self, ptr);
     }
 }
@@ -40,8 +40,8 @@ export struct Allocator {
 ```clux
 export struct HeapAllocator {
     ...Allocator;
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque { ... }
-    func do_free(self: *Allocator, ptr: opaque): void { ... }
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*void { ... }
+    func do_free(self: *Allocator, ptr: *void): void { ... }
     func new(): HeapAllocator {
         return .HeapAllocator{
             ._alloc = HeapAllocator::do_alloc,
@@ -51,7 +51,7 @@ export struct HeapAllocator {
 }
 ```
 
-**无类型内存用 `opaque` / `?opaque`**（不是 `*u8`）：分配器不解释字节，调用方按需 `as *T`；`?opaque` 在字段 / 返回值 / `nil` 比较 / `.!` 解包上均可用。
+**无类型内存用 `*void` / `?*void`**（不是 `*u8`）：分配器不解释字节，调用方按需 `as *T`；`?*void` 在字段 / 返回值 / `nil` 比较 / `.!` 解包上均可用。
 
 **为什么没有 vtable 结构**：只有两个函数指针字段，没有"按类型查表"的分派层；
 调用 `a.alloc(s, n)` 不过是 `self._alloc(self, s, n)`。
@@ -79,10 +79,10 @@ func null() -> Allocator                    /* 全零：任何分配都失败（
 struct Arena {
     backing: Allocator,
     chunk: usize,
-    cur: opaque,          /* 当前块起点 */
+    cur: *void,          /* 当前块起点 */
     cur_size: usize,      /* 当前块大小 */
     used: usize,          /* 当前块已用 */
-    cur_free: func(ctx: opaque, ptr: opaque) -> void,  /* 见下：当前块的 free */
+    cur_free: func(ctx: *void, ptr: *void) -> void,  /* 见下：当前块的 free */
 }
 
 func Arena.new(backing: Allocator, chunk: usize) -> Arena

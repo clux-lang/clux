@@ -237,6 +237,11 @@ clux_type_t *clux_type_get_qualified_type(clux_type_t *base,
       clux_type_create_meta(type, sizeof(clux_qualifier_meta_t));
   meta->base = base;
   clux_type_add_child(base, qualifier, type);
-  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
+  /* 限定 void 与 void 同命运：永不 seal（void 天然不完整，const/volatile
+     不改变这一点，*const void 的 deref 由此落回完整性门禁）；其余限定
+     类型布局即时定局：构造完成即完整。 */
+  if (clux_type_kind_unwrap(base) != CLUX_TYPE_VOID) {
+    clux_type_seal(type);
+  }
   return type;
 }

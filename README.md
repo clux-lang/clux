@@ -50,8 +50,9 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   **`foreach`** — for-each sugar over arrays/slices, expanded by the front-end
   desugaring layer (`src/desugar/`) into an index `for` loop before sema, so
   sema / compiler / CTFE never see it (`tests/desugar_test.cpp`, `tests/foreach_test.cpp`).
-- **M3 — pointers**: raw `*T` (C-like lifetime), postfix `.&` / `.*`, `opaque`
-  (≈ `void*`), closure capture rules. Heap allocation is **not** a language
+- **M3 — pointers**: raw `*T` (C-like lifetime), postfix `.&` / `.*`,
+  `*void` as the type-erasure boundary (C-style `void*` absorption), closure
+  capture rules. Heap allocation is **not** a language
   feature: call `libc::malloc` / `libc::free` through FFI and initialize/free
   fields explicitly. Compile-time ownership was removed; the compiler only
   checks raw pointers. See `docs/whitepaper/02-types.md`.
@@ -72,7 +73,7 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   `cfunc` definitions usable as C callbacks, `extern var` global data symbols, conditional declarations
   (`assert(OS_TYPE == "WIN64" ...)`, `-D KEY=VALUE`), `[[stdcall]]` / `[[cdecl]]`
   calling-convention decorators on C ABI functions, and recursive C-ABI type checking
-  (scalars, pointers, `opaque`, `str`, struct / cunion / enum). Port packages can
+  (scalars, pointers, `*void`, `str`, struct / cunion / enum). Port packages can
   `export extern cfunc/var`, so a pure-declaration `port.cx` is importable as a
   normal module (`port::fn` / `port::global`); `clux.mod`'s `native` section
   supplies `link` / `libdirs` / `runtime` for already-built C libraries

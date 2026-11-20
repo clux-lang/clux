@@ -148,43 +148,56 @@ static bool ptr_type_extends(clux_type_t *self, clux_type_t *base) {
   return clux_type_extends(self_meta->base, base_meta->base);
 }
 
-/* 安全转换（隐式转换点，assign 异类型时走此处）：目标是指针且协变
-   extends 成立（*Derived → *Base，字段前缀兼容）即放行——指针位图
-   不变，产出目标类型的新值；不成立时返回语义化 error（反向与横跨
-   均拒绝，向下兼容是单向的）。 */
+/* *void 是类型擦除边界（白皮书 §2.1，C 风格吸收规则）：目标是指针且
+   base 为 void 即视为擦除终点，任意源指针隐式放行。反向（*void → *T）
+   没有隐式通道——safe_cast 的 extends 检查天然拒绝（void 不 extends
+   任何类型），必须显式 as（ptr_cast）。 */
+static bool ptr_base_is_void(clux_type_t *type) {
+  if (clux_type_kind_unwrap(type) != CLUX_TYPE_PTR) {
+    return false;
+  }
+  clux_ptr_meta_t *meta = clux_type_get_meta(type);
+  return meta && clux_type_kind_unwrap(meta->base) == CLUX_TYPE_VOID;
+}
+
+static clux_value_t *ptr_cast_error(clux_context_t *ctx,
+                                    clux_value_t *value,
+                                    clux_type_t *target,
+                                    const char *what) {
+  const char *source_name = clux_type_get_name(clux_value_get_type(value));
+  const char *target_name = clux_type_get_name(target);
+  return clux_context_create_error_message(
+      ctx,
+      NULL,
+      "%s '%s' to '%s'",
+      what,
+      source_name ? source_name : "<unknown>",
+      target_name ? target_name : "<unknown>");
+}
+
+/* 安全转换（隐式转换点，assign 异类型时走此处）：*T → *void 吸收
+   （擦除边界，handle 位图不变）；或目标是指针且协变 extends 成立
+   （*Derived → *Base，字段前缀兼容）即放行，产出目标类型的新值；
+   不成立时返回语义化 error（反向与横跨均拒绝，向下兼容是单向的）。 */
 static clux_value_t *
 ptr_safe_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   clux_type_t *source = clux_value_get_type(value);
   if (clux_type_get_kind(source) == CLUX_TYPE_ERROR) {
     return value;
   }
-  const char *source_name = clux_type_get_name(source);
-  const char *target_name = clux_type_get_name(target);
-  /* 任何指针可隐式转为 opaque（白皮书 §2.1，类型擦除边界）：handle
-     位图不变，产出 opaque 值；反向转出必须显式 as（opaque 的 cast）。 */
-  if (clux_type_kind_unwrap(target) == CLUX_TYPE_OPAQUE) {
+  if (ptr_base_is_void(target)) {
     if (clux_value_is_shadow(value)) {
       return clux_context_create_shadow_value(ctx, target);
     }
     ptr_handle_t handle = 0;
     if (!ptr_read(value, &handle)) {
-      return clux_context_create_error_message(
-          ctx,
-          NULL,
-          "cannot safely cast '%s' to '%s'",
-          source_name ? source_name : "<unknown>",
-          target_name ? target_name : "<unknown>");
+      return ptr_cast_error(ctx, value, target, "cannot safely cast");
     }
     return clux_context_create_ptr(ctx, target, handle, NULL, NULL);
   }
   if (clux_type_kind_unwrap(target) != CLUX_TYPE_PTR ||
       !clux_type_extends(source, target)) {
-    return clux_context_create_error_message(
-        ctx,
-        NULL,
-        "cannot safely cast '%s' to '%s'",
-        source_name ? source_name : "<unknown>",
-        target_name ? target_name : "<unknown>");
+    return ptr_cast_error(ctx, value, target, "cannot safely cast");
   }
   if (clux_type_equal(source, target)) {
     return value;
@@ -194,12 +207,33 @@ ptr_safe_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   }
   ptr_handle_t handle = 0;
   if (!ptr_read(value, &handle)) {
-    return clux_context_create_error_message(
-        ctx,
-        NULL,
-        "cannot safely cast '%s' to '%s'",
-        source_name ? source_name : "<unknown>",
-        target_name ? target_name : "<unknown>");
+    return ptr_cast_error(ctx, value, target, "cannot safely cast");
+  }
+  return clux_context_create_ptr(ctx, target, handle, NULL, NULL);
+}
+
+/* 显式转换（as）：指针 ↔ 指针一律放行（handle 不变）——显式 as 是
+   程序员担责通道，*void 的恢复（*void → *T）与不相关指针互转都走
+   此处；指针与非指针之间没有可定义的转换，一律拒绝。 */
+static clux_value_t *
+ptr_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
+  clux_type_t *source = clux_value_get_type(value);
+  if (clux_type_get_kind(source) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  if (clux_type_kind_unwrap(source) != CLUX_TYPE_PTR ||
+      clux_type_kind_unwrap(target) != CLUX_TYPE_PTR) {
+    return ptr_cast_error(ctx, value, target, "cannot cast");
+  }
+  if (clux_type_equal(source, target)) {
+    return value;
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(ctx, target);
+  }
+  ptr_handle_t handle = 0;
+  if (!ptr_read(value, &handle)) {
+    return ptr_cast_error(ctx, value, target, "cannot cast");
   }
   return clux_context_create_ptr(ctx, target, handle, NULL, NULL);
 }
@@ -208,6 +242,7 @@ static clux_vtable_t g_ptr_vtable = {
     .eq = ptr_eq,
     .ne = ptr_ne,
     .safe_cast = ptr_safe_cast,
+    .cast = ptr_cast,
     .deref = ptr_deref,
     .type_equal = ptr_type_equal,
     .type_extends = ptr_type_extends,
