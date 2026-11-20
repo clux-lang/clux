@@ -1,5 +1,6 @@
 #include "engine/cunion.h"
 #include "core/allocator.h"
+#include "core/vec.h"
 #include "engine/context.h"
 #include "engine/interface.h"
 #include "engine/type.h"
@@ -9,8 +10,7 @@
 #include <string.h>
 
 typedef struct _clux_cunion_meta_t {
-  clux_cunion_member_t *members;
-  size_t count;
+  vec_t *members;
 } clux_cunion_meta_t;
 
 static clux_cunion_meta_t *cunion_meta(clux_type_t *type) {
@@ -32,16 +32,16 @@ static bool cunion_kind(clux_type_kind_t kind) {
 
 size_t clux_cunion_member_count(clux_type_t *type) {
   clux_cunion_meta_t *meta = type ? cunion_meta(type) : NULL;
-  return meta ? meta->count : 0;
+  return meta ? vec_get_size(meta->members) : 0;
 }
 
 const clux_cunion_member_t *clux_cunion_get_member(clux_type_t *type,
                                                    size_t idx) {
   clux_cunion_meta_t *meta = type ? cunion_meta(type) : NULL;
-  if (!meta || idx >= meta->count) {
+  if (!meta || idx >= vec_get_size(meta->members)) {
     return NULL;
   }
-  return &meta->members[idx];
+  return vec_get(meta->members, idx);
 }
 
 const clux_cunion_member_t *clux_cunion_find_member(clux_type_t *type,
@@ -50,9 +50,10 @@ const clux_cunion_member_t *clux_cunion_find_member(clux_type_t *type,
   if (!meta || !name) {
     return NULL;
   }
-  for (size_t idx = 0; idx < meta->count; idx++) {
-    if (strcmp(meta->members[idx].name, name) == 0) {
-      return &meta->members[idx];
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_cunion_member_t *member = vec_get(meta->members, idx);
+    if (strcmp(member->name, name) == 0) {
+      return member;
     }
   }
   return NULL;
@@ -134,14 +135,16 @@ cunion_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
 /* 结构相等核心：成员数、成员名与成员类型按声明序一一对应即相等，
    类型名不参与判等（白皮书：结构兼容的不同具名类型可以比较）。 */
 static bool members_equal(clux_cunion_meta_t *self,
-                          const clux_cunion_member_t *members,
+                          const clux_cunion_member_t **members,
                           size_t count) {
-  if (!self || self->count != count) {
+  if (!self || vec_get_size(self->members) != count) {
     return false;
   }
   for (size_t idx = 0; idx < count; idx++) {
-    if (strcmp(self->members[idx].name, members[idx].name) != 0 ||
-        !clux_type_equal(self->members[idx].type, members[idx].type)) {
+    const clux_cunion_member_t *src = vec_get_const(self->members, idx);
+    const clux_cunion_member_t *dst = members[idx];
+    if (strcmp(src->name, dst->name) != 0 ||
+        !clux_type_equal(src->type, dst->type)) {
       return false;
     }
   }
@@ -149,7 +152,7 @@ static bool members_equal(clux_cunion_meta_t *self,
 }
 
 bool clux_cunion_members_equal(clux_type_t *self,
-                               const clux_cunion_member_t *members,
+                               const clux_cunion_member_t **members,
                                size_t count) {
   if (!cunion_kind(clux_type_get_kind(self))) {
     return false;
@@ -162,9 +165,27 @@ static bool cunion_type_equal(clux_type_t *self, clux_type_t *other) {
     return false;
   }
   clux_cunion_meta_t *other_meta = cunion_meta(other);
-  return members_equal(cunion_meta(self),
-                       other_meta ? other_meta->members : NULL,
-                       other_meta ? other_meta->count : 0);
+  const clux_cunion_member_t **other_members =
+      (const clux_cunion_member_t **)vec_get_data_const(other_meta->members);
+  return members_equal(
+      cunion_meta(self), other_members, vec_get_size(other_meta->members));
+}
+
+/* meta 析构：释放成员 vec 与各成员的自有资源（成员块与自拷的 name）。
+   成员 type 是借用（归类型 owner），不在此释放；meta 本体由
+   delete_clux_type 统一释放。 */
+static void cunion_delete_meta(clux_type_t *self) {
+  clux_cunion_meta_t *meta = cunion_meta(self);
+  if (!meta || !meta->members) {
+    return;
+  }
+  allocator_t *allocator = clux_type_get_allocator(self);
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_cunion_member_t *member = vec_get(meta->members, idx);
+    allocator_free(allocator, (void **)&member->name);
+    allocator_free(allocator, (void **)&member);
+  }
+  delete_vec(&meta->members);
 }
 
 static clux_vtable_t g_cunion_vtable = {
@@ -172,45 +193,65 @@ static clux_vtable_t g_cunion_vtable = {
     .ne = cunion_ne,
     .field = cunion_field,
     .type_equal = cunion_type_equal,
+    .delete_meta = cunion_delete_meta,
 };
 
 clux_vtable_t *get_clux_cunion_vtable(void) { return &g_cunion_vtable; }
 
-static size_t cunion_layout_align(const clux_cunion_member_t *members,
-                                  size_t count) {
+/* 两阶段构造（与 tag union 同构，适配递归引用）：create 建空壳
+   （size/align 为 0，未 seal），add_member 逐个填充成员（name 自拷，
+   类型借用类型 owner），seal 冻结布局。 */
+clux_type_t *create_clux_cunion_type(allocator_t *allocator, const char *name) {
+  clux_type_t *type = create_clux_type(
+      allocator, CLUX_TYPE_CUNION, name, 0, 0, get_clux_cunion_vtable());
+  clux_cunion_meta_t *meta =
+      clux_type_create_meta(type, sizeof(clux_cunion_meta_t));
+  meta->members = create_vec(allocator);
+  return type;
+}
+
+bool clux_cunion_type_add_member(clux_type_t *self,
+                                 allocator_t *allocator,
+                                 const char *name,
+                                 clux_type_t *type) {
+  if (clux_type_is_seal(self)) {
+    return false;
+  }
+  clux_cunion_meta_t *meta = clux_type_get_meta(self);
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_cunion_member_t *tmp = vec_get(meta->members, idx);
+    if (strcmp(tmp->name, name) == 0) {
+      return false;
+    }
+  }
+  clux_cunion_member_t *mem = allocator_alloc(allocator, sizeof(*mem));
+  char *name_copy = allocator_alloc(allocator, strlen(name) + 1);
+  (void)strcpy(name_copy, name);
+  mem->name = name_copy;
+  mem->type = type;
+  (void)vec_push(meta->members, mem);
+  return true;
+}
+
+/* C ABI 布局定局：align = max(成员 align)（无 tag，下限 1），
+   size = round_up(max(成员 size), align)，所有成员共享偏移 0。 */
+void clux_cunion_type_seal(clux_type_t *self) {
+  clux_cunion_meta_t *meta = clux_type_get_meta(self);
   size_t align = 1;
-  for (size_t idx = 0; idx < count; idx++) {
-    size_t member_align = clux_type_get_align(members[idx].type);
+  size_t size = 0;
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_cunion_member_t *member = vec_get(meta->members, idx);
+    size_t member_align = clux_type_get_align(member->type);
     if (member_align > align) {
       align = member_align;
     }
-  }
-  return align;
-}
-
-clux_type_t *create_clux_cunion_type(allocator_t *allocator,
-                                     const char *name,
-                                     const clux_cunion_member_t *members,
-                                     size_t count) {
-  /* 对齐取成员最大值，尺寸取成员最大值后向上对齐（C ABI 布局）。 */
-  size_t align = cunion_layout_align(members, count);
-  size_t size = 0;
-  for (size_t idx = 0; idx < count; idx++) {
-    size_t member_size = clux_type_get_size(members[idx].type);
+    size_t member_size = clux_type_get_size(member->type);
     if (member_size > size) {
       size = member_size;
     }
   }
   size = (size + align - 1) / align * align;
-  clux_type_t *type = create_clux_type(
-      allocator, CLUX_TYPE_CUNION, name, size, align, get_clux_cunion_vtable());
-  /* meta 与成员表连体成单块分配：delete_clux_type 释放 meta 本体即整块释放 */
-  clux_cunion_meta_t *meta = clux_type_create_meta(
-      type, sizeof(clux_cunion_meta_t) + sizeof(clux_cunion_member_t) * count);
-  meta->members =
-      (clux_cunion_member_t *)((char *)meta + sizeof(clux_cunion_meta_t));
-  (void)memcpy(meta->members, members, sizeof(clux_cunion_member_t) * count);
-  meta->count = count;
-  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
-  return type;
+  (void)clux_type_set_size(self, size);
+  (void)clux_type_set_align(self, align);
+  clux_type_seal(self);
 }

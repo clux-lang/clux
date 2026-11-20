@@ -3811,7 +3811,7 @@ TEST_F(ExecLiteralTest, TupleNestedAndQualifiedElems) {
             clux_context_get_ptr_type(ctx, i32_type));
   delete_node(&qualified);
 
-  /* 空元组 <> */
+  /* 空元组 <>：空聚合 seal 兜底 size 至 1 */
   node_t *empty = create_tuple_node(a);
   clux_value_t *empty_result = exec_expr_tuple(ctx, empty);
   ASSERT_NE(empty_result, nullptr);
@@ -3819,7 +3819,7 @@ TEST_F(ExecLiteralTest, TupleNestedAndQualifiedElems) {
   ASSERT_NE(empty_described, nullptr);
   EXPECT_EQ(clux_type_get_kind(empty_described), CLUX_TYPE_TUPLE);
   EXPECT_EQ(clux_tuple_elem_count(empty_described), (size_t)0);
-  EXPECT_EQ(clux_type_get_size(empty_described), (size_t)0);
+  EXPECT_EQ(clux_type_get_size(empty_described), (size_t)1);
   EXPECT_EQ(empty_described, clux_context_get_tuple_type(ctx, NULL, 0));
   delete_node(&empty);
 }
@@ -8371,8 +8371,7 @@ TEST_F(ExecLiteralTest, VoidPtrExplicitAsRecoversTypedPointer) {
   ASSERT_NE(bad_result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_result)),
             CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(bad_result),
-               "cannot cast '*void' to 'i32'");
+  EXPECT_STREQ(error_message_of(bad_result), "cannot cast '*void' to 'i32'");
   delete_node(&bad);
 }
 
@@ -8396,8 +8395,7 @@ TEST_F(ExecLiteralTest, VoidPtrAssignAbsorbsInAndRejectsImplicitOut) {
   ASSERT_NE(vpd, nullptr);
 
   /* 正向: *i32 → *void 变量隐式吸收（safe_cast ptr_base_is_void 分支） */
-  node_t *absorb =
-      make_assign(CLUX_NODE_LITERAL_IDENTIFIER, "=", "vpw", "vpi");
+  node_t *absorb = make_assign(CLUX_NODE_LITERAL_IDENTIFIER, "=", "vpw", "vpi");
   clux_value_t *absorbed = exec_expr_assign(ctx, absorb);
   ASSERT_NE(absorbed, nullptr);
   EXPECT_EQ(absorbed, vpw) << "absorb must return the target identity";
@@ -8412,8 +8410,7 @@ TEST_F(ExecLiteralTest, VoidPtrAssignAbsorbsInAndRejectsImplicitOut) {
   ASSERT_NE(vqi_slot, nullptr);
   clux_value_t *rejected = exec_expr_assign(ctx, leak);
   ASSERT_NE(rejected, nullptr);
-  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rejected)),
-            CLUX_TYPE_ERROR);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rejected)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(rejected),
                "cannot safely cast '*void' to '*i32'");
   delete_node(&leak);

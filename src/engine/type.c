@@ -140,5 +140,16 @@ bool clux_type_set_align(clux_type_t *self, size_t align) {
   self->align = align;
   return true;
 }
-void clux_type_seal(clux_type_t *self) { self->seal = true; }
+/* 布局定局兜底：空聚合（无字段 struct/空元组/空 cunion 等）平铺结果
+   size/align 为 0 时修正为 1，保证类型可寻址（C ABI 习惯）；void 是
+   不完整类型永不 seal，天然不走此兜底，保持 size 0。 */
+void clux_type_seal(clux_type_t *self) {
+  if (self->size == 0) {
+    self->size = 1;
+  }
+  if (self->align == 0) {
+    self->align = 1;
+  }
+  self->seal = true;
+}
 bool clux_type_is_seal(clux_type_t *self) { return self->seal; }

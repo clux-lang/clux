@@ -787,23 +787,35 @@ clux_context_create_cunion_type(clux_context_t *self,
       }
     }
   }
-  /* 结构去重：已存在成员名+类型按声明序一致的实例时恒等返回。 */
+  /* 结构去重：已存在成员名+类型按声明序一致的实例时恒等返回
+     （对比原始成员表，无需先构造临时类型实例）。 */
+  const clux_cunion_member_t *member_ptrs[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    member_ptrs[idx] = &members[idx];
+  }
   for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
     clux_type_t *existing = vec_get(self->named_types, idx);
-    if (clux_cunion_members_equal(existing, members, count)) {
+    if (clux_cunion_members_equal(existing, member_ptrs, count)) {
       return existing;
     }
   }
-  /* 成员名经 strs 驻留（随 context 释放），成员表由类型 meta 持有。 */
-  clux_cunion_member_t interned[count];
+  /* 两阶段构造：空壳 → 逐成员填充（name 由引擎自拷持有）→ seal 定布局。
+     前置校验已拦截重名/缺槽，add_member 失败即引擎层异常。 */
+  clux_type_t *type = create_clux_cunion_type(self->allocator, name);
   for (size_t idx = 0; idx < count; idx++) {
-    char *member_name = clux_context_alloc_str(self, strlen(members[idx].name));
-    (void)memcpy(member_name, members[idx].name, strlen(members[idx].name));
-    interned[idx].name = member_name;
-    interned[idx].type = members[idx].type;
+    if (!clux_cunion_type_add_member(
+            type, self->allocator, members[idx].name, members[idx].type)) {
+      (void)delete_clux_type(&type);
+      (void)clux_context_create_error_message(self,
+                                              NULL,
+                                              "cunion '%s' has duplicate "
+                                              "member '%s'",
+                                              name,
+                                              members[idx].name);
+      return NULL;
+    }
   }
-  clux_type_t *type =
-      create_clux_cunion_type(self->allocator, name, interned, count);
+  clux_cunion_type_seal(type);
   (void)vec_push(self->named_types, type);
   return type;
 }
