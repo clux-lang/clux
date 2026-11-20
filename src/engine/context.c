@@ -48,6 +48,10 @@ struct _clux_context_t {
      上限默认 1024，环境变量 CLUX_MAX_CALL_DEPTH 覆盖。 */
   size_t call_depth;
   size_t max_call_depth;
+  /* shadow 模式：块提升 pass 借执行器整树推断类型时开启——create_value
+     拦截为 shadow 构造、invoke 拦截为返回类型 shadow（不执行函数体）。
+     error 值不拦截，保证推断期错误照常传播。 */
+  bool shadow_mode;
   /* 具名复合类型（cunion 等）托管表：无 base 可挂 children，
      由 context 按创建逆序统一释放。 */
   vec_t *named_types;
@@ -100,6 +104,7 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->named_types = create_vec(allocator);
   ctx->executor = NULL;
   ctx->call_depth = 0;
+  ctx->shadow_mode = false;
   /* 调用深度上限：环境变量 CLUX_MAX_CALL_DEPTH 覆盖，默认 1024。 */
   ctx->max_call_depth = 1024;
   const char *depth_env = getenv("CLUX_MAX_CALL_DEPTH");
@@ -334,6 +339,18 @@ clux_value_t *clux_context_create_value(clux_context_t *self,
                                      type_name ? type_name : "<unknown>");
     return clux_context_create_error(self, err);
   }
+  /* shadow 模式拦截：类型推断不落存储、不具名、不 define——直接产出
+     shadow 值。error 值豁免（推断期的错误必须原样传播）；type 值豁免
+     （类型表达式是推断的输入而非被推断对象，须保持真实存储供解包）。 */
+  if (self->shadow_mode && clux_type_get_kind(type) != CLUX_TYPE_ERROR &&
+      clux_type_get_kind(type) != CLUX_TYPE_TYPE) {
+    clux_value_t *shadow = create_clux_value(self->allocator, type, 0);
+    /* shadow 无存储（data=0）但结构体本体仍需归属：匿名 track 进当前
+       scope 的 owned 向量，与真实值共用统一所有权通道，scope 销毁统一
+       释放——匿名不进命名表，无重名冲突可能。 */
+    (void)clux_scope_define(self->current_scope, NULL, shadow);
+    return shadow;
+  }
   clux_value_t *value = create_clux_value(self->allocator, type, data);
   clux_value_t *previous = clux_scope_define(self->current_scope, name, value);
   if (previous != NULL) {
@@ -383,6 +400,14 @@ static clux_value_t *create_integer_value(clux_context_t *self,
 clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
                                                clux_type_t *type) {
   return clux_context_create_value(self, type, 0, NULL, NULL);
+}
+void clux_context_set_shadow_mode(clux_context_t *self, bool enabled) {
+  if (self) {
+    self->shadow_mode = enabled;
+  }
+}
+bool clux_context_is_shadow_mode(clux_context_t *self) {
+  return self ? self->shadow_mode : false;
 }
 clux_value_t *clux_context_create_i8(clux_context_t *self,
                                      int8_t value,
@@ -775,6 +800,20 @@ clux_context_create_cunion_type(clux_context_t *self,
           idx);
       return NULL;
     }
+    /* 完整性门禁：值位置成员必须已定局——指针以不完整类型为 base 合法
+       （ptr 构造即 seal），但直接使用不完整类型（后声明类型的壳）作
+       值成员仍是错误。 */
+    if (!clux_type_is_seal(members[idx].type)) {
+      const char *member_type_name = clux_type_get_name(members[idx].type);
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "cunion '%s' member '%s' has incomplete type '%s'",
+          name,
+          members[idx].name,
+          member_type_name ? member_type_name : "<unknown>");
+      return NULL;
+    }
     for (size_t prev = 0; prev < idx; prev++) {
       if (strcmp(members[idx].name, members[prev].name) == 0) {
         (void)clux_context_create_error_message(
@@ -832,6 +871,23 @@ clux_value_t *clux_context_create_cunion(clux_context_t *self,
   memset(ptr_to_raw(data, 0), 0, size);
   return clux_context_create_value(self, type, data, name, loc);
 }
+/* 块提升 pass 的两阶段空壳：为后声明的 union/cunion 预建未定局壳并
+   托管进 named_types（源码序的声明语句复用同一实例逐成员补全 + seal）。
+   指针可先行以空壳为 base；直接以空壳作值类型会被 seal 门禁拒绝。 */
+clux_type_t *clux_context_create_union_shell(clux_context_t *self,
+                                             const char *name,
+                                             bool is_cunion) {
+  if (!self || !name) {
+    return NULL;
+  }
+  clux_type_t *shell = is_cunion
+                           ? create_clux_cunion_type(self->allocator, name)
+                           : create_clux_union_type(self->allocator, name);
+  if (shell) {
+    (void)vec_push(self->named_types, shell);
+  }
+  return shell;
+}
 clux_type_t *clux_context_create_union_type(clux_context_t *self,
                                             const char *name,
                                             const clux_union_member_t *members,
@@ -849,6 +905,20 @@ clux_type_t *clux_context_create_union_type(clux_context_t *self,
           "union '%s' member %zu requires a name and a type",
           name,
           idx);
+      return NULL;
+    }
+    /* 完整性门禁：值位置成员必须已定局——指针以不完整类型为 base 合法
+       （ptr 构造即 seal），但直接使用不完整类型（后声明类型的壳）作
+       值成员仍是错误。 */
+    if (!clux_type_is_seal(members[idx].type)) {
+      const char *member_type_name = clux_type_get_name(members[idx].type);
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "union '%s' member '%s' has incomplete type '%s'",
+          name,
+          members[idx].name,
+          member_type_name ? member_type_name : "<unknown>");
       return NULL;
     }
     for (size_t prev = 0; prev < idx; prev++) {
@@ -1246,6 +1316,12 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
   }
   clux_type_t *type = clux_value_get_type(value);
   clux_vtable_t *vt = clux_type_get_vtable(type);
+  /* shadow 模式拦截：func 调用不执行函数体（类型推断不得有副作用），
+     直接产出返回类型的 shadow。非 func 类型落入下方常规错误路径。 */
+  if (self->shadow_mode && clux_type_kind_unwrap(type) == CLUX_TYPE_FUNC) {
+    return clux_context_create_shadow_value(self,
+                                            clux_func_get_return_type(type));
+  }
   if (vt && vt->invoke) {
     return vt->invoke(self, value, argc, argv);
   }

@@ -5,6 +5,7 @@
 #include "engine/error.h"
 #include "engine/interface.h"
 #include "engine/qualifier.h"
+#include "engine/scope.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include "engine/cunion.h"
@@ -616,8 +617,10 @@ static clux_value_t *exec_func_decl_init_captures(clux_context_t *ctx,
   return NULL;
 }
 
-static clux_value_t *
-exec_func_decl_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
+static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
+                                         node_t *node,
+                                         bool declare_named,
+                                         bool defer_captures) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   const location_t *loc = node_get_location(node);
   node_t *return_node = func_decl_node_get_return(node);
@@ -751,23 +754,44 @@ exec_func_decl_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
   if (clux_value_is_error(value)) {
     return value;
   }
-  /* 定义点捕获快照：函数值就绪后立即按定义点作用域写入捕获初值。 */
-  clux_value_t *capture_fail = exec_func_decl_init_captures(ctx, value, node);
-  if (capture_fail) {
-    return capture_fail;
+  /* 定义点捕获快照：函数值就绪后立即按定义点作用域写入捕获初值。
+     defer_captures 时跳过（块提升 phase 1 仅定义——全部函数名字就位后
+     由 phase 2 统一初始化，前向捕获由此成立）。 */
+  if (!defer_captures) {
+    clux_value_t *capture_fail = exec_func_decl_init_captures(ctx, value, node);
+    if (capture_fail) {
+      return capture_fail;
+    }
   }
   return value;
 }
 
 clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
-  return exec_func_decl_impl(ctx, node, true);
+  return exec_func_decl_impl(ctx, node, true, false);
 }
 
 /* 匿名函数值求值：仅求值出函数值（带类型与 AST 挂接），不按名 define。
    函数语句装饰器包装路径用——先匿名求值源函数值，包装完成后由
    declare_value 具名化，避开 scope 的重名冲突（scope 无重绑定通道）。 */
 clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node) {
-  return exec_func_decl_impl(ctx, node, false);
+  return exec_func_decl_impl(ctx, node, false, false);
+}
+
+/* 块提升两阶段捕获（前向捕获通道）——
+   phase 1 exec_func_decl_define：仅求值签名并按名 define（挂 AST），
+   跳过定义点捕获初始化；phase 2 exec_func_decl_bind_captures：全部
+   提升函数名字就位后统一做定义点捕获快照——f 捕获后声明的 g 成立。
+   注：相互递归（f/g 互相捕获）被类型判等拒绝（func.c signature_equal
+   含捕获表，类型无限回归无法闭式书写，语义决策 2026-11-20）。TDZ 源
+   仍拒绝。phase 2 必须与 phase 1 同作用域执行（lookup 按名取捕获初值）。 */
+clux_value_t *exec_func_decl_define(clux_context_t *ctx, node_t *node) {
+  return exec_func_decl_impl(ctx, node, true, true);
+}
+
+clux_value_t *exec_func_decl_bind_captures(clux_context_t *ctx,
+                                           clux_value_t *func,
+                                           node_t *node) {
+  return exec_func_decl_init_captures(ctx, func, node);
 }
 
 /* union 定义（白皮书 §3.7 tag union、§3.8 C union）：tag union 与
@@ -780,6 +804,31 @@ clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node) {
    支持，等泛型推断引擎就绪后接入。declare_named=false 时仅求值出
    不具名的 type value（装饰器包装路径：具名化推迟到包装完成后的
    declare_value）。 */
+/* 块提升空壳查找：具名 union/cunion 在当前作用域链上命中「type value
+   包裹的未定局同 kind 壳」时返回该壳（复用补全），其余情形（未命中、
+   非 type value、kind 不符、已 seal 的外层同名类型）返回 NULL 走常规
+   构造。 */
+static clux_type_t *
+union_shell_lookup(clux_context_t *ctx, const char *name, bool is_cunion) {
+  if (!name) {
+    return NULL;
+  }
+  clux_value_t *bound = clux_scope_get(clux_context_get_scope(ctx), name);
+  if (!bound ||
+      clux_type_kind_unwrap(clux_value_get_type(bound)) != CLUX_TYPE_TYPE) {
+    return NULL;
+  }
+  clux_type_t *inner = *(clux_type_t **)clux_value_get_raw(bound, 0);
+  if (!inner || (is_cunion ? clux_type_get_kind(inner) != CLUX_TYPE_CUNION
+                           : clux_type_get_kind(inner) != CLUX_TYPE_UNION)) {
+    return NULL;
+  }
+  if (clux_type_is_seal(inner)) {
+    return NULL;
+  }
+  return inner;
+}
+
 static clux_value_t *
 exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
@@ -849,6 +898,17 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
       member_type = exec_operand_type(ctx, type_node, &err);
       if (!member_type) {
         fail = err;
+      } else if (!clux_type_is_seal(member_type)) {
+        /* 完整性门禁（与 context 创建路径同语）：值位置成员必须已定局，
+           指针以空壳为 base 合法（ptr 构造即 seal）。 */
+        const char *member_type_name = clux_type_get_name(member_type);
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(type_node),
+            "union '%s' member '%s' has incomplete type '%s'",
+            type_name,
+            member_name,
+            member_type_name ? member_type_name : "<unknown>");
       }
     }
     if (!fail) {
@@ -880,7 +940,36 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
     filled++;
   }
   clux_type_t *type = NULL;
-  if (!fail) {
+  /* 块提升空壳复用：命中本块预注册的未定局壳时逐成员补全 + 定局
+     （壳已随提升 pass 托管进 named_types，不重复注册）；否则走常规
+     context 一次性构造。 */
+  clux_type_t *shell = union_shell_lookup(ctx, name, is_cunion);
+  if (!fail && shell) {
+    for (size_t idx = 0; idx < filled; idx++) {
+      const char *member_name =
+          is_cunion ? cunion_members[idx].name : union_members[idx].name;
+      clux_type_t *member_type =
+          is_cunion ? cunion_members[idx].type : union_members[idx].type;
+      bool added = is_cunion ? clux_cunion_type_add_member(
+                                   shell, allocator, member_name, member_type)
+                             : clux_union_type_add_member(
+                                   shell, allocator, member_name, member_type);
+      if (!added) {
+        fail = clux_context_create_error_message(
+            ctx, loc, "union '%s' shell fill failed", type_name);
+        break;
+      }
+    }
+    if (!fail) {
+      if (is_cunion) {
+        clux_cunion_type_seal(shell);
+      } else {
+        clux_union_type_seal(shell);
+      }
+      type = shell;
+    }
+  }
+  if (!fail && !type) {
     type = is_cunion ? clux_context_create_cunion_type(
                            ctx, type_name, cunion_members, filled)
                      : clux_context_create_union_type(
@@ -902,8 +991,10 @@ exec_expr_union_impl(clux_context_t *ctx, node_t *node, bool declare_named) {
     allocator_free(allocator, (void **)&name);
     return create_fail;
   }
+  /* 空壳已按名绑定在块作用域（提升 pass 的预注册），重复具名会撞
+     duplicate declaration；补全路径产出匿名 type value 作语句值。 */
   clux_value_t *value = clux_context_create_type_value(
-      ctx, type, (declare_named && name) ? name : NULL, loc);
+      ctx, type, (declare_named && name && !shell) ? name : NULL, loc);
   allocator_free(allocator, (void **)&name);
   return value;
 }

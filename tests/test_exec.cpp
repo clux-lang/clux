@@ -8618,3 +8618,847 @@ TEST_F(ExecLiteralTest, TypeAliasPropagatesNullValue) {
       << "valueless alias must not be declared in scope";
   delete_node(&node);
 }
+
+/* ===== exec_stmt_block 块内提升（hoist pass 正式用例） ===== */
+
+/* 场景: 块级前向调用——调用语句先于 func 声明（体内无自由名字）
+   预期: pass 1b 预执行函数定义，f(3) 返回 3 */
+TEST_F(ExecLiteralTest, BlockHoistForwardCallExecutesHoistedFunction) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "3");
+  node_t *f_call_node = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &call_arg);
+  node_t *call_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(call_stmt, f_call_node);
+  stmt_block_node_add_stmt(block, call_stmt);
+  stmt_block_node_add_stmt(
+      block, make_stmt_func_of(a, make_i32_identity_decl(a, "f")));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 3);
+  delete_node(&block);
+}
+
+/* 场景: 源码序捕获回归——g 先声明，f 以 |g| 捕获后调用（非前向）
+   预期: f(3) 经捕获的 g 返回 3 */
+TEST_F(ExecLiteralTest, BlockHoistCaptureBindsInSourceOrder) {
+  node_t *f_params = create_func_params_node(a);
+  func_params_node_add_param(
+      f_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *g_arg = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x");
+  node_t *g_call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"), 1, &g_arg);
+  node_t *f_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(f_ret, g_call);
+  node_t *f_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(f_body, f_ret);
+  node_t *captures = create_func_captures_node(a);
+  node_t *cap_params = create_func_params_node(a);
+  func_params_node_add_param(
+      cap_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"),
+                          make_i32_to_i32_type(a)));
+  func_captures_node_add_capture(captures, cap_params);
+  node_t *f_decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        f_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        f_body);
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block, make_stmt_func_of(a, make_i32_identity_decl(a, "g")));
+  stmt_block_node_add_stmt(block, make_stmt_func_of(a, f_decl));
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "3");
+  node_t *f_call_node = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &call_arg);
+  node_t *call_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(call_stmt, f_call_node);
+  stmt_block_node_add_stmt(block, call_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 3);
+  delete_node(&block);
+}
+
+/* 场景: 前向捕获——f 以 |g| 捕获但 g 后声明（两阶段捕获：phase 1 全部
+        仅定义，phase 2 在全部名字就位后统一做定义点快照）
+   预期: 前向捕获成立，f(3) 经后声明的 g 返回 3 */
+TEST_F(ExecLiteralTest, BlockHoistForwardCaptureBindsAfterAllDefines) {
+  node_t *f_params = create_func_params_node(a);
+  func_params_node_add_param(
+      f_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *g_arg = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x");
+  node_t *g_call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"), 1, &g_arg);
+  node_t *f_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(f_ret, g_call);
+  node_t *f_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(f_body, f_ret);
+  node_t *captures = create_func_captures_node(a);
+  node_t *cap_params = create_func_params_node(a);
+  func_params_node_add_param(
+      cap_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"),
+                          make_i32_to_i32_type(a)));
+  func_captures_node_add_capture(captures, cap_params);
+  node_t *f_decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        f_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        f_body);
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block, make_stmt_func_of(a, f_decl));
+  stmt_block_node_add_stmt(
+      block, make_stmt_func_of(a, make_i32_identity_decl(a, "g")));
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "3");
+  node_t *f_call_node = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &call_arg);
+  node_t *call_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(call_stmt, f_call_node);
+  stmt_block_node_add_stmt(block, call_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 3);
+  delete_node(&block);
+}
+
+/* 场景: 双向相互递归被类型判等拒绝（语义决策 2026-11-20）——func 类型
+        判等含捕获表（func.c signature_equal），f 的捕获槽要装 g 就得
+        闭式写出 g 的类型，而 g 的类型又含捕获 f 的类型，无限回归无法
+        书写。两阶段化只解决名字就位，类型层不放过。
+   预期: g 的带捕获类型与 f 捕获槽的无捕获类型不相等，assign 的
+         safe_cast 拦截报 "type 'g' cannot be safely cast to 'func'" */
+TEST_F(ExecLiteralTest, BlockHoistMutualRecursionRejectedByTypeEquality) {
+  /* f: func |g: func(i32)->i32| f(x: i32): i32 { return g(x); } */
+  node_t *f_params = create_func_params_node(a);
+  func_params_node_add_param(
+      f_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *g_arg = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x");
+  node_t *g_call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"), 1, &g_arg);
+  node_t *f_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(f_ret, g_call);
+  node_t *f_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(f_body, f_ret);
+  node_t *f_captures = create_func_captures_node(a);
+  node_t *f_cap_params = create_func_params_node(a);
+  func_params_node_add_param(
+      f_cap_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"),
+                          make_i32_to_i32_type(a)));
+  func_captures_node_add_capture(f_captures, f_cap_params);
+  node_t *f_decl =
+      make_func_decl_of(a,
+                        f_captures,
+                        NULL,
+                        f_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        f_body);
+
+  /* g: func |f: func(i32)->i32| g(x: i32): i32
+              { return x > 0 ? f(x - 1) : x; } */
+  node_t *g_params = create_func_params_node(a);
+  func_params_node_add_param(
+      g_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *dec_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "1");
+  node_t *f_call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &dec_arg);
+  node_t *cond = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                                make_node(CLUX_NODE_SYMBOL, ">"),
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "0"));
+  node_t *ternary = make_ternary_of(
+      a, cond, f_call, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  node_t *g_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(g_ret, ternary);
+  node_t *g_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(g_body, g_ret);
+  node_t *g_captures = create_func_captures_node(a);
+  node_t *g_cap_params = create_func_params_node(a);
+  func_params_node_add_param(
+      g_cap_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                          make_i32_to_i32_type(a)));
+  func_captures_node_add_capture(g_captures, g_cap_params);
+  node_t *g_decl =
+      make_func_decl_of(a,
+                        g_captures,
+                        NULL,
+                        g_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        g_body);
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block, make_stmt_func_of(a, f_decl));
+  stmt_block_node_add_stmt(block, make_stmt_func_of(a, g_decl));
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "3");
+  node_t *f_call_node = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &call_arg);
+  node_t *call_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(call_stmt, f_call_node);
+  stmt_block_node_add_stmt(block, call_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "type 'g' cannot be safely cast to 'func'");
+  delete_node(&block);
+}
+
+/* 场景: 提升期函数定义失败上抛——func 声明缺函数体
+   预期: pass 1b 快速失败，块出口转换 error，报
+         "function definition requires a body" */
+TEST_F(ExecLiteralTest, BlockHoistFuncDefineErrorPropagates) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        NULL);
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block, make_stmt_func_of(a, decl));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "function definition requires a body");
+  delete_node(&block);
+}
+
+/* 场景: 装饰 func 不提升——调用先于装饰 func f 声明
+   预期: 保持源码序，前向调用报 "use of undeclared identifier 'f'" */
+TEST_F(ExecLiteralTest, BlockHoistDecoratedFuncStaysInSourceOrder) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "3");
+  node_t *f_call_node = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &call_arg);
+  node_t *call_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(call_stmt, f_call_node);
+  stmt_block_node_add_stmt(block, call_stmt);
+  node_t *stmt = make_stmt_func_of(a, make_i32_identity_decl(a, "f"));
+  stmt_func_node_add_decorator(stmt, make_decorator_of(a, nullptr));
+  stmt_block_node_add_stmt(block, stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "use of undeclared identifier 'f'");
+  delete_node(&block);
+}
+
+/* 场景: 捕获 TDZ 源拒绝——func f |x: i32| 先声明，var x = 5 后声明；
+        phase 2 在 var TDZ 预注册后做捕获快照，按 TDZ 拒绝
+   预期: "use of a value before initialization"（定义点快照语义，
+         捕获 var 必须在捕获方定义点之前完成定义） */
+TEST_F(ExecLiteralTest, BlockHoistCaptureOfTdzVarRejected) {
+  node_t *f_params = create_func_params_node(a);
+  func_params_node_add_param(
+      f_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *f_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(f_ret,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  node_t *f_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(f_body, f_ret);
+  node_t *captures = create_func_captures_node(a);
+  node_t *cap_params = create_func_params_node(a);
+  func_params_node_add_param(
+      cap_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_captures_node_add_capture(captures, cap_params);
+  node_t *f_decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        f_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        f_body);
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block, make_stmt_func_of(a, f_decl));
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var("x", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "5"));
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "1");
+  node_t *f_call_node = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &call_arg);
+  node_t *call_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(call_stmt, f_call_node);
+  stmt_block_node_add_stmt(block, call_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of a value before initialization");
+  delete_node(&block);
+}
+
+/* 场景: TDZ 前向读拦截——提升预注册 var y 后，源码序定义之前的读取按
+        TDZ 语义报错（而非 undeclared）
+   预期: "use of a value before initialization" */
+TEST_F(ExecLiteralTest, BlockHoistVarForwardReadReportsTdz) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *read_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(read_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "y"));
+  stmt_block_node_add_stmt(block, read_stmt);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var("y", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "7"));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of a value before initialization");
+  delete_node(&block);
+}
+
+/* 场景: 提升预注册 var 的定义处首赋值——var y = 7 后块级读取（本块无
+        func 声明，顺带覆盖 hoist 的 func_count 为 0 路径）
+   预期: TDZ 槽被首赋值清标记，读出 7 */
+TEST_F(ExecLiteralTest, BlockHoistVarDefinitionAssignsTdzSlot) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var("y", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "7"));
+  node_t *read_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(read_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "y"));
+  stmt_block_node_add_stmt(block, read_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 7);
+  delete_node(&block);
+}
+
+/* 场景: 有标注 var 提升——var y: i64 = 7，TDZ 预注册按标注类型
+   预期: 定义处首赋值经 safe_cast 拓宽落地，读回类型 i64、值 7
+         （无标注 shadow 推断会得 i32，断言 i64 证明走的是标注路径） */
+TEST_F(ExecLiteralTest, BlockHoistAnnotatedVarHoistsWithAnnotationType) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block,
+                           make_stmt_var("y",
+                                         CLUX_NODE_LITERAL_IDENTIFIER,
+                                         "i64",
+                                         CLUX_NODE_LITERAL_NUMERIC,
+                                         "7"));
+  node_t *read_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(read_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "y"));
+  stmt_block_node_add_stmt(block, read_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I64)
+      << "the hoisted TDZ must be pre-registered with the annotated i64";
+  EXPECT_EQ(read_i64(result), 7);
+  delete_node(&block);
+}
+
+/* 场景: var u = undefined（无标注）——提升 pass 不抢，交回源码序声明
+   预期: 源码序路径报 "undefined initializer requires a type annotation" */
+TEST_F(ExecLiteralTest,
+       BlockHoistUndefinedInitializerWithoutAnnotationDeferred) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block,
+                           make_stmt_var("u",
+                                         (node_kind_t)0,
+                                         NULL,
+                                         CLUX_NODE_LITERAL_UNDEFINED,
+                                         kUndefinedText));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "undefined initializer requires a type annotation");
+  delete_node(&block);
+}
+
+/* 场景: var z: i32 = undefined——提升按标注注册 TDZ，定义处的目标状态
+        就是 TDZ（不转首赋值），后续读取按 TDZ 拒绝
+   预期: "use of a value before initialization" */
+TEST_F(ExecLiteralTest, BlockHoistUndefinedInitializerKeepsTdzAtDefinition) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block,
+                           make_stmt_var("z",
+                                         CLUX_NODE_LITERAL_IDENTIFIER,
+                                         "i32",
+                                         CLUX_NODE_LITERAL_UNDEFINED,
+                                         kUndefinedText));
+  node_t *read_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(read_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "z"));
+  stmt_block_node_add_stmt(block, read_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of a value before initialization");
+  delete_node(&block);
+}
+
+/* 场景: 无标注 var 初值探测失败——var z = nosuch（未声明标识符）
+   预期: shadow 模式探测的错误原样上抛，
+         "use of undeclared identifier 'nosuch'" */
+TEST_F(ExecLiteralTest, BlockHoistInitializerProbeErrorPropagates) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var(
+          "z", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_IDENTIFIER, "nosuch"));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'nosuch'");
+  delete_node(&block);
+}
+
+/* 场景: 装饰 var 不提升——读取先于装饰 var w 声明
+   预期: 保持源码序，前向读取报 "use of undeclared identifier 'w'" */
+TEST_F(ExecLiteralTest, BlockHoistDecoratedVarStaysInSourceOrder) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *read_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(read_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "w"));
+  stmt_block_node_add_stmt(block, read_stmt);
+  node_t *stmt =
+      make_stmt_var("w", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "7");
+  stmt_var_node_add_decorator(stmt, make_decorator_of(a, nullptr));
+  stmt_block_node_add_stmt(block, stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "use of undeclared identifier 'w'");
+  delete_node(&block);
+}
+
+/* 场景: 块内重复 var 名——提升期快速失败
+   预期: error，消息含 duplicate */
+TEST_F(ExecLiteralTest, BlockHoistDuplicateVarFailsFast) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var("x", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var("x", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "duplicate declaration 'x'");
+  delete_node(&block);
+}
+
+/* 场景: union 前向指针 base——union A { f: *B } 先于 union B 声明
+   预期: *B 以空壳为 base 合法（ptr 构造即 seal），A/B 都成功 seal，
+         末尾 type Check = A 产出 type value */
+TEST_F(ExecLiteralTest, BlockHoistUnionForwardPtrBaseAllowed) {
+  node_t *a_fields = create_fields_node(a);
+  node_t *field_f = create_field_node(a);
+  field_node_set_name(field_f, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"));
+  field_node_set_type(
+      field_f,
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "B")));
+  fields_node_add_field(a_fields, field_f);
+
+  node_t *block = create_stmt_block_node(a);
+  node_t *stmt_a = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_a, make_union_decl_of(a, "union", "A", NULL, a_fields));
+  stmt_block_node_add_stmt(block, stmt_a);
+  node_t *b_fields = create_fields_node(a);
+  fields_node_add_field(b_fields, make_union_field_of(a, "a", "i32"));
+  node_t *stmt_b = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_b, make_union_decl_of(a, "union", "B", NULL, b_fields));
+  stmt_block_node_add_stmt(block, stmt_b);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_type(a,
+                     "type Check = A",
+                     "Check",
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "A")));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE)
+      << "type Check = A must succeed after both unions sealed";
+  delete_node(&block);
+}
+
+/* 场景: union 值位置前向引用——union A { b: B }，B 后声明
+   预期: 报 "union 'A' member 'b' has incomplete type 'B'" */
+TEST_F(ExecLiteralTest, BlockHoistUnionValueMemberIncompleteRejected) {
+  node_t *a_fields = create_fields_node(a);
+  fields_node_add_field(a_fields, make_union_field_of(a, "b", "B"));
+  node_t *b_fields = create_fields_node(a);
+  fields_node_add_field(b_fields, make_union_field_of(a, "a", "i32"));
+
+  node_t *block = create_stmt_block_node(a);
+  node_t *stmt_a = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_a, make_union_decl_of(a, "union", "A", NULL, a_fields));
+  stmt_block_node_add_stmt(block, stmt_a);
+  node_t *stmt_b = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_b, make_union_decl_of(a, "union", "B", NULL, b_fields));
+  stmt_block_node_add_stmt(block, stmt_b);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "union 'A' member 'b' has incomplete type 'B'");
+  delete_node(&block);
+}
+
+/* 场景: 别名指向空壳——type X = B，union B 后声明
+   预期: 报 "cannot alias incomplete type 'B'" */
+TEST_F(ExecLiteralTest, BlockHoistAliasToIncompleteShellRejected) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_type(
+          a, "type X = B", "X", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "B")));
+  node_t *stmt_b = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_b,
+      make_union_decl_of(a, "union", "B", NULL, make_two_member_fields(a)));
+  stmt_block_node_add_stmt(block, stmt_b);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "cannot alias incomplete type 'B'");
+  delete_node(&block);
+}
+
+/* 场景: cunion 空壳路径——cunion A { f: *B } 先于 cunion B 声明
+        （pass 1a 按 KEYWORD 文本判别预建 C union 空壳）
+   预期: *B 前向 base 合法，A/B 均 seal，末尾 type Check = A 成功 */
+TEST_F(ExecLiteralTest, BlockHoistCunionForwardPtrBaseAllowed) {
+  node_t *a_fields = create_fields_node(a);
+  node_t *field_f = create_field_node(a);
+  field_node_set_name(field_f, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"));
+  field_node_set_type(
+      field_f,
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "*"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "B")));
+  fields_node_add_field(a_fields, field_f);
+
+  node_t *block = create_stmt_block_node(a);
+  node_t *stmt_a = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_a, make_union_decl_of(a, "cunion", "A", NULL, a_fields));
+  stmt_block_node_add_stmt(block, stmt_a);
+  node_t *b_fields = create_fields_node(a);
+  fields_node_add_field(b_fields, make_union_field_of(a, "a", "i32"));
+  node_t *stmt_b = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_b, make_union_decl_of(a, "cunion", "B", NULL, b_fields));
+  stmt_block_node_add_stmt(block, stmt_b);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_type(a,
+                     "type Check = A",
+                     "Check",
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "A")));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE)
+      << "type Check = A must succeed after both cunions sealed";
+  delete_node(&block);
+}
+
+/* 场景: 块内重复 union 名——pass 1a 第二个同名空壳按名注册时撞 duplicate
+   预期: "duplicate declaration 'A'" */
+TEST_F(ExecLiteralTest, BlockHoistDuplicateUnionNameFailsFast) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *first_fields = create_fields_node(a);
+  fields_node_add_field(first_fields, make_union_field_of(a, "a", "i32"));
+  node_t *stmt_first = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_first, make_union_decl_of(a, "union", "A", NULL, first_fields));
+  stmt_block_node_add_stmt(block, stmt_first);
+  node_t *second_fields = create_fields_node(a);
+  fields_node_add_field(second_fields, make_union_field_of(a, "b", "f64"));
+  node_t *stmt_second = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt_second, make_union_decl_of(a, "union", "A", NULL, second_fields));
+  stmt_block_node_add_stmt(block, stmt_second);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "duplicate declaration 'A'");
+  delete_node(&block);
+}
+
+/* 场景: 装饰 union 不提升——type X = B 先于装饰 union B 声明
+   预期: 保持源码序，前向别名查无 B 报 "use of undeclared identifier 'B'" */
+TEST_F(ExecLiteralTest, BlockHoistDecoratedUnionStaysInSourceOrder) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_type(
+          a, "type X = B", "X", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "B")));
+  node_t *stmt = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      stmt,
+      make_union_decl_of(a, "union", "B", NULL, make_two_member_fields(a)));
+  stmt_union_node_add_decorator(stmt, make_decorator_of(a, nullptr));
+  stmt_block_node_add_stmt(block, stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "use of undeclared identifier 'B'");
+  delete_node(&block);
+}
+
+/* 场景: enum 不提升——前向读取 enum 名先于 enum 语句
+   预期: 保持源码序，"use of undeclared identifier 'E'" */
+TEST_F(ExecLiteralTest, BlockHoistEnumStaysInSourceOrder) {
+  node_t *block = create_stmt_block_node(a);
+  node_t *read_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(read_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "E"));
+  stmt_block_node_add_stmt(block, read_stmt);
+  node_t *stmt = create_stmt_enum_node(a);
+  stmt_enum_node_set_enum_decl(
+      stmt, make_enum_decl_of(a, "E", "u8", make_color_variants(a)));
+  stmt_block_node_add_stmt(block, stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "use of undeclared identifier 'E'");
+  delete_node(&block);
+}
+
+/* 场景: 嵌套块独立提升——内层块前向调用自身声明的 g；外层块 var y = 7
+        先经首赋值落地，内层块作为外层最后语句
+   预期: 内层 g(3) 经内层提升执行返回 3（若未提升会报 undeclared 使块
+         以 error 中断），外层 y 读取语句无错执行 */
+TEST_F(ExecLiteralTest, BlockHoistNestedBlockHoistsIndependently) {
+  node_t *inner = create_stmt_block_node(a);
+  node_t *call_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "3");
+  node_t *g_call_node = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "g"), 1, &call_arg);
+  node_t *call_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(call_stmt, g_call_node);
+  stmt_block_node_add_stmt(inner, call_stmt);
+  stmt_block_node_add_stmt(
+      inner, make_stmt_func_of(a, make_i32_identity_decl(a, "g")));
+
+  node_t *outer = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      outer,
+      make_stmt_var("y", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "7"));
+  node_t *read_stmt = create_stmt_expr_node(a);
+  stmt_expr_node_set_expr(read_stmt,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "y"));
+  stmt_block_node_add_stmt(outer, read_stmt);
+  stmt_block_node_add_stmt(outer, inner);
+
+  clux_value_t *result = exec_stmt_block(ctx, outer);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 3)
+      << "the nested block value must come from the forward call to g";
+  delete_node(&outer);
+}
+
+/* 场景: 提升期类型标注求值失败——var v: nosuch = 1（标注类型未声明）
+   预期: pass 1c 有标注路径快速失败，"use of undeclared identifier 'nosuch'" */
+TEST_F(ExecLiteralTest, BlockHoistTypeAnnotationErrorPropagates) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block,
+                           make_stmt_var("v",
+                                         CLUX_NODE_LITERAL_IDENTIFIER,
+                                         "nosuch",
+                                         CLUX_NODE_LITERAL_NUMERIC,
+                                         "1"));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'nosuch'");
+  delete_node(&block);
+}
+
+/* 场景: 无标注 var 的初值探测无值——var v = {}（空块初值，探产出 NULL）
+   预期: "variable hoist cannot infer the initializer type" */
+TEST_F(ExecLiteralTest, BlockHoistValuelessInitializerCannotInfer) {
+  /* 初值是非 kind+text 形态的块表达式：手工构造 stmt，避免 make_stmt_var
+     的占位初值被 set_value 顶替成孤儿 node（children 手工维护契约）。 */
+  node_t *stmt = create_stmt_var_node(a);
+  stmt_var_node_set_keyword(stmt, make_node(CLUX_NODE_SYMBOL, "var"));
+  stmt_var_node_set_name(stmt, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "v"));
+  stmt_var_node_set_value(stmt, create_stmt_block_node(a));
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block, stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "variable hoist cannot infer the initializer type");
+  delete_node(&block);
+}
+
+/* 场景: 自引用初始化——var x = x。pass 1c 的 shadow 探测发生在 TDZ 预注册
+        之前，探测期读 x 时按未声明拒绝（探测即失败，不进入源码序）
+   预期: hoist 失败上抛，"use of undeclared identifier 'x'" */
+TEST_F(ExecLiteralTest, BlockHoistSelfReferentialInitializerRejectedAtProbe) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var(
+          "x", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "use of undeclared identifier 'x'");
+  delete_node(&block);
+}
+
+/* 场景: 残缺/匿名节点容错——无 FUNC_DECL 槽的 func 语句在提升 pass 1b
+        被无害跳过；匿名 union 语句提升 pass 1a 跳过（不抢报错），
+        语句层 union 强制具名的错误在源码序由 pass 2 报出
+   预期: 块返回错误 "union statement requires a named union declaration" */
+TEST_F(ExecLiteralTest, BlockHoistDegenerateNodesSkippedAndBlockProceeds) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block, create_stmt_func_node(a));
+  node_t *anon_union = create_stmt_union_node(a);
+  stmt_union_node_set_union_decl(
+      anon_union,
+      make_union_decl_of(a, "union", NULL, NULL, make_two_member_fields(a)));
+  stmt_block_node_add_stmt(block, anon_union);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_var("y", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "7"));
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "union statement requires a named union declaration");
+  delete_node(&block);
+}
+
+/* 场景: 定义期执行错误中断块——var v = f(1)，f 的函数体引用未声明名字。
+        pass 1c shadow 探测只取返回类型不执行函数体（probe 成功），
+        pass 2 定义处真实 invoke 执行函数体报错
+   预期: 首赋值求值失败上抛并中断块（exec_stmt_var_define error 返回 +
+         exec_stmt_block break），"use of undeclared identifier 'nosuch'" */
+TEST_F(ExecLiteralTest, BlockHoistDefineTimeExecutionErrorBreaksBlock) {
+  node_t *block = create_stmt_block_node(a);
+  /* func f(x: i32): i32 { return nosuch; } */
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nosuch"));
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, ret);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_func_of(
+          a,
+          make_func_decl_of(a,
+                            NULL,
+                            NULL,
+                            params,
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                            body)));
+  /* var v = f(1)：初值是调用表达式，手工构造 stmt 避免 make_stmt_var 的
+     占位初值被 set_value 顶替成孤儿 node（children 手工维护契约）。 */
+  node_t *var_stmt = create_stmt_var_node(a);
+  stmt_var_node_set_keyword(var_stmt, make_node(CLUX_NODE_SYMBOL, "var"));
+  stmt_var_node_set_name(var_stmt,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "v"));
+  node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "1");
+  stmt_var_node_set_value(
+      var_stmt,
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "f"), 1, &arg));
+  stmt_block_node_add_stmt(block, var_stmt);
+
+  clux_value_t *result = exec_stmt_block(ctx, block);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'nosuch'");
+  delete_node(&block);
+}

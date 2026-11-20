@@ -13,6 +13,13 @@ clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node);
 /* 匿名函数值求值：不按名 define，供函数装饰器包装路径使用。 */
 clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node);
+/* 块提升两阶段捕获：phase 1 仅定义（跳过捕获初始化），phase 2 对已
+   定义函数值统一补做定义点捕获快照——前向捕获成立（相互递归被类型
+   判等拒绝：func.c signature_equal 含捕获表，类型无限回归）。 */
+clux_value_t *exec_func_decl_define(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_func_decl_bind_captures(clux_context_t *ctx,
+                                           clux_value_t *func,
+                                           node_t *node);
 clux_value_t *exec_expr_union(clux_context_t *ctx, node_t *node);
 /* 匿名 union 值求值：不按名 define，供 union 装饰器包装路径使用。 */
 clux_value_t *exec_expr_union_value(clux_context_t *ctx, node_t *node);

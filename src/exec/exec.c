@@ -275,8 +275,11 @@ clux_value_t *exec_node(clux_context_t *ctx, node_t *node) {
 }
 
 /* 操作数求值统一通道（exec 的消费点）：error 优先传播，shadow 拒绝
-   （shadow 只存在于 sema 的影子执行），TDZ 消费校验
-   （声明后未经首次赋值，报 use of a value before initialization）。 */
+   （shadow 只存在于 sema 的影子执行与块提升的类型推断），TDZ 消费校验
+   （声明后未经首次赋值，报 use of a value before initialization）。
+   shadow 模式（块提升的无标注 var 类型推断）下：shadow 是正常货币原样
+   放行；TDZ 读取按变量类型产 shadow——推断只看类型，真实读取与初始化
+   检查留待执行期。 */
 clux_value_t *exec_operand(clux_context_t *ctx, node_t *node) {
   clux_value_t *value = exec_node(ctx, node);
   if (!value) {
@@ -284,6 +287,12 @@ clux_value_t *exec_operand(clux_context_t *ctx, node_t *node) {
     return value;
   }
   if (clux_value_is_error(value)) {
+    return value;
+  }
+  if (clux_context_is_shadow_mode(ctx)) {
+    if (clux_value_is_tdz(value)) {
+      return clux_context_create_shadow_value(ctx, clux_value_get_type(value));
+    }
     return value;
   }
   if (clux_value_is_shadow(value)) {

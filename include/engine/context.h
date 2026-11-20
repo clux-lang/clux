@@ -63,6 +63,12 @@ clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error);
 clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
                                                clux_type_t *type);
+/* shadow 模式（块提升的类型推断专用）：开启后 create_value 一律产出
+   无存储、无具名的 shadow 值（error 值除外——错误须真实传播），invoke
+   拦截 func 分派、直接产出返回类型的 shadow（不执行函数体，杜绝副作用）。
+   调用方负责保存旧值并在推断结束后恢复。 */
+void clux_context_set_shadow_mode(clux_context_t *self, bool enabled);
+bool clux_context_is_shadow_mode(clux_context_t *self);
 clux_value_t *clux_context_create_i8(clux_context_t *self,
                                      int8_t value,
                                      const char *name,
@@ -252,6 +258,11 @@ clux_type_t *clux_context_create_union_type(clux_context_t *self,
                                             const char *name,
                                             const clux_union_member_t *members,
                                             size_t count);
+/* 块提升的两阶段空壳（union/cunion 同构，is_cunion 分派）：预建未 seal
+   的壳并托管进 context，具名 define 与成员补全由提升调用方完成。 */
+clux_type_t *clux_context_create_union_shell(clux_context_t *self,
+                                             const char *name,
+                                             bool is_cunion);
 /* 创建 tag union 零值（memset 清零，tag=0 即第一个成员）：type 须是
    CLUX_TYPE_UNION。切换成员走 clux_context_union_set_member。 */
 clux_value_t *clux_context_create_union(clux_context_t *self,
