@@ -7,6 +7,7 @@
 #include "engine/interface.h"
 #include "engine/qualifier.h"
 #include "engine/scope.h"
+#include "engine/type.h"
 #include "engine/value.h"
 #include "exec/call.h"
 #include "exec/exec.h"
@@ -20,6 +21,7 @@
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_type.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_union.h"
@@ -127,6 +129,43 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
   }
   allocator_free(allocator, (void **)&name);
   return value;
+}
+
+/* type 别名语句 <decorator>* [export]? type name = type_expr;
+   （白皮书 §3.11、§8.1）：求值右侧类型表达式——经 exec_operand 统一
+   通道（error 优先传播、shadow 拒绝、TDZ 消费校验均由其内置语义化
+   报错），必须产出 type value（否则按 clux_type_t* 解引用是内存错误），
+   经 declare_value 以别名注册进作用域。export（run 阶段产出）是编译期
+   语义，exec 层不处理；generics/decorators 待泛型实现完成后接入。 */
+clux_value_t *exec_stmt_type(clux_context_t *ctx, node_t *node) {
+  node_t *name_node = stmt_type_node_get_name(node);
+  if (!name_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "type statement requires a name");
+  }
+  node_t *value_node = stmt_type_node_get_value(node);
+  if (!value_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "type statement requires a type expression");
+  }
+  clux_value_t *value = exec_operand(ctx, value_node);
+  if (!value || clux_value_is_error(value)) {
+    return value;
+  }
+  if (clux_type_kind_unwrap(clux_value_get_type(value)) != CLUX_TYPE_TYPE) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(value_node),
+        "expected type expression in type alias");
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name = location_get(node_get_location(name_node), allocator);
+  clux_value_t *bound = clux_context_declare_value(
+      ctx, value, name, node_get_location(name_node));
+  allocator_free(allocator, (void **)&name);
+  return bound;
 }
 
 /* 块出口协议：error / return signal / 最后语句值都注册在块作用域内，

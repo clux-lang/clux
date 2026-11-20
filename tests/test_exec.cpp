@@ -37,6 +37,7 @@
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_enum.h"
+#include "parser/node_stmt_type.h"
 #include "parser/node_union.h"
 #include "parser/node_enum_decl.h"
 #include "parser/node_enum_variant.h"
@@ -834,7 +835,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_STMT_EXPR || kind == CLUX_NODE_STMT_RETURN ||
         kind == CLUX_NODE_STMT_VAR || kind == CLUX_NODE_STMT_FUNC ||
         kind == CLUX_NODE_EXPR_UNION || kind == CLUX_NODE_STMT_UNION ||
-        kind == CLUX_NODE_EXPR_ENUM_DECL || kind == CLUX_NODE_STMT_ENUM;
+        kind == CLUX_NODE_EXPR_ENUM_DECL || kind == CLUX_NODE_STMT_ENUM ||
+        kind == CLUX_NODE_STMT_TYPE;
     if (synthetic_skip) {
       continue;
     }
@@ -8414,4 +8416,205 @@ TEST_F(ExecLiteralTest, VoidPtrAssignAbsorbsInAndRejectsImplicitOut) {
   EXPECT_STREQ(error_message_of(rejected),
                "cannot safely cast '*void' to '*i32'");
   delete_node(&leak);
+}
+
+/* ---- exec_stmt_type：type 别名语句（白皮书 §3.11、§8.1）---- */
+
+/* 合成 type 别名语句结点：location 覆盖 text 区间（缺子节点的错误定位
+   用），name_text/value 为 NULL 时不设对应子节点（缺子节点分支用），
+   value 由调用方构造（内建类型用 identifier 节点、复合类型用前缀
+   binary 节点），delete 根结点时递归释放全部子节点。 */
+static node_t *make_stmt_type(allocator_t *a,
+                              const char *text,
+                              const char *name_text,
+                              node_t *value) {
+  node_t *node = create_stmt_type_node(a);
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = text;
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = text + strlen(text);
+  loc.end.column = 1;
+  loc.end.line = 1;
+  node_set_location(node, &loc);
+  if (name_text) {
+    node_t *name = create_node(a, CLUX_NODE_LITERAL_IDENTIFIER);
+    location_t name_loc;
+    name_loc.filename = "test.clux";
+    name_loc.begin.offset = name_text;
+    name_loc.begin.column = 1;
+    name_loc.begin.line = 1;
+    name_loc.end.offset = name_text + strlen(name_text);
+    name_loc.end.column = 1;
+    name_loc.end.line = 1;
+    node_set_location(name, &name_loc);
+    stmt_type_node_set_name(node, name);
+  }
+  if (value) {
+    stmt_type_node_set_value(node, value);
+  }
+  return node;
+}
+
+/* 场景: type Alias = i32（右值是内建类型名）
+   预期: 返回 type value（unwrap 为 TYPE），被描述类型与引擎内建 i32
+         interning 恒等，declare_value 具名化后 lookup 可见同一值 */
+TEST_F(ExecLiteralTest, TypeAliasBindsTypeValueByName) {
+  node_t *node = make_stmt_type(a,
+                                "type Alias = i32",
+                                "Alias",
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE)
+      << "type statement must produce a type value";
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "alias must describe the engine builtin i32";
+  EXPECT_EQ(clux_context_lookup(ctx, "Alias", NULL), result)
+      << "declare_value must register the alias in scope";
+  delete_node(&node);
+}
+
+/* 场景: type IntList = []i32（右值是前缀复合类型表达式）
+   预期: 被描述类型是引擎通道 intern 出的 []i32（slice kind + 指针恒等） */
+TEST_F(ExecLiteralTest, TypeAliasCompositeTypeExpression) {
+  node_t *node = make_stmt_type(
+      a,
+      "type IntList = []i32",
+      "IntList",
+      make_binary_of(a,
+                     NULL,
+                     make_node(CLUX_NODE_SYMBOL, "[]"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_SLICE);
+  EXPECT_EQ(described,
+            clux_context_get_slice_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32)))
+      << "composite alias must be interned with the engine channel";
+  EXPECT_EQ(clux_context_lookup(ctx, "IntList", NULL), result);
+  delete_node(&node);
+}
+
+/* 场景: 右值不是类型表达式（type Bad = 42，数值字面量当别名目标）
+   预期: 报 "expected type expression in type alias"，别名不落地 */
+TEST_F(ExecLiteralTest, TypeAliasValueMustBeTypeExpression) {
+  node_t *node = make_stmt_type(
+      a, "type Bad = 42", "Bad", make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "expected type expression in type alias");
+  clux_value_t *missing = clux_context_lookup(ctx, "Bad", NULL);
+  ASSERT_NE(missing, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(missing)), CLUX_TYPE_ERROR)
+      << "failed alias must not be declared in scope";
+  EXPECT_STREQ(error_message_of(missing), "use of undeclared identifier 'Bad'");
+  delete_node(&node);
+}
+
+/* 场景: 缺 name 子节点（只设 value 不设 name）
+   预期: 报 "type statement requires a name"（右值不求值） */
+TEST_F(ExecLiteralTest, TypeAliasRequiresName) {
+  node_t *node = make_stmt_type(
+      a, "type  = i32", NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "type statement requires a name");
+  delete_node(&node);
+}
+
+/* 场景: 缺 value 子节点（只设 name 不设 value）
+   预期: 报 "type statement requires a type expression" */
+TEST_F(ExecLiteralTest, TypeAliasRequiresValueExpression) {
+  node_t *node = make_stmt_type(a, "type Missing", "Missing", NULL);
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "type statement requires a type expression");
+  delete_node(&node);
+}
+
+/* 场景: 右值求值出错（type Ev = <超长数字>）
+   预期: 右值 error 经 exec_operand 统一通道原样传播——"numeric literal
+         too long" */
+TEST_F(ExecLiteralTest, TypeAliasPropagatesValueError) {
+  node_t *node =
+      make_stmt_type(a,
+                     "type Ev = <toolong>",
+                     "Ev",
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "numeric literal too long");
+  delete_node(&node);
+}
+
+/* 场景: TDZ 右值（var tx: i32 = undefined 后 type Td = tx）
+   预期: exec_operand 的 consume_value 内置校验拒绝——"use of a value
+         before initialization" */
+TEST_F(ExecLiteralTest, TypeAliasTdzValueErrors) {
+  node_t *decl = make_stmt_var("tx",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               "i32",
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  clux_value_t *declared = exec_stmt_var(ctx, decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_TRUE(clux_value_is_tdz(declared));
+  delete_node(&decl);
+
+  node_t *node = make_stmt_type(
+      a, "type Td = tx", "Td", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tx"));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of a value before initialization");
+  delete_node(&node);
+}
+
+/* 场景: shadow 右值（无载荷 type 值经标识符注入——真值路径无法合成
+   shadow 字面量，改用 create_value(data=0) 具名后引用，与既有
+   VarAnnotationShadowTypeValueErrors 同模式）
+   预期: exec_operand 拒绝 shadow——"shadow value is not allowed in
+         execution" */
+TEST_F(ExecLiteralTest, TypeAliasShadowValueErrors) {
+  clux_value_t *empty_type = clux_context_create_value(
+      ctx, clux_context_get_type_type(ctx), 0, "tsh", NULL);
+  ASSERT_NE(empty_type, nullptr);
+  node_t *node = make_stmt_type(
+      a, "type Sh = tsh", "Sh", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tsh"));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "shadow value is not allowed in execution");
+  delete_node(&node);
+}
+
+/* 场景: 右值求值产出无值（空块节点是 exec_operand 统一通道唯一的
+   NULL 上抛来源——"空块产出 NULL，唯一合法消费点是调用帧边界"）
+   预期: !value 短路分支命中，NULL 原样上抛（别名不落地、不误报类型错误） */
+TEST_F(ExecLiteralTest, TypeAliasPropagatesNullValue) {
+  node_t *node =
+      make_stmt_type(a, "type Nl = { }", "Nl", create_stmt_block_node(a));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  EXPECT_EQ(result, nullptr) << "valueless operand must propagate NULL as-is";
+  clux_value_t *missing = clux_context_lookup(ctx, "Nl", NULL);
+  ASSERT_NE(missing, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(missing)), CLUX_TYPE_ERROR)
+      << "valueless alias must not be declared in scope";
+  delete_node(&node);
 }
