@@ -24,8 +24,10 @@ void delete_vec(vec_t **vec) {
   allocator_free(allocator, (void **)&(*vec)->data);
   allocator_free(allocator, (void **)vec);
 }
-size_t vec_get_size(vec_t *self) { return self->size; }
-size_t vec_get_capacity(vec_t *self) { return self->capacity; }
+size_t vec_get_size(const vec_t *self) { return self->size; }
+size_t vec_get_capacity(const vec_t *self) { return self->capacity; }
+void **vec_get_data(vec_t *self) { return self->data; }
+void *const *vec_get_data_const(const vec_t *self) { return self->data; }
 vec_t *vec_resize(vec_t *self, size_t size) {
   if (size > self->capacity) {
     size_t new_cap = self->capacity;
@@ -59,6 +61,12 @@ vec_t *vec_reserve(vec_t *self, size_t capacity) {
   return self;
 }
 void *vec_get(vec_t *self, size_t idx) {
+  if (idx >= self->size) {
+    return NULL;
+  }
+  return self->data[idx];
+}
+const void *vec_get_const(const vec_t *self, size_t idx) {
   if (idx >= self->size) {
     return NULL;
   }

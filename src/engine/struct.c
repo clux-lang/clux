@@ -510,5 +510,6 @@ clux_type_t *create_clux_struct_type(allocator_t *allocator,
                  sizeof(clux_struct_subtype_t) * decl->subtype_count);
   }
   meta->subtype_count = decl->subtype_count;
+  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
   return type;
 }

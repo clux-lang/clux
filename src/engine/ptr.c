@@ -243,5 +243,7 @@ clux_type_t *clux_type_get_ptr_type(clux_type_t *base) {
   clux_ptr_meta_t *meta = clux_type_create_meta(type, sizeof(clux_ptr_meta_t));
   meta->base = base;
   clux_type_add_child(base, CLUX_TYPE_PTR, type);
+  /* 指针定宽，base 未 seal（递归壳）也定局：构造完成即完整 */
+  clux_type_seal(type);
   return type;
 }

@@ -16,6 +16,7 @@
 #include "engine/tuple.h"
 #include "engine/template.h"
 #include "engine/type_value.h"
+#include "engine/union.h"
 #include "engine/value.h"
 #include <cmath>
 #include <stdint.h>
@@ -638,6 +639,7 @@ TEST(EngineTest, UnsupportedOpsProduceError) {
                                          sizeof(int8_t),
                                          alignof(int8_t),
                                          &empty_vtable);
+  clux_type_seal(custom); /* 布局定局即完整，方可作为值类型 */
   clux_value_t *left = clux_context_create_shadow_value(ctx, custom);
   clux_value_t *right = clux_context_create_shadow_value(ctx, custom);
 
@@ -817,6 +819,7 @@ TEST(EngineTest, ShadowStillChecksOperatorSupport) {
                                          sizeof(int8_t),
                                          alignof(int8_t),
                                          &empty_vtable);
+  clux_type_seal(custom); /* 布局定局即完整，方可作为值类型 */
   clux_value_t *left = clux_context_create_shadow_value(ctx, custom);
   clux_value_t *right = clux_context_create_shadow_value(ctx, custom);
 
@@ -2950,12 +2953,14 @@ TEST(EngineTest, OpaqueEqNe) {
 
   clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
   clux_value_t *y = clux_context_create_i32(ctx, 2, NULL, NULL);
-  clux_value_t *ox = clux_context_create_value(
-      ctx, opaque, clux_value_get_data(x), NULL, NULL);
-  clux_value_t *ox2 = clux_context_create_value(
-      ctx, opaque, clux_value_get_data(x), NULL, NULL);
-  clux_value_t *oy = clux_context_create_value(
-      ctx, opaque, clux_value_get_data(y), NULL, NULL);
+  /* opaque 载荷是 ptr_handle_t：须走 create_ptr 把 handle 存进定宽块，
+     直接 create_value 借用 i32 的 4 字节块会越界读 */
+  clux_value_t *ox =
+      clux_context_create_ptr(ctx, opaque, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *ox2 =
+      clux_context_create_ptr(ctx, opaque, clux_value_get_data(x), NULL, NULL);
+  clux_value_t *oy =
+      clux_context_create_ptr(ctx, opaque, clux_value_get_data(y), NULL, NULL);
   ASSERT_NE(ox, nullptr);
   ASSERT_NE(ox2, nullptr);
   ASSERT_NE(oy, nullptr);
@@ -3520,6 +3525,7 @@ TEST(EngineTest, SliceUnsupportedAggregateType) {
      vt==NULL 分支），错误消息用类型名 */
   clux_type_t *bare = create_clux_type(
       a, CLUX_TYPE_PTR /* 任意非 error/聚合 kind */, "bare", 8, 8, NULL);
+  clux_type_seal(bare); /* 布局定局即完整，方可作为值类型 */
   clux_value_t *bare_val = clux_context_create_value(ctx, bare, 0, NULL, NULL);
   ASSERT_NE(bare_val, nullptr);
   clux_value_t *bare_bad = clux_context_slice(ctx, bare_val, NULL, NULL, NULL);
@@ -3529,6 +3535,7 @@ TEST(EngineTest, SliceUnsupportedAggregateType) {
                "type 'bare' does not support slicing");
 
   delete_clux_context(&ctx);
+  (void)delete_clux_type(&bare); /* 裸类型未注册进 ctx，由测试自行释放 */
   delete_allocator(&a);
 }
 
@@ -4587,6 +4594,260 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
   EXPECT_TRUE(read_bool(clux_context_is_member(ctx, copy, "b", NULL)));
   EXPECT_EQ(read_i64(clux_context_field(ctx, copy, "b", NULL)), 7);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, copy, v, NULL)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 两阶段构造（引擎层直调）：create 空壳 → add_member 逐个填充 → seal
+   定布局。i32+f64：align = max(4,8) = 8，size = round_up(8+8,8) = 16，
+   payload 偏移 = align = 8。 */
+TEST(EngineTest, UnionTwoPhaseBuildLayoutAndQueries) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *f64_type = clux_context_builtin_type(ctx, CLUX_TYPE_F64);
+
+  /* 空壳：size/align 未定，未 seal，成员表为空 */
+  clux_type_t *t = create_clux_union_type(a, "Value");
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(clux_type_get_kind(t), CLUX_TYPE_UNION);
+  EXPECT_STREQ(clux_type_get_name(t), "Value");
+  EXPECT_EQ(clux_type_get_size(t), 0u);
+  EXPECT_EQ(clux_type_get_align(t), 0u);
+  EXPECT_FALSE(clux_type_is_seal(t));
+  EXPECT_EQ(clux_union_member_count(t), 0u);
+  EXPECT_EQ(clux_union_get_member(t, 0), nullptr);
+  EXPECT_EQ(clux_union_find_member(t, "a"), nullptr);
+
+  /* 逐成员填充 + seal 冻结布局 */
+  EXPECT_TRUE(clux_union_type_add_member(t, a, "a", i32_type));
+  EXPECT_TRUE(clux_union_type_add_member(t, a, "b", f64_type));
+  clux_union_type_seal(t);
+  EXPECT_TRUE(clux_type_is_seal(t));
+  EXPECT_EQ(clux_type_get_size(t), 16u);
+  EXPECT_EQ(clux_type_get_align(t), 8u);
+  EXPECT_EQ(clux_union_payload_offset(t), 8u);
+
+  /* 成员表查询：声明序、名与类型一致 */
+  EXPECT_EQ(clux_union_member_count(t), 2u);
+  const clux_union_member_t *first = clux_union_get_member(t, 0);
+  const clux_union_member_t *second = clux_union_get_member(t, 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_STREQ(first->name, "a");
+  EXPECT_EQ(first->type, i32_type);
+  EXPECT_STREQ(second->name, "b");
+  EXPECT_EQ(second->type, f64_type);
+  EXPECT_EQ(clux_union_get_member(t, 2), nullptr);
+  EXPECT_EQ(clux_union_find_member(t, "b"), second);
+
+  delete_clux_type(&t);
+  EXPECT_EQ(t, nullptr);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* seal 冻结：seal 前 set_size/set_align 可写；seal 后 add_member 与
+   set_size/set_align 全部拒绝且布局不变。 */
+TEST(EngineTest, UnionSealFreezesMutation) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *f64_type = clux_context_builtin_type(ctx, CLUX_TYPE_F64);
+
+  clux_type_t *t = create_clux_union_type(a, "Frozen");
+  ASSERT_NE(t, nullptr);
+  /* seal 前 size/align 通道开放（seal 会按成员重算覆盖） */
+  EXPECT_TRUE(clux_type_set_size(t, 4));
+  EXPECT_TRUE(clux_type_set_align(t, 4));
+  EXPECT_TRUE(clux_union_type_add_member(t, a, "a", i32_type));
+  /* i32 单成员：align 4，size = round_up(4+4,4) = 8 */
+  clux_union_type_seal(t);
+  EXPECT_EQ(clux_type_get_size(t), 8u);
+  EXPECT_EQ(clux_type_get_align(t), 4u);
+
+  /* seal 后：加成员拒绝，成员数不变 */
+  EXPECT_FALSE(clux_union_type_add_member(t, a, "b", f64_type));
+  EXPECT_EQ(clux_union_member_count(t), 1u);
+  /* seal 后：set_size/set_align 拒绝且不改变布局 */
+  EXPECT_FALSE(clux_type_set_size(t, 100));
+  EXPECT_FALSE(clux_type_set_align(t, 32));
+  EXPECT_EQ(clux_type_get_size(t), 8u);
+  EXPECT_EQ(clux_type_get_align(t), 4u);
+  EXPECT_TRUE(clux_type_is_seal(t));
+  clux_type_seal(t); /* 幂等：重复 seal 不破坏布局 */
+  EXPECT_EQ(clux_type_get_size(t), 8u);
+
+  delete_clux_type(&t);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 重名成员拒绝 + name 自拷持有：add_member 后修改调用方 buffer，
+   union 内部仍持有原字面名副本。 */
+TEST(EngineTest, UnionAddMemberDuplicateAndNameSelfCopy) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *f64_type = clux_context_builtin_type(ctx, CLUX_TYPE_F64);
+
+  clux_type_t *t = create_clux_union_type(a, "Named");
+  ASSERT_NE(t, nullptr);
+
+  /* name 自拷：栈上 mutable buffer 传入后被引擎复制持有 */
+  char name_buf[8];
+  strcpy(name_buf, "tag");
+  EXPECT_TRUE(clux_union_type_add_member(t, a, name_buf, i32_type));
+  strcpy(name_buf, "xxx"); /* 覆写调用方 buffer */
+  const clux_union_member_t *member = clux_union_find_member(t, "tag");
+  ASSERT_NE(member, nullptr);
+  EXPECT_STREQ(member->name, "tag"); /* 内部副本不受调用方覆写影响 */
+  EXPECT_EQ(clux_union_find_member(t, "xxx"), nullptr);
+
+  /* 重名成员拒绝：成员数与首个成员绑定不变 */
+  EXPECT_FALSE(clux_union_type_add_member(t, a, "tag", f64_type));
+  EXPECT_EQ(clux_union_member_count(t), 1u);
+  EXPECT_EQ(clux_union_find_member(t, "tag")->type, i32_type);
+
+  clux_union_type_seal(t);
+  delete_clux_type(&t);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 空成员 seal 边界：无成员时 align 取 tag u32 下限 4，
+   size = round_up(4+0,4) = 4。 */
+TEST(EngineTest, UnionEmptySealLayout) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_type_t *t = create_clux_union_type(a, "Empty");
+  ASSERT_NE(t, nullptr);
+  clux_union_type_seal(t);
+  EXPECT_TRUE(clux_type_is_seal(t));
+  EXPECT_EQ(clux_type_get_align(t), 4u);
+  EXPECT_EQ(clux_type_get_size(t), 4u);
+  EXPECT_EQ(clux_union_payload_offset(t), 4u);
+  EXPECT_EQ(clux_union_member_count(t), 0u);
+
+  delete_clux_type(&t);
+  delete_allocator(&a);
+}
+
+/* 手工两阶段与 context 一次性入口产物结构判等（成员名+类型序同即等，
+   类型名不参与）；members_equal 指针数组直调的正负判定。 */
+TEST(EngineTest, UnionTwoPhaseMatchesContextAndMembersEqual) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *f64_type = clux_context_builtin_type(ctx, CLUX_TYPE_F64);
+
+  clux_type_t *manual = create_clux_union_type(a, "Manual");
+  ASSERT_NE(manual, nullptr);
+  EXPECT_TRUE(clux_union_type_add_member(manual, a, "a", i32_type));
+  EXPECT_TRUE(clux_union_type_add_member(manual, a, "b", f64_type));
+  clux_union_type_seal(manual);
+
+  clux_union_member_t members[] = {
+      {"a", i32_type},
+      {"b", f64_type},
+  };
+  clux_type_t *via_ctx =
+      clux_context_create_union_type(ctx, "ViaContext", members, 2);
+  ASSERT_NE(via_ctx, nullptr);
+  EXPECT_TRUE(clux_type_equal(manual, via_ctx));
+  EXPECT_TRUE(clux_type_equal(via_ctx, manual));
+  EXPECT_EQ(clux_type_get_size(manual), clux_type_get_size(via_ctx));
+  EXPECT_EQ(clux_type_get_align(manual), clux_type_get_align(via_ctx));
+
+  /* members_equal 指针数组直调：成员名+类型按声明序一致判 true */
+  const clux_union_member_t *same_ptrs[] = {&members[0], &members[1]};
+  EXPECT_TRUE(clux_union_members_equal(manual, same_ptrs, 2));
+  /* 成员数不同 */
+  EXPECT_FALSE(clux_union_members_equal(manual, same_ptrs, 1));
+  /* 名不同 */
+  clux_union_member_t renamed[] = {
+      {"a", i32_type},
+      {"x", f64_type},
+  };
+  const clux_union_member_t *renamed_ptrs[] = {&renamed[0], &renamed[1]};
+  EXPECT_FALSE(clux_union_members_equal(manual, renamed_ptrs, 2));
+  /* 类型不同 */
+  clux_union_member_t retyped[] = {
+      {"a", i32_type},
+      {"b", i32_type},
+  };
+  const clux_union_member_t *retyped_ptrs[] = {&retyped[0], &retyped[1]};
+  EXPECT_FALSE(clux_union_members_equal(manual, retyped_ptrs, 2));
+  /* 非 union 类型判 false */
+  EXPECT_FALSE(clux_union_members_equal(i32_type, same_ptrs, 2));
+
+  /* context 入口重名产出 NULL（错误消息经 exec e2e 覆盖） */
+  clux_union_member_t dup[] = {
+      {"a", i32_type},
+      {"a", f64_type},
+  };
+  EXPECT_EQ(clux_context_create_union_type(ctx, "Dup", dup, 2), nullptr);
+
+  delete_clux_type(&manual);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 递归预备：seal 前成员类型可携带另一个未 seal 的壳。
+   嵌套关系 A { b: B }、B { x: i32 }：布局读取发生在 seal 时刻，
+   须先 seal 叶（B）再 seal 根（A）。B：align 4，size 8；
+   A：align max(4,4) = 4，size = round_up(4+8,4) = 12。 */
+TEST(EngineTest, UnionRecursiveShellMembers) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+
+  clux_type_t *shell_a = create_clux_union_type(a, "A");
+  clux_type_t *shell_b = create_clux_union_type(a, "B");
+  ASSERT_NE(shell_a, nullptr);
+  ASSERT_NE(shell_b, nullptr);
+
+  /* 相互引用阶段：A 的成员是尚未定局的 B 壳 */
+  EXPECT_TRUE(clux_union_type_add_member(shell_a, a, "b", shell_b));
+  EXPECT_TRUE(clux_union_type_add_member(shell_b, a, "x", i32_type));
+
+  /* 先 seal 叶 B，再 seal 根 A：A 布局按定局后的 B 计算 */
+  clux_union_type_seal(shell_b);
+  EXPECT_EQ(clux_type_get_align(shell_b), 4u);
+  EXPECT_EQ(clux_type_get_size(shell_b), 8u);
+  clux_union_type_seal(shell_a);
+  EXPECT_EQ(clux_type_get_align(shell_a), 4u);
+  EXPECT_EQ(clux_type_get_size(shell_a), 12u);
+  EXPECT_EQ(clux_union_payload_offset(shell_a), 4u);
+  EXPECT_EQ(clux_union_find_member(shell_a, "b")->type, shell_b);
+  EXPECT_EQ(clux_union_find_member(shell_b, "x")->type, i32_type);
+
+  delete_clux_type(&shell_a);
+  delete_clux_type(&shell_b);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* delete_clux_type 半成品安全：未 seal 的空壳与含成员半成品均可直接
+   删除（context 在 add_member 失败路径会 delete 半成品），配合全量
+   ASAN/LSan 验证无泄漏无悬垂。 */
+TEST(EngineTest, UnionDeleteHalfBuiltSafe) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+
+  /* 空 shell：仅 meta + 空 vec */
+  clux_type_t *empty_shell = create_clux_union_type(a, "Shell");
+  ASSERT_NE(empty_shell, nullptr);
+  delete_clux_type(&empty_shell);
+  EXPECT_EQ(empty_shell, nullptr);
+
+  /* 含一个成员的半成品：不 seal 直接删除（name 副本与成员块须释放） */
+  clux_type_t *half = create_clux_union_type(a, "Half");
+  ASSERT_NE(half, nullptr);
+  EXPECT_TRUE(clux_union_type_add_member(half, a, "a", i32_type));
+  delete_clux_type(&half);
+  EXPECT_EQ(half, nullptr);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -7173,6 +7434,220 @@ TEST(EngineTest, EnumCastIntegerSourceToEnumRejected) {
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(result), "cannot cast 'i32' to 'Color'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- 全类型 seal 完整性机制 ---- */
+
+/* 场景: void 天然不完整——永不 seal，值创建门禁（create_value 与
+   create_shadow_value）均拒绝；i32 对照正常
+   预期: void is_seal=false；两条通道都产出 error 值且消息精确为
+         "cannot create a value of incomplete type 'void'" */
+TEST(EngineTest, VoidNeverSealsRejectsValueCreation) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  ASSERT_NE(void_type, nullptr);
+  EXPECT_FALSE(clux_type_is_seal(void_type))
+      << "void must never seal (incomplete by nature)";
+
+  clux_value_t *value =
+      clux_context_create_value(ctx, void_type, 0, NULL, NULL);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value),
+               "cannot create a value of incomplete type 'void'");
+
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, void_type);
+  ASSERT_NE(shadow, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(shadow)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(shadow),
+               "cannot create a value of incomplete type 'void'");
+
+  /* i32 对照：正常通道不受门禁影响 */
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 7, NULL, NULL);
+  ASSERT_NE(i32_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(i32_value)), CLUX_TYPE_I32);
+  EXPECT_TRUE(clux_type_is_seal(clux_value_get_type(i32_value)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 内建类型全部创建即 seal——数值/str/opaque/type/模板单例与
+   error 类型经各自通道断言；return_signal 类型经信号值反查
+   预期: 所有内建类型 is_seal=true */
+TEST(EngineTest, BuiltinTypesSealedOnCreation) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  /* 数值类型抽查 */
+  EXPECT_TRUE(clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_I32)));
+  EXPECT_TRUE(clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_F64)));
+  EXPECT_TRUE(
+      clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_USIZE)));
+  EXPECT_TRUE(
+      clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_BOOL)));
+  EXPECT_TRUE(clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_STR)));
+  EXPECT_TRUE(
+      clux_type_is_seal(clux_context_builtin_type(ctx, CLUX_TYPE_OPAQUE)));
+  /* PTR 不是 builtin_type 的标量分支（无 case 返回 NULL），指针类型经
+     get_ptr_type 复合构造，seal 断言由 CompositeTypesSealOnConstruction 与
+     PtrOverVoidSealedAndValueCreatable 覆盖。 */
+
+  /* type / 模板 / error 单例 */
+  EXPECT_TRUE(clux_type_is_seal(clux_context_get_type_type(ctx)));
+  EXPECT_TRUE(clux_type_is_seal(clux_context_get_type_template_type(ctx)));
+  EXPECT_TRUE(clux_type_is_seal(clux_context_get_func_template_type(ctx)));
+  EXPECT_TRUE(clux_type_is_seal(clux_context_get_error_type(ctx)));
+
+  /* return_signal 类型：builtin_type 无该 kind 的公开分支，经信号值
+     反查其类型断言 seal（信号类型是引擎内部控制流载体，同样定宽） */
+  clux_value_t *payload = clux_context_create_i32(ctx, 1, NULL, NULL);
+  ASSERT_NE(payload, nullptr);
+  clux_value_t *signal = clux_context_create_return_signal(ctx, payload);
+  ASSERT_NE(signal, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(signal));
+  EXPECT_TRUE(clux_type_is_seal(clux_value_get_type(signal)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: 复合类型构造完成即 seal（find-or-create 与一次性入口全覆盖）
+   预期: ptr/slice/array/optional/qualifier/tuple + enum/cunion/struct/
+         func/union 一次构造后 is_seal=true */
+TEST(EngineTest, CompositeTypesSealOnConstruction) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  ASSERT_NE(i32_type, nullptr);
+
+  /* children 表复合类型 */
+  clux_type_t *ptr_type = clux_context_get_ptr_type(ctx, i32_type);
+  ASSERT_NE(ptr_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(ptr_type));
+  clux_type_t *slice_type = clux_context_get_slice_type(ctx, i32_type);
+  ASSERT_NE(slice_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(slice_type));
+  clux_type_t *array_type = clux_context_get_array_type(ctx, i32_type, 3);
+  ASSERT_NE(array_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(array_type));
+  clux_type_t *optional_type = clux_context_get_optional_type(ctx, i32_type);
+  ASSERT_NE(optional_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(optional_type));
+  clux_type_t *const_type =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  ASSERT_NE(const_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(const_type));
+
+  /* 元组 */
+  clux_type_t *elems[] = {i32_type};
+  clux_type_t *tuple_type = clux_context_get_tuple_type(ctx, elems, 1);
+  ASSERT_NE(tuple_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(tuple_type));
+
+  /* enum（整型底层） */
+  clux_enum_variant_t variants[] = {{"Red", 0, NULL}, {"Green", 1, NULL}};
+  clux_type_t *enum_type =
+      clux_context_create_enum_type(ctx, "SealedE", i32_type, variants, 2);
+  ASSERT_NE(enum_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(enum_type));
+
+  /* cunion */
+  clux_cunion_member_t cu_members[] = {{"i", i32_type}};
+  clux_type_t *cunion_type =
+      clux_context_create_cunion_type(ctx, "SealedCu", cu_members, 1);
+  ASSERT_NE(cunion_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(cunion_type));
+
+  /* struct */
+  clux_struct_field_t fields[] = {{"a", i32_type}};
+  clux_struct_decl_t decl = {fields, 1, NULL, 0, NULL, 0, NULL, 0};
+  clux_type_t *struct_type =
+      clux_context_create_struct_type(ctx, "SealedS", &decl);
+  ASSERT_NE(struct_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(struct_type));
+
+  /* func */
+  clux_type_t *params[] = {i32_type};
+  clux_type_t *func_type = clux_context_create_func_type(
+      ctx, "SealedF", NULL, 0, params, 1, i32_type);
+  ASSERT_NE(func_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(func_type));
+
+  /* tag union（context 一次性入口内部 seal） */
+  clux_union_member_t members[] = {{"a", i32_type}};
+  clux_type_t *union_type =
+      clux_context_create_union_type(ctx, "SealedU", members, 1);
+  ASSERT_NE(union_type, nullptr);
+  EXPECT_TRUE(clux_type_is_seal(union_type));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: tag union 两阶段构造的 seal 门禁——空壳造值拒绝、seal 后放行
+   预期: 未 seal 空壳 create_shadow_value 返回 error（消息含类型名）；
+         add_member + seal 后 shadow 与真值创建均放行 */
+TEST(EngineTest, UnionSealGateOnValueCreation) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  ASSERT_NE(i32_type, nullptr);
+
+  /* 空壳：未 seal，造值被门禁拒绝 */
+  clux_type_t *shell = create_clux_union_type(a, "GateU");
+  ASSERT_NE(shell, nullptr);
+  EXPECT_FALSE(clux_type_is_seal(shell));
+  clux_value_t *early = clux_context_create_shadow_value(ctx, shell);
+  ASSERT_NE(early, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(early)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(early),
+               "cannot create a value of incomplete type 'GateU'");
+
+  /* seal 后：shadow 与真值都放行 */
+  ASSERT_TRUE(clux_union_type_add_member(shell, a, "a", i32_type));
+  clux_union_type_seal(shell);
+  EXPECT_TRUE(clux_type_is_seal(shell));
+
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, shell);
+  ASSERT_NE(shadow, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(shadow)), CLUX_TYPE_UNION);
+  EXPECT_TRUE(clux_value_is_shadow(shadow));
+
+  clux_value_t *real = clux_context_create_union(ctx, shell, NULL, NULL);
+  ASSERT_NE(real, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(real)), CLUX_TYPE_UNION);
+  EXPECT_FALSE(clux_value_is_shadow(real));
+
+  delete_clux_type(&shell);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: ptr-over-void 语义观察——指针定宽，base 未 seal 也 seal，
+   为递归 union（union A { f: *A }）铺路；*void 可造值
+   预期: get_ptr_type(void) 返回非 NULL 且 is_seal；create_ptr 放行 */
+TEST(EngineTest, PtrOverVoidSealedAndValueCreatable) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  ASSERT_NE(void_type, nullptr);
+  EXPECT_FALSE(clux_type_is_seal(void_type));
+
+  clux_type_t *ptr_type = clux_context_get_ptr_type(ctx, void_type);
+  ASSERT_NE(ptr_type, nullptr)
+      << "pointer to void must be constructible (fixed-width pointer)";
+  EXPECT_EQ(clux_type_get_kind(ptr_type), CLUX_TYPE_PTR);
+  EXPECT_TRUE(clux_type_is_seal(ptr_type))
+      << "ptr seals even over an unsealed base";
+
+  clux_value_t *value = clux_context_create_ptr(ctx, ptr_type, 0, NULL, NULL);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_PTR);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

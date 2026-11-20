@@ -40,6 +40,15 @@ clux_type_t *clux_type_find_child(clux_type_t *self,
 void clux_type_add_child(clux_type_t *self,
                          clux_type_kind_t kind,
                          clux_type_t /* transfer */ *child);
+/* seal 即类型完整性契约：seal 后布局定局，set_size/set_align/add_member
+   一律拒绝。is_seal 是完整性判据——值创建只接受已 seal 类型；void
+   永不 seal（天然不完整，从根上拒绝 void 作值类型）。即时定局的类型
+   （内建、ptr/slice 等复合）构造完成即 seal；两阶段构造的 union 由
+   seal 时刻定布局。 */
+bool clux_type_set_size(clux_type_t *self, size_t size);
+bool clux_type_set_align(clux_type_t *self, size_t align);
+void clux_type_seal(clux_type_t *self);
+bool clux_type_is_seal(clux_type_t *self);
 #ifdef __cplusplus
 }
 #endif

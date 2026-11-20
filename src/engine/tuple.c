@@ -221,5 +221,6 @@ clux_type_t *create_clux_tuple_type(allocator_t *allocator,
     (void)memcpy(meta->elems, elems, sizeof(clux_type_t *) * count);
   }
   meta->count = count;
+  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
   return type;
 }

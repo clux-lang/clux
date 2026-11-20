@@ -11,6 +11,7 @@ struct _clux_type_t {
   const char *name;
   size_t size;
   size_t align;
+  bool seal;
   clux_vtable_t *vtable;
   void *meta;
   rbtree_t *children; /* key 为 kind，value 为拥有 child 的桶 vec_t */
@@ -33,6 +34,7 @@ clux_type_t *create_clux_type(allocator_t *allocator,
   type->vtable = vtable;
   type->meta = NULL;
   type->children = create_rbtree(allocator);
+  type->seal = false;
   return type;
 }
 static void
@@ -52,6 +54,11 @@ void delete_clux_type(clux_type_t **self) {
   clux_type_t *type = *self;
   rbtree_foreach(type->children, (rbtree_callback_t)delete_child_bucket, NULL);
   delete_rbtree(&type->children);
+  /* meta 自有资源先经 vtable 析构（无槽位即连体单块布局），本体统一释放 */
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->delete_meta) {
+    vt->delete_meta(type);
+  }
   allocator_free(type->allocator, &type->meta);
   allocator_free(type->allocator, (void **)&type->name);
   allocator_free(type->allocator, (void **)self);
@@ -118,3 +125,20 @@ void clux_type_add_child(clux_type_t *self,
   }
   (void)vec_push(bucket, child);
 }
+
+bool clux_type_set_size(clux_type_t *self, size_t size) {
+  if (self->seal) {
+    return false;
+  }
+  self->size = size;
+  return true;
+}
+bool clux_type_set_align(clux_type_t *self, size_t align) {
+  if (self->seal) {
+    return false;
+  }
+  self->align = align;
+  return true;
+}
+void clux_type_seal(clux_type_t *self) { self->seal = true; }
+bool clux_type_is_seal(clux_type_t *self) { return self->seal; }

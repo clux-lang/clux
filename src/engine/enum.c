@@ -215,5 +215,6 @@ clux_type_t *create_clux_enum_type(allocator_t *allocator,
       (clux_enum_variant_t *)((char *)meta + sizeof(clux_enum_meta_t));
   (void)memcpy(meta->variants, variants, sizeof(clux_enum_variant_t) * count);
   meta->count = count;
+  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
   return type;
 }

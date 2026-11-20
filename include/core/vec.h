@@ -8,11 +8,14 @@ extern "C" {
 typedef struct _vec_t vec_t;
 vec_t *create_vec(allocator_t *allocator);
 void delete_vec(vec_t **vec);
-size_t vec_get_size(vec_t *self);
-size_t vec_get_capacity(vec_t *self);
+size_t vec_get_size(const vec_t *self);
+size_t vec_get_capacity(const vec_t *self);
+void **vec_get_data(vec_t *self);
+void *const *vec_get_data_const(const vec_t *self);
 vec_t *vec_resize(vec_t *self, size_t size);
 vec_t *vec_reserve(vec_t *self, size_t capacity);
 void *vec_get(vec_t *self, size_t idx);
+const void *vec_get_const(const vec_t *self, size_t idx);
 size_t vec_insert(vec_t *self, size_t idx, void *data);
 /* 删除 idx 处元素并返回它，idx 越界返回 NULL。 */
 void *vec_erase(vec_t *self, size_t idx);

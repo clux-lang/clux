@@ -272,5 +272,6 @@ clux_type_t *clux_type_get_array_type(clux_type_t *base, size_t len) {
   meta->base = base;
   meta->len = len;
   clux_type_add_child(base, CLUX_TYPE_ARRAY, type);
+  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
   return type;
 }

@@ -8266,3 +8266,37 @@ TEST_F(ExecLiteralTest, EnumAsLeftOperandErrorPropagates) {
                "use of undeclared identifier 'missing_ev'");
   delete_node(&node);
 }
+
+/* ---- 全类型 seal 完整性机制（exec e2e） ---- */
+
+/* 场景: var vv: void = undefined——void 类型标注经 identifier lookup 命中
+   global scope 的 void type value，TDZ 通道 create_tdz_value 过 seal 门禁
+   预期: 返回 error 值，消息精确为
+         "cannot create a value of incomplete type 'void'"；
+         对照 var ok: i32 = undefined 正常产出 TDZ 变量 */
+TEST_F(ExecLiteralTest, VarVoidAnnotationIncompleteRejected) {
+  node_t *bad = make_stmt_var("vv",
+                              CLUX_NODE_LITERAL_IDENTIFIER,
+                              "void",
+                              CLUX_NODE_LITERAL_UNDEFINED,
+                              kUndefinedText);
+  clux_value_t *result = exec_stmt_var(ctx, bad);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "cannot create a value of incomplete type 'void'");
+  delete_node(&bad);
+
+  /* i32 对照：TDZ 通道不受门禁影响 */
+  node_t *good = make_stmt_var("ok",
+                               CLUX_NODE_LITERAL_IDENTIFIER,
+                               "i32",
+                               CLUX_NODE_LITERAL_UNDEFINED,
+                               kUndefinedText);
+  clux_value_t *tdz = exec_stmt_var(ctx, good);
+  ASSERT_NE(tdz, nullptr);
+  EXPECT_EQ(clux_value_get_type(tdz),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_TRUE(clux_value_is_tdz(tdz));
+  delete_node(&good);
+}

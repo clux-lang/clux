@@ -366,5 +366,6 @@ clux_type_t *create_clux_func_type(allocator_t *allocator,
   }
   meta->param_count = param_count;
   meta->return_type = return_type;
+  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
   return type;
 }

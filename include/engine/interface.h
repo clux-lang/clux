@@ -152,6 +152,11 @@ typedef bool (*clux_vt_type_extends_fn_t)(clux_type_t *self, clux_type_t *base);
    签名不带 context：这是纯数据层知识，由值 data 携带的内容回答。 */
 typedef bool (*clux_vt_value_extends_fn_t)(clux_value_t *self,
                                            clux_value_t *base);
+/* delete_meta 在 delete_clux_type 释放 meta 本体前分派：释放 meta 持有的
+   堆资源（容器、成员块、自有字符串）。NULL 表示 meta 无自有资源
+   （连体单块布局，释放 meta 本体即整块释放）。meta 本体本身始终由
+   delete_clux_type 统一释放，槽位实现只负责内部资源。 */
+typedef void (*clux_vt_delete_meta_fn_t)(clux_type_t *self);
 struct _clux_vtable_t {
   clux_vt_binary_fn_t add;
   clux_vt_binary_fn_t sub;
@@ -186,6 +191,7 @@ struct _clux_vtable_t {
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
   clux_vt_value_extends_fn_t value_extends;
+  clux_vt_delete_meta_fn_t delete_meta;
 };
 #ifdef __cplusplus
 }

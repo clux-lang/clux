@@ -237,5 +237,6 @@ clux_type_t *clux_type_get_qualified_type(clux_type_t *base,
       clux_type_create_meta(type, sizeof(clux_qualifier_meta_t));
   meta->base = base;
   clux_type_add_child(base, qualifier, type);
+  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
   return type;
 }

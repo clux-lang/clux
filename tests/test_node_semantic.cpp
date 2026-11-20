@@ -820,6 +820,7 @@ TEST_F(NodeSemanticTest, SwitchBranch) {
   EXPECT_EQ(switch_branch_node_get_body(n), body);
   switch_branch_node_set_patterns(n, nullptr);
   EXPECT_EQ(switch_branch_node_get_patterns(n), nullptr);
+  delete_node(&patterns); /* 脱钩后由调用方释放 */
   delete_node(&n);
 }
 
@@ -1136,6 +1137,7 @@ TEST_F(NodeSemanticTest, InterfaceDecl) {
   EXPECT_EQ(interface_decl_node_get_body(n), body);
   interface_decl_node_set_generics(n, nullptr);
   EXPECT_EQ(interface_decl_node_get_generics(n), nullptr);
+  delete_node(&generics); /* 脱钩后由调用方释放 */
   delete_node(&n);
 }
 
@@ -1188,6 +1190,8 @@ TEST_F(NodeSemanticTest, StmtImport) {
   stmt_import_node_set_path(n, nullptr);
   EXPECT_EQ(stmt_import_node_get_alias(n), nullptr);
   EXPECT_EQ(stmt_import_node_get_path(n), nullptr);
+  delete_node(&alias); /* 脱钩后由调用方释放 */
+  delete_node(&path);
   delete_node(&n);
 }
 
@@ -1202,6 +1206,7 @@ TEST_F(NodeSemanticTest, StmtReexport) {
   EXPECT_EQ(stmt_reexport_node_get_path(n), path);
   stmt_reexport_node_set_path(n, nullptr);
   EXPECT_EQ(stmt_reexport_node_get_path(n), nullptr);
+  delete_node(&path); /* 脱钩后由调用方释放 */
   delete_node(&n);
 }
 
@@ -1220,6 +1225,8 @@ TEST_F(NodeSemanticTest, StmtExternLib) {
   stmt_extern_lib_node_set_path(n, nullptr);
   EXPECT_EQ(stmt_extern_lib_node_get_alias(n), nullptr);
   EXPECT_EQ(stmt_extern_lib_node_get_path(n), nullptr);
+  delete_node(&alias); /* 脱钩后由调用方释放 */
+  delete_node(&path);
   delete_node(&n);
 }
 
@@ -1317,6 +1324,7 @@ TEST_F(NodeSemanticTest, StmtTest) {
   EXPECT_EQ(stmt_test_node_get_body(n), body);
   stmt_test_node_set_body(n, nullptr);
   EXPECT_EQ(stmt_test_node_get_body(n), nullptr);
+  delete_node(&body); /* 脱钩后由调用方释放 */
   delete_node(&n);
 }
 
@@ -1384,6 +1392,7 @@ TEST_F(NodeSemanticTest, BitfieldField) {
   EXPECT_EQ(bitfield_field_node_get_width(n), width);
   bitfield_field_node_set_width(n, nullptr);
   EXPECT_EQ(bitfield_field_node_get_width(n), nullptr);
+  delete_node(&width); /* 脱钩后由调用方释放 */
   delete_node(&n);
 }
 

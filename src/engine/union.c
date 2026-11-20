@@ -1,5 +1,6 @@
 #include "engine/union.h"
 #include "core/allocator.h"
+#include "core/vec.h"
 #include "engine/context.h"
 #include "engine/interface.h"
 #include "engine/type.h"
@@ -10,8 +11,7 @@
 #include <string.h>
 
 typedef struct _clux_union_meta_t {
-  clux_union_member_t *members;
-  size_t count;
+  vec_t *members;
 } clux_union_meta_t;
 
 static clux_union_meta_t *union_meta(clux_type_t *type) {
@@ -33,16 +33,16 @@ static bool union_kind(clux_type_kind_t kind) {
 
 size_t clux_union_member_count(clux_type_t *type) {
   clux_union_meta_t *meta = type ? union_meta(type) : NULL;
-  return meta ? meta->count : 0;
+  return meta ? vec_get_size(meta->members) : 0;
 }
 
 const clux_union_member_t *clux_union_get_member(clux_type_t *type,
                                                  size_t idx) {
   clux_union_meta_t *meta = type ? union_meta(type) : NULL;
-  if (!meta || idx >= meta->count) {
+  if (!meta || idx >= vec_get_size(meta->members)) {
     return NULL;
   }
-  return &meta->members[idx];
+  return vec_get(meta->members, idx);
 }
 
 const clux_union_member_t *clux_union_find_member(clux_type_t *type,
@@ -51,9 +51,10 @@ const clux_union_member_t *clux_union_find_member(clux_type_t *type,
   if (!meta || !name) {
     return NULL;
   }
-  for (size_t idx = 0; idx < meta->count; idx++) {
-    if (strcmp(meta->members[idx].name, name) == 0) {
-      return &meta->members[idx];
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_union_member_t *member = vec_get(meta->members, idx);
+    if (strcmp(member->name, name) == 0) {
+      return member;
     }
   }
   return NULL;
@@ -78,7 +79,12 @@ static bool union_read_tag(clux_value_t *value, uint32_t *out_tag) {
 static size_t member_index(clux_type_t *type,
                            const clux_union_member_t *member) {
   clux_union_meta_t *meta = union_meta(type);
-  return (size_t)(member - meta->members);
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    if (vec_get(meta->members, idx) == member) {
+      return idx;
+    }
+  }
+  return (size_t)-1;
 }
 
 /* 成员读取（x.member）：tag 匹配该成员时返回成员类型的读写双向 view
@@ -235,14 +241,16 @@ union_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
 /* 结构相等核心：成员数、成员名与成员类型按声明序一一对应即相等，
    类型名不参与判等（白皮书：结构兼容的不同具名类型可以比较）。 */
 static bool members_equal(clux_union_meta_t *self,
-                          const clux_union_member_t *members,
+                          const clux_union_member_t **members,
                           size_t count) {
-  if (!self || self->count != count) {
+  if (!self || vec_get_size(self->members) != count) {
     return false;
   }
   for (size_t idx = 0; idx < count; idx++) {
-    if (strcmp(self->members[idx].name, members[idx].name) != 0 ||
-        !clux_type_equal(self->members[idx].type, members[idx].type)) {
+    const clux_union_member_t *src = vec_get_const(self->members, idx);
+    const clux_union_member_t *dst = members[idx];
+    if (strcmp(src->name, dst->name) != 0 ||
+        !clux_type_equal(src->type, dst->type)) {
       return false;
     }
   }
@@ -250,7 +258,7 @@ static bool members_equal(clux_union_meta_t *self,
 }
 
 bool clux_union_members_equal(clux_type_t *self,
-                              const clux_union_member_t *members,
+                              const clux_union_member_t **members,
                               size_t count) {
   if (!union_kind(clux_type_get_kind(self))) {
     return false;
@@ -263,9 +271,10 @@ static bool union_type_equal(clux_type_t *self, clux_type_t *other) {
     return false;
   }
   clux_union_meta_t *other_meta = union_meta(other);
-  return members_equal(union_meta(self),
-                       other_meta ? other_meta->members : NULL,
-                       other_meta ? other_meta->count : 0);
+  const clux_union_member_t **other_members =
+      (const clux_union_member_t **)vec_get_data_const(other_meta->members);
+  return members_equal(
+      union_meta(self), other_members, vec_get_size(other_meta->members));
 }
 
 /* 激活成员（set_member）：切换 tag 并清零 payload，返回原值。
@@ -299,21 +308,39 @@ clux_value_t *clux_union_set_member(clux_context_t *ctx,
   return value;
 }
 
+/* meta 析构：释放成员 vec 与各成员的自有资源（成员块与自拷的 name）。
+   成员 type 是借用（归类型 owner），不在此释放；meta 本体由
+   delete_clux_type 统一释放。 */
+static void union_delete_meta(clux_type_t *self) {
+  clux_union_meta_t *meta = union_meta(self);
+  if (!meta || !meta->members) {
+    return;
+  }
+  allocator_t *allocator = clux_type_get_allocator(self);
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_union_member_t *member = vec_get(meta->members, idx);
+    allocator_free(allocator, (void **)&member->name);
+    allocator_free(allocator, (void **)&member);
+  }
+  delete_vec(&meta->members);
+}
+
 static clux_vtable_t g_union_vtable = {
     .eq = union_eq,
     .ne = union_ne,
     .field = union_field,
     .is_member = union_is_member,
     .type_equal = union_type_equal,
+    .delete_meta = union_delete_meta,
 };
 
 clux_vtable_t *get_clux_union_vtable(void) { return &g_union_vtable; }
 
-static size_t union_layout_align(const clux_union_member_t *members,
-                                 size_t count) {
+static size_t union_layout_align(const vec_t *members) {
   size_t align = sizeof(uint32_t); /* tag u32 定宽，对齐下限 4 */
-  for (size_t idx = 0; idx < count; idx++) {
-    size_t member_align = clux_type_get_align(members[idx].type);
+  for (size_t idx = 0; idx < vec_get_size(members); idx++) {
+    const clux_union_member_t *mem = vec_get_const(members, idx);
+    size_t member_align = clux_type_get_align(mem->type);
     if (member_align > align) {
       align = member_align;
     }
@@ -321,30 +348,58 @@ static size_t union_layout_align(const clux_union_member_t *members,
   return align;
 }
 
-clux_type_t *create_clux_union_type(allocator_t *allocator,
-                                    const char *name,
-                                    const clux_union_member_t *members,
-                                    size_t count) {
-  /* tag u32 在偏移 0，payload 从对齐处开始：
-     align = max(sizeof(u32), max(成员 align))，
-     size = round_up(align + max(成员 size), align)。 */
-  size_t align = union_layout_align(members, count);
+/* 两阶段构造（适配递归引用，如 union A { f: *A }）：create 建空壳
+   （size/align 为 0，未 seal），add_member 逐个填充成员（name 自拷，
+   类型持有自有副本），seal 冻结布局——此后 set_size/set_align 拒绝，
+   成员类型在 seal 前可携带尚未定局的递归类型壳。 */
+clux_type_t *create_clux_union_type(allocator_t *allocator, const char *name) {
+  clux_type_t *type = create_clux_type(
+      allocator, CLUX_TYPE_UNION, name, 0, 0, get_clux_union_vtable());
+  clux_union_meta_t *meta =
+      clux_type_create_meta(type, sizeof(clux_union_meta_t));
+  meta->members = create_vec(allocator);
+  return type;
+}
+
+bool clux_union_type_add_member(clux_type_t *self,
+                                allocator_t *allocator,
+                                const char *name,
+                                clux_type_t *type) {
+  if (clux_type_is_seal(self)) {
+    return false;
+  }
+  clux_union_meta_t *meta = clux_type_get_meta(self);
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_union_member_t *tmp = vec_get(meta->members, idx);
+    if (strcmp(tmp->name, name) == 0) {
+      return false;
+    }
+  }
+  clux_union_member_t *mem = allocator_alloc(allocator, sizeof(*mem));
+  char *name_copy = allocator_alloc(allocator, strlen(name) + 1);
+  (void)strcpy(name_copy, name);
+  mem->name = name_copy;
+  mem->type = type;
+  (void)vec_push(meta->members, mem);
+  return true;
+}
+
+/* tag u32 在偏移 0，payload 从对齐处开始：
+   align = max(sizeof(u32), max(成员 align))，
+   size = round_up(align + max(成员 size), align)。 */
+void clux_union_type_seal(clux_type_t *self) {
+  clux_union_meta_t *meta = clux_type_get_meta(self);
+  size_t align = union_layout_align(meta->members);
   size_t payload = 0;
-  for (size_t idx = 0; idx < count; idx++) {
-    size_t member_size = clux_type_get_size(members[idx].type);
+  for (size_t idx = 0; idx < vec_get_size(meta->members); idx++) {
+    clux_union_member_t *member = vec_get(meta->members, idx);
+    size_t member_size = clux_type_get_size(member->type);
     if (member_size > payload) {
       payload = member_size;
     }
   }
   size_t size = (align + payload + align - 1) / align * align;
-  clux_type_t *type = create_clux_type(
-      allocator, CLUX_TYPE_UNION, name, size, align, get_clux_union_vtable());
-  /* meta 与成员表连体成单块分配：delete_clux_type 释放 meta 本体即整块释放 */
-  clux_union_meta_t *meta = clux_type_create_meta(
-      type, sizeof(clux_union_meta_t) + sizeof(clux_union_member_t) * count);
-  meta->members =
-      (clux_union_member_t *)((char *)meta + sizeof(clux_union_meta_t));
-  (void)memcpy(meta->members, members, sizeof(clux_union_member_t) * count);
-  meta->count = count;
-  return type;
+  (void)clux_type_set_size(self, size);
+  (void)clux_type_set_align(self, align);
+  clux_type_seal(self);
 }

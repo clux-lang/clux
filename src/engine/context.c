@@ -76,6 +76,20 @@ struct _clux_context_t {
     clux_type_t *type_return_signal;
   } builtin_types;
 };
+/* 内建类型布局即时可知：创建即 seal（完整）。void 是唯一例外——
+   永不 seal、天然不完整，值创建以 seal 为完整性判据，从根上
+   拒绝 void 作为值类型。 */
+static clux_type_t *create_sealed_builtin(allocator_t *allocator,
+                                          clux_type_kind_t kind,
+                                          const char *name,
+                                          size_t size,
+                                          size_t align,
+                                          clux_vtable_t *vtable) {
+  clux_type_t *type =
+      create_clux_type(allocator, kind, name, size, align, vtable);
+  clux_type_seal(type);
+  return type;
+}
 clux_context_t *create_clux_context(allocator_t *allocator) {
   clux_context_t *ctx =
       allocator_alloc(allocator, sizeof(struct _clux_context_t));
@@ -98,133 +112,138 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
       ctx->max_call_depth = (size_t)parsed;
     }
   }
-  ctx->builtin_types.type_error = create_clux_type(allocator,
-                                                   CLUX_TYPE_ERROR,
-                                                   "error",
-                                                   sizeof(clux_error_t *),
-                                                   alignof(clux_error_t *),
-                                                   get_clux_error_vtable());
-  ctx->builtin_types.type_i8 = create_clux_type(allocator,
-                                                CLUX_TYPE_I8,
-                                                "i8",
-                                                sizeof(int8_t),
-                                                alignof(int8_t),
-                                                get_clux_i8_vtable());
-  ctx->builtin_types.type_i16 = create_clux_type(allocator,
-                                                 CLUX_TYPE_I16,
-                                                 "i16",
-                                                 sizeof(int16_t),
-                                                 alignof(int16_t),
-                                                 get_clux_i16_vtable());
-  ctx->builtin_types.type_i32 = create_clux_type(allocator,
-                                                 CLUX_TYPE_I32,
-                                                 "i32",
-                                                 sizeof(int32_t),
-                                                 alignof(int32_t),
-                                                 get_clux_i32_vtable());
-  ctx->builtin_types.type_i64 = create_clux_type(allocator,
-                                                 CLUX_TYPE_I64,
-                                                 "i64",
-                                                 sizeof(int64_t),
-                                                 alignof(int64_t),
-                                                 get_clux_i64_vtable());
-  ctx->builtin_types.type_u8 = create_clux_type(allocator,
-                                                CLUX_TYPE_U8,
-                                                "u8",
-                                                sizeof(uint8_t),
-                                                alignof(uint8_t),
-                                                get_clux_u8_vtable());
-  ctx->builtin_types.type_u16 = create_clux_type(allocator,
-                                                 CLUX_TYPE_U16,
-                                                 "u16",
-                                                 sizeof(uint16_t),
-                                                 alignof(uint16_t),
-                                                 get_clux_u16_vtable());
-  ctx->builtin_types.type_u32 = create_clux_type(allocator,
-                                                 CLUX_TYPE_U32,
-                                                 "u32",
-                                                 sizeof(uint32_t),
-                                                 alignof(uint32_t),
-                                                 get_clux_u32_vtable());
-  ctx->builtin_types.type_u64 = create_clux_type(allocator,
-                                                 CLUX_TYPE_U64,
-                                                 "u64",
-                                                 sizeof(uint64_t),
-                                                 alignof(uint64_t),
-                                                 get_clux_u64_vtable());
-  ctx->builtin_types.type_isize = create_clux_type(allocator,
-                                                   CLUX_TYPE_ISIZE,
-                                                   "isize",
-                                                   sizeof(intptr_t),
-                                                   alignof(intptr_t),
-                                                   get_clux_isize_vtable());
-  ctx->builtin_types.type_usize = create_clux_type(allocator,
-                                                   CLUX_TYPE_USIZE,
-                                                   "usize",
-                                                   sizeof(size_t),
-                                                   alignof(size_t),
-                                                   get_clux_usize_vtable());
-  ctx->builtin_types.type_f32 = create_clux_type(allocator,
-                                                 CLUX_TYPE_F32,
-                                                 "f32",
-                                                 sizeof(float),
-                                                 alignof(float),
-                                                 get_clux_f32_vtable());
-  ctx->builtin_types.type_f64 = create_clux_type(allocator,
-                                                 CLUX_TYPE_F64,
-                                                 "f64",
-                                                 sizeof(double),
-                                                 alignof(double),
-                                                 get_clux_f64_vtable());
-  ctx->builtin_types.type_bool = create_clux_type(allocator,
-                                                  CLUX_TYPE_BOOL,
-                                                  "bool",
-                                                  sizeof(bool),
-                                                  alignof(bool),
-                                                  get_clux_bool_vtable());
-  ctx->builtin_types.type_str = create_clux_type(allocator,
-                                                 CLUX_TYPE_STR,
-                                                 "str",
-                                                 sizeof(char *),
-                                                 alignof(char *),
-                                                 get_clux_str_vtable());
-  ctx->builtin_types.type_type = create_clux_type(allocator,
-                                                  CLUX_TYPE_TYPE,
-                                                  "type",
-                                                  sizeof(clux_type_t *),
-                                                  alignof(clux_type_t *),
-                                                  get_clux_type_value_vtable());
+  ctx->builtin_types.type_error =
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_ERROR,
+                            "error",
+                            sizeof(clux_error_t *),
+                            alignof(clux_error_t *),
+                            get_clux_error_vtable());
+  ctx->builtin_types.type_i8 = create_sealed_builtin(allocator,
+                                                     CLUX_TYPE_I8,
+                                                     "i8",
+                                                     sizeof(int8_t),
+                                                     alignof(int8_t),
+                                                     get_clux_i8_vtable());
+  ctx->builtin_types.type_i16 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_I16,
+                                                      "i16",
+                                                      sizeof(int16_t),
+                                                      alignof(int16_t),
+                                                      get_clux_i16_vtable());
+  ctx->builtin_types.type_i32 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_I32,
+                                                      "i32",
+                                                      sizeof(int32_t),
+                                                      alignof(int32_t),
+                                                      get_clux_i32_vtable());
+  ctx->builtin_types.type_i64 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_I64,
+                                                      "i64",
+                                                      sizeof(int64_t),
+                                                      alignof(int64_t),
+                                                      get_clux_i64_vtable());
+  ctx->builtin_types.type_u8 = create_sealed_builtin(allocator,
+                                                     CLUX_TYPE_U8,
+                                                     "u8",
+                                                     sizeof(uint8_t),
+                                                     alignof(uint8_t),
+                                                     get_clux_u8_vtable());
+  ctx->builtin_types.type_u16 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_U16,
+                                                      "u16",
+                                                      sizeof(uint16_t),
+                                                      alignof(uint16_t),
+                                                      get_clux_u16_vtable());
+  ctx->builtin_types.type_u32 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_U32,
+                                                      "u32",
+                                                      sizeof(uint32_t),
+                                                      alignof(uint32_t),
+                                                      get_clux_u32_vtable());
+  ctx->builtin_types.type_u64 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_U64,
+                                                      "u64",
+                                                      sizeof(uint64_t),
+                                                      alignof(uint64_t),
+                                                      get_clux_u64_vtable());
+  ctx->builtin_types.type_isize =
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_ISIZE,
+                            "isize",
+                            sizeof(intptr_t),
+                            alignof(intptr_t),
+                            get_clux_isize_vtable());
+  ctx->builtin_types.type_usize =
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_USIZE,
+                            "usize",
+                            sizeof(size_t),
+                            alignof(size_t),
+                            get_clux_usize_vtable());
+  ctx->builtin_types.type_f32 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_F32,
+                                                      "f32",
+                                                      sizeof(float),
+                                                      alignof(float),
+                                                      get_clux_f32_vtable());
+  ctx->builtin_types.type_f64 = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_F64,
+                                                      "f64",
+                                                      sizeof(double),
+                                                      alignof(double),
+                                                      get_clux_f64_vtable());
+  ctx->builtin_types.type_bool = create_sealed_builtin(allocator,
+                                                       CLUX_TYPE_BOOL,
+                                                       "bool",
+                                                       sizeof(bool),
+                                                       alignof(bool),
+                                                       get_clux_bool_vtable());
+  ctx->builtin_types.type_str = create_sealed_builtin(allocator,
+                                                      CLUX_TYPE_STR,
+                                                      "str",
+                                                      sizeof(char *),
+                                                      alignof(char *),
+                                                      get_clux_str_vtable());
+  ctx->builtin_types.type_type =
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_TYPE,
+                            "type",
+                            sizeof(clux_type_t *),
+                            alignof(clux_type_t *),
+                            get_clux_type_value_vtable());
   ctx->builtin_types.type_type_template =
-      create_clux_type(allocator,
-                       CLUX_TYPE_TYPE_TEMPLATE,
-                       "type_template",
-                       sizeof(void *),
-                       alignof(void *),
-                       get_clux_type_template_vtable());
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_TYPE_TEMPLATE,
+                            "type_template",
+                            sizeof(void *),
+                            alignof(void *),
+                            get_clux_type_template_vtable());
   ctx->builtin_types.type_func_template =
-      create_clux_type(allocator,
-                       CLUX_TYPE_FUNC_TEMPLATE,
-                       "func_template",
-                       sizeof(void *),
-                       alignof(void *),
-                       get_clux_func_template_vtable());
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_FUNC_TEMPLATE,
+                            "func_template",
+                            sizeof(void *),
+                            alignof(void *),
+                            get_clux_func_template_vtable());
   ctx->builtin_types.type_void = create_clux_type(
       allocator, CLUX_TYPE_VOID, "void", 0, 1, get_clux_void_vtable());
-  ctx->builtin_types.type_opaque = create_clux_type(allocator,
-                                                    CLUX_TYPE_OPAQUE,
-                                                    "opaque",
-                                                    sizeof(ptr_handle_t),
-                                                    alignof(ptr_handle_t),
-                                                    get_clux_opaque_vtable());
+  ctx->builtin_types.type_opaque =
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_OPAQUE,
+                            "opaque",
+                            sizeof(ptr_handle_t),
+                            alignof(ptr_handle_t),
+                            get_clux_opaque_vtable());
   /* return signal：引擎级控制值，载荷为返回值借用指针。vtable 全空
      （无运算、无成员），仅在调用边界构造/判定/取载荷后即消费。 */
   ctx->builtin_types.type_return_signal =
-      create_clux_type(allocator,
-                       CLUX_TYPE_RETURN_SIGNAL,
-                       "return_signal",
-                       sizeof(clux_value_t *),
-                       alignof(clux_value_t *),
-                       NULL);
+      create_sealed_builtin(allocator,
+                            CLUX_TYPE_RETURN_SIGNAL,
+                            "return_signal",
+                            sizeof(clux_value_t *),
+                            alignof(clux_value_t *),
+                            NULL);
   /* 类型名与 identifier 合一（白皮书 §2.1）：内建类型作为 type value
      按名注册进 global scope，script 层经 context_lookup 按名查找，
      与用户类型/变量共用同一查找通道。机制上统一处理；遮蔽内建
@@ -315,6 +334,17 @@ clux_value_t *clux_context_create_value(clux_context_t *self,
                                         ptr_handle_t data,
                                         const char *name,
                                         const location_t *loc) {
+  /* seal 即完整性判据：未 seal 的类型（两阶段未定局的壳、永不 seal
+     的 void）不得作为值类型。 */
+  if (!clux_type_is_seal(type)) {
+    const char *type_name = clux_type_get_name(type);
+    clux_error_t *err = create_error(self->allocator,
+                                     loc,
+                                     "cannot create a value of incomplete "
+                                     "type '%s'",
+                                     type_name ? type_name : "<unknown>");
+    return clux_context_create_error(self, err);
+  }
   clux_value_t *value = create_clux_value(self->allocator, type, data);
   clux_value_t *previous = clux_scope_define(self->current_scope, name, value);
   if (previous != NULL) {
@@ -839,23 +869,35 @@ clux_type_t *clux_context_create_union_type(clux_context_t *self,
       }
     }
   }
-  /* 结构去重：已存在成员名+类型按声明序一致的实例时恒等返回。 */
+  /* 结构去重：已存在成员名+类型按声明序一致的实例时恒等返回
+     （对比原始成员表，无需先构造临时类型实例）。 */
+  const clux_union_member_t *member_ptrs[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    member_ptrs[idx] = &members[idx];
+  }
   for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
     clux_type_t *existing = vec_get(self->named_types, idx);
-    if (clux_union_members_equal(existing, members, count)) {
+    if (clux_union_members_equal(existing, member_ptrs, count)) {
       return existing;
     }
   }
-  /* 成员名经 strs 驻留（随 context 释放），成员表由类型 meta 持有。 */
-  clux_union_member_t interned[count];
+  /* 两阶段构造：空壳 → 逐成员填充（name 由引擎自拷持有）→ seal 定布局。
+     前置校验已拦截重名/缺槽，add_member 失败即引擎层异常。 */
+  clux_type_t *type = create_clux_union_type(self->allocator, name);
   for (size_t idx = 0; idx < count; idx++) {
-    char *member_name = clux_context_alloc_str(self, strlen(members[idx].name));
-    (void)memcpy(member_name, members[idx].name, strlen(members[idx].name));
-    interned[idx].name = member_name;
-    interned[idx].type = members[idx].type;
+    if (!clux_union_type_add_member(
+            type, self->allocator, members[idx].name, members[idx].type)) {
+      (void)delete_clux_type(&type);
+      (void)clux_context_create_error_message(self,
+                                              NULL,
+                                              "union '%s' has duplicate "
+                                              "member '%s'",
+                                              name,
+                                              members[idx].name);
+      return NULL;
+    }
   }
-  clux_type_t *type =
-      create_clux_union_type(self->allocator, name, interned, count);
+  clux_union_type_seal(type);
   (void)vec_push(self->named_types, type);
   return type;
 }

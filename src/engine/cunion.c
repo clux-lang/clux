@@ -211,5 +211,6 @@ clux_type_t *create_clux_cunion_type(allocator_t *allocator,
       (clux_cunion_member_t *)((char *)meta + sizeof(clux_cunion_meta_t));
   (void)memcpy(meta->members, members, sizeof(clux_cunion_member_t) * count);
   meta->count = count;
+  clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
   return type;
 }
