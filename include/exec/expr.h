@@ -30,6 +30,11 @@ clux_value_t *exec_expr_interface_decl(clux_context_t *ctx, node_t *node);
 /* 匿名 interface 值求值：不按名 define，供 interface 装饰器包装路径
    使用。 */
 clux_value_t *exec_expr_interface_decl_value(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node);
+/* 匿名 struct 值求值：不按名 define，供 struct 装饰器包装路径使用
+   （方法签名引用 struct 自身在此路径不可解析，值级装饰路径待泛型
+   批次一并处理）。 */
+clux_value_t *exec_expr_struct_decl_value(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_assign(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_ternary(clux_context_t *ctx, node_t *node);

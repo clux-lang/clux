@@ -49,6 +49,29 @@ clux_type_t *create_clux_struct_type(allocator_t *allocator,
                                      const char *name,
                                      const clux_struct_decl_t *decl);
 clux_vtable_t *get_clux_struct_vtable(void);
+/* 两阶段构造的壳入口：只装字段表（三表留空待 install），字段名由调用方
+   保证生命周期（context 路径经 strs 驻留）。字段表一次定局，布局即时
+   seal——壳可安全作指针 base 或被方法签名引用，值位置不受影响（字段
+   完整即完整）。字段表为空非法，由 context 路径校验拦截。 */
+clux_type_t *create_clux_struct_type_shell(allocator_t *allocator,
+                                           const char *name,
+                                           const clux_struct_field_t *fields,
+                                           size_t field_count);
+/* 二次安装三表（attribute/method 名单/subtype）：两阶段构造的收尾步骤。
+   字段表在 create 时一次定局（布局即时 seal），三表是类型命名空间成员
+   不参与布局，允许在壳已按名 define 之后安装——适配方法签名引用 struct
+   自身（func 形参类型急切求值时壳须已可见）。三表整体拷入独立单块
+   （tables_block 持有，delete_meta 释放），各名字由调用方保证生命周期
+   （context 路径经 strs 驻留）。只允许安装一次（全空也置位），已安装
+   返回 false。 */
+bool clux_struct_type_install(clux_type_t *self,
+                              allocator_t *allocator,
+                              const clux_struct_attr_t *attrs,
+                              size_t attr_count,
+                              const char *const *methods,
+                              size_t method_count,
+                              const clux_struct_subtype_t *subtypes,
+                              size_t subtype_count);
 /* 字段表查询：按声明序。 */
 size_t clux_struct_field_count(clux_type_t *type);
 const clux_struct_field_t *clux_struct_get_field(clux_type_t *type, size_t idx);

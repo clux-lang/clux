@@ -1453,6 +1453,231 @@ clux_value_t *clux_return_signal_get_payload(clux_value_t *signal) {
   }
   return *(clux_value_t **)clux_value_get_raw(signal, 0);
 }
+/* 字段表校验（一次性 create 与两阶段 begin 共用）：缺名/空表/字段缺名
+   缺类型/重名记录语义化 error 并返回 false。 */
+static bool struct_fields_valid(clux_context_t *self,
+                                const char *name,
+                                const clux_struct_field_t *fields,
+                                size_t field_count) {
+  if (!name || !fields || field_count == 0) {
+    (void)clux_context_create_error_message(
+        self, NULL, "struct requires a name and at least one field");
+    return false;
+  }
+  for (size_t idx = 0; idx < field_count; idx++) {
+    if (!fields[idx].name || !fields[idx].type) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' field %zu requires a name and a type",
+          name,
+          idx);
+      return false;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(fields[idx].name, fields[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "struct '%s' has duplicate field '%s'",
+            name,
+            fields[idx].name);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+/* 三表校验（两阶段 install 使用；一次性 create 内联同构段）：attribute
+   缺名缺值/重名、method 缺名/重名/不在 attribute 表/对应值非 func、
+   subtype 缺名缺类型/重名记录语义化 error 并返回 false。 */
+static bool struct_tables_valid(clux_context_t *self,
+                                const char *name,
+                                const clux_struct_attr_t *attrs,
+                                size_t attr_count,
+                                const char *const *methods,
+                                size_t method_count,
+                                const clux_struct_subtype_t *subtypes,
+                                size_t subtype_count) {
+  for (size_t idx = 0; idx < attr_count; idx++) {
+    if (!attrs || !attrs[idx].name || !attrs[idx].value) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' attribute %zu requires a name and a value",
+          name,
+          idx);
+      return false;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(attrs[idx].name, attrs[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "struct '%s' has duplicate attribute '%s'",
+            name,
+            attrs[idx].name);
+        return false;
+      }
+    }
+  }
+  for (size_t idx = 0; idx < method_count; idx++) {
+    const char *method = methods ? methods[idx] : NULL;
+    if (!method) {
+      (void)clux_context_create_error_message(
+          self, NULL, "struct '%s' method %zu requires a name", name, idx);
+      return false;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(method, methods[prev]) == 0) {
+        (void)clux_context_create_error_message(
+            self, NULL, "struct '%s' has duplicate method '%s'", name, method);
+        return false;
+      }
+    }
+    /* method 判定看声明形式：名单里的名字须有同名 attribute 且值为 func
+       （var fn = func(...){...} 是 attr 不是 method，不进名单）。 */
+    const clux_struct_attr_t *attr = NULL;
+    for (size_t pos = 0; pos < attr_count; pos++) {
+      if (strcmp(attrs[pos].name, method) == 0) {
+        attr = &attrs[pos];
+        break;
+      }
+    }
+    if (!attr) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' method '%s' is not declared as an attribute",
+          name,
+          method);
+      return false;
+    }
+    if (clux_type_get_kind(clux_value_get_type(attr->value)) !=
+        CLUX_TYPE_FUNC) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' method '%s' requires a func value",
+          name,
+          method);
+      return false;
+    }
+  }
+  for (size_t idx = 0; idx < subtype_count; idx++) {
+    if (!subtypes || !subtypes[idx].name || !subtypes[idx].type) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' subtype %zu requires a name and a type",
+          name,
+          idx);
+      return false;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(subtypes[idx].name, subtypes[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "struct '%s' has duplicate subtype '%s'",
+            name,
+            subtypes[idx].name);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+/* 两阶段构造第一步：字段壳（布局即时 seal，三表留空待 install）。字段
+   校验与一次性通道一致，各名字经 strs 驻留；壳托管进 named_types。
+   不做结构去重——按名 define 的壳是本声明的唯一实例，struct 判等是
+   纯结构判等（类型名不参与），跳过去重语义无损。 */
+clux_type_t *clux_context_begin_struct_type(clux_context_t *self,
+                                            const char *name,
+                                            const clux_struct_field_t *fields,
+                                            size_t field_count) {
+  if (!struct_fields_valid(self, name, fields, field_count)) {
+    return NULL;
+  }
+  /* 零长度 VLA 是 UB，count 为 0 的表占位 1 个槽位（不会被读取）。 */
+  clux_struct_field_t interned_fields[field_count];
+  for (size_t idx = 0; idx < field_count; idx++) {
+    char *field_name = clux_context_alloc_str(self, strlen(fields[idx].name));
+    (void)memcpy(field_name, fields[idx].name, strlen(fields[idx].name));
+    interned_fields[idx].name = field_name;
+    interned_fields[idx].type = fields[idx].type;
+  }
+  clux_type_t *type = create_clux_struct_type_shell(
+      self->allocator, name, interned_fields, field_count);
+  if (type) {
+    (void)vec_push(self->named_types, type);
+  }
+  return type;
+}
+/* 两阶段构造收尾：三表校验 + 名字驻留 + 安装（只允许一次）。type 须是
+   本 context 的 struct 类型；已安装返回 false 并记录 error。 */
+bool clux_context_install_struct_tables(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const clux_struct_attr_t *attrs,
+                                        size_t attr_count,
+                                        const char *const *methods,
+                                        size_t method_count,
+                                        const clux_struct_subtype_t *subtypes,
+                                        size_t subtype_count) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_STRUCT) {
+    (void)clux_context_create_error_message(
+        self, NULL, "struct table installation requires a struct type");
+    return false;
+  }
+  const char *type_name = clux_type_get_name(type);
+  if (!struct_tables_valid(self,
+                           type_name ? type_name : "<unknown>",
+                           attrs,
+                           attr_count,
+                           methods,
+                           method_count,
+                           subtypes,
+                           subtype_count)) {
+    return false;
+  }
+  clux_struct_attr_t interned_attrs[attr_count ? attr_count : 1];
+  for (size_t idx = 0; idx < attr_count; idx++) {
+    char *attr_name = clux_context_alloc_str(self, strlen(attrs[idx].name));
+    (void)memcpy(attr_name, attrs[idx].name, strlen(attrs[idx].name));
+    interned_attrs[idx].name = attr_name;
+    interned_attrs[idx].value = attrs[idx].value;
+  }
+  const char *interned_methods[method_count ? method_count : 1];
+  for (size_t idx = 0; idx < method_count; idx++) {
+    char *method_name = clux_context_alloc_str(self, strlen(methods[idx]));
+    (void)memcpy(method_name, methods[idx], strlen(methods[idx]));
+    interned_methods[idx] = method_name;
+  }
+  clux_struct_subtype_t interned_subtypes[subtype_count ? subtype_count : 1];
+  for (size_t idx = 0; idx < subtype_count; idx++) {
+    char *subtype_name =
+        clux_context_alloc_str(self, strlen(subtypes[idx].name));
+    (void)memcpy(subtype_name, subtypes[idx].name, strlen(subtypes[idx].name));
+    interned_subtypes[idx].name = subtype_name;
+    interned_subtypes[idx].type = subtypes[idx].type;
+  }
+  if (!clux_struct_type_install(type,
+                                self->allocator,
+                                attr_count ? interned_attrs : NULL,
+                                attr_count,
+                                method_count ? interned_methods : NULL,
+                                method_count,
+                                subtype_count ? interned_subtypes : NULL,
+                                subtype_count)) {
+    (void)clux_context_create_error_message(
+        self,
+        NULL,
+        "struct '%s' tables are already installed",
+        type_name ? type_name : "<unknown>");
+    return false;
+  }
+  return true;
+}
 clux_type_t *clux_context_create_struct_type(clux_context_t *self,
                                              const char *name,
                                              const clux_struct_decl_t *decl) {

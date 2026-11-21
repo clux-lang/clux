@@ -23,7 +23,9 @@
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_interface.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
+#include "parser/node_struct_decl.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_union.h"
@@ -691,6 +693,57 @@ clux_value_t *exec_stmt_interface(clux_context_t *ctx, node_t *node) {
     value = apply_decorator(ctx,
                             value,
                             stmt_interface_node_get_decorator(node, idx),
+                            node_get_location(node));
+    if (clux_value_is_error(value)) {
+      return value;
+    }
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name = location_get(node_get_location(name_node), allocator);
+  clux_value_t *bound = clux_context_declare_value(
+      ctx, value, name, node_get_location(name_node));
+  allocator_free(allocator, (void **)&name);
+  return bound;
+}
+
+/* struct 语句 <decorator>* [export]? <struct_decl>（白皮书 §3.5、§8.1）：
+   与 interface/enum 语句同构——无装饰器时直接执行声明本体（经
+   exec_expr_struct_decl 两阶段构造：字段壳先行建并按名 define，方法
+   成员再求值，三表收尾安装）；有装饰器时先匿名求值源类型值（不按名
+   define），装饰器按源码顺序链式应用（求值为 func 时以类型值为实参
+   调用，编译期标记原样返回），最后 declare_value 具名化。语句层的
+   声明必须具名（匿名 struct 类型只在表达式位置合法）；export（run
+   阶段产出）是编译期语义，exec 层不处理。 */
+clux_value_t *exec_stmt_struct(clux_context_t *ctx, node_t *node) {
+  node_t *decl = stmt_struct_node_get_struct_decl(node);
+  if (!decl) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "struct statement requires a struct declaration");
+  }
+  node_t *name_node = struct_decl_node_get_name(decl);
+  if (!name_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "struct statement requires a named struct declaration");
+  }
+  size_t decorator_count = stmt_struct_node_get_decorator_count(node);
+  if (decorator_count == 0) {
+    return exec_operand(ctx, decl);
+  }
+  /* 匿名求值源类型值：不具名——type value 无捕获引用，装饰失败
+     直接返回 error，无需回滚声明。注意：此路径方法签名引用 struct
+     自身不可解析（壳名未 define），值级装饰路径待泛型批次处理。 */
+  clux_value_t *value = exec_expr_struct_decl_value(ctx, decl);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  for (size_t idx = 0; idx < decorator_count; idx++) {
+    value = apply_decorator(ctx,
+                            value,
+                            stmt_struct_node_get_decorator(node, idx),
                             node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;

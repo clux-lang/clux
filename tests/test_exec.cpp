@@ -37,7 +37,10 @@
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_enum.h"
+#include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
+#include "parser/node_struct_decl.h"
+#include "parser/node_struct_member.h"
 #include "parser/node_union.h"
 #include "parser/node_enum_decl.h"
 #include "parser/node_enum_variant.h"
@@ -47,6 +50,7 @@
 #include "parser/node_stmt_interface.h"
 #include "parser/node_generic_param.h"
 #include "engine/interface_type.h"
+#include "engine/struct.h"
 #include "engine/scope.h"
 #include "exec/call.h"
 #include "parser/node_subscript.h"
@@ -841,7 +845,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_UNION || kind == CLUX_NODE_STMT_UNION ||
         kind == CLUX_NODE_EXPR_ENUM_DECL || kind == CLUX_NODE_STMT_ENUM ||
         kind == CLUX_NODE_EXPR_INTERFACE_DECL ||
-        kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE;
+        kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE ||
+        kind == CLUX_NODE_EXPR_STRUCT_DECL || kind == CLUX_NODE_STMT_STRUCT;
     if (synthetic_skip) {
       continue;
     }
@@ -10428,4 +10433,1009 @@ TEST_F(ExecLiteralTest, InterfaceStmtFuncDecoratorWrapsEndToEnd) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
       << "a failing decorator must not define the name";
   delete_node(&fail_stmt);
+}
+
+/* ---- exec_expr_struct_decl / exec_stmt_struct：struct 声明 exec ---- */
+
+/* 合成 name: type 字段成员（name/type 结点由调用方构造并持有）。 */
+static node_t *
+make_field_member_of(allocator_t *allocator, node_t *name, node_t *type) {
+  node_t *node = create_field_node(allocator);
+  field_node_set_name(node, name);
+  field_node_set_type(node, type);
+  return node;
+}
+
+/* 合成 kind 结点，location 覆盖 text 完整区间（text 须为持久存储，
+   与 fixture make_node 同构，供静态构造 helper 使用）。 */
+static node_t *make_static_node_of(allocator_t *allocator,
+                                   node_kind_t kind,
+                                   const char *text) {
+  node_t *node = create_node(allocator, kind);
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = text;
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = text + strlen(text);
+  loc.end.column = 1;
+  loc.end.line = 1;
+  node_set_location(node, &loc);
+  return node;
+}
+
+/* 合成 struct name_text { members } 声明体（name_text 为 NULL 表示匿名，
+   generics 允许为 NULL，members 允许为 NULL 走容错路径）。 */
+static node_t *make_struct_decl_of(allocator_t *allocator,
+                                   const char *name_text,
+                                   node_t *generics,
+                                   node_t *members) {
+  node_t *node = create_struct_decl_node(allocator);
+  struct_decl_node_set_name(
+      node,
+      name_text ? make_static_node_of(
+                      allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text)
+                : NULL);
+  struct_decl_node_set_generics(node, generics);
+  struct_decl_node_set_body(node, members);
+  return node;
+}
+
+/* 合成 var name = value 成员（attribute 路径，name/value 结点由调用方
+   构造并持有，delete 根结点时一并释放）。 */
+static node_t *
+make_var_member_of(allocator_t *allocator, node_t *name, node_t *value) {
+  node_t *node = create_stmt_var_node(allocator);
+  stmt_var_node_set_name(node, name);
+  stmt_var_node_set_value(node, value);
+  return node;
+}
+
+/* 合成 ...type 展开成员（embed 路径，type 结点由调用方构造并持有）。 */
+static node_t *make_embed_member_of(allocator_t *allocator, node_t *type) {
+  node_t *node = create_struct_embed_node(allocator);
+  struct_embed_node_set_type(node, type);
+  return node;
+}
+
+/* 场景: struct User { name: str; var count = 0; func rename(self: *User,
+        new: str): str { return new; } } 具名两阶段构造快乐路径
+   预期: 壳按名 define（lookup 恒等）；字段表 1 项（name: str 指针与
+         builtin 恒等）；attribute 表 2 项（count 值可读回 i32 0，
+         rename 为 func 值）；method 名单只含 rename；方法首参 *User
+         与引擎 ptr 通道指针恒等（self 引用穿过壳的按名 define），
+         次参等于 str builtin；未知 attr 查询返回 nullptr */
+TEST_F(ExecLiteralTest,
+       StructDeclNamedPathInstallsShellAndSelfReferencingMethod) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "name"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "count"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User"))));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "new"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "new"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *rename_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "rename"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, rename_decl));
+  node_t *decl = make_struct_decl_of(a, "User", NULL, members);
+
+  clux_value_t *result = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(clux_context_lookup(ctx, "User", NULL), result)
+      << "the named path must bind the shell type value under the name";
+  clux_type_t *user_type = type_described_by(result);
+  ASSERT_NE(user_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(user_type), CLUX_TYPE_STRUCT);
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
+  EXPECT_EQ(clux_struct_field_count(user_type), 1u);
+  const clux_struct_field_t *name_field =
+      clux_struct_find_field(user_type, "name");
+  ASSERT_NE(name_field, nullptr);
+  EXPECT_STREQ(name_field->name, "name");
+  EXPECT_EQ(name_field->type, str_type);
+  EXPECT_EQ(clux_struct_attr_count(user_type), 2u);
+  const clux_struct_attr_t *count_attr =
+      clux_struct_find_attr(user_type, "count");
+  ASSERT_NE(count_attr, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(count_attr->value)),
+            CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(count_attr->value), 0);
+  const clux_struct_attr_t *rename_attr =
+      clux_struct_find_attr(user_type, "rename");
+  ASSERT_NE(rename_attr, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rename_attr->value)),
+            CLUX_TYPE_FUNC);
+  EXPECT_TRUE(clux_struct_is_method(user_type, "rename"));
+  EXPECT_FALSE(clux_struct_is_method(user_type, "count"))
+      << "the count attribute is a var member and must not enter the method "
+         "list";
+  clux_type_t *rename_type = clux_value_get_type(rename_attr->value);
+  EXPECT_EQ(clux_func_param_count(rename_type), 2u);
+  EXPECT_EQ(clux_func_get_param(rename_type, 0),
+            clux_context_get_ptr_type(ctx, user_type))
+      << "the self parameter must resolve to the ptr of the shell itself";
+  EXPECT_EQ(clux_func_get_param(rename_type, 1), str_type);
+  EXPECT_EQ(clux_struct_find_attr(user_type, "absent"), nullptr)
+      << "an unknown attribute lookup must return NULL";
+  delete_node(&decl);
+}
+
+/* 场景: struct Base { a: i32; b: str } 前置声明 + struct Derived
+        { pre: u8; ...Base; post: bool } embed 在字段间展开
+   预期: Derived 字段表按声明序 4 项 pre/a/b/post，embed 槽位展开保持
+         Base 声明顺序；展开字段类型指针与来源字段恒等（借用展开） */
+TEST_F(ExecLiteralTest, StructDeclEmbedExpandsFieldsInDeclarationOrder) {
+  node_t *base_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      base_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      base_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  node_t *base_decl = make_struct_decl_of(a, "Base", NULL, base_members);
+  clux_value_t *base_result = exec_expr_struct_decl(ctx, base_decl);
+  ASSERT_NE(base_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(base_result));
+  clux_type_t *base_type = type_described_by(base_result);
+  ASSERT_NE(base_type, nullptr);
+
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "pre"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "u8")));
+  struct_members_node_add_member(
+      members,
+      make_embed_member_of(
+          a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Base")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "post"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "bool")));
+  node_t *decl = make_struct_decl_of(a, "Derived", NULL, members);
+  clux_value_t *result = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  clux_type_t *derived = type_described_by(result);
+  ASSERT_NE(derived, nullptr);
+  ASSERT_EQ(clux_struct_field_count(derived), 4u);
+  const char *names[] = {"pre", "a", "b", "post"};
+  clux_type_kind_t kinds[] = {
+      CLUX_TYPE_U8, CLUX_TYPE_I32, CLUX_TYPE_STR, CLUX_TYPE_BOOL};
+  for (size_t idx = 0; idx < 4; idx++) {
+    const clux_struct_field_t *field = clux_struct_get_field(derived, idx);
+    ASSERT_NE(field, nullptr) << "field " << idx;
+    EXPECT_STREQ(field->name, names[idx]) << "field " << idx;
+    EXPECT_EQ(clux_type_get_kind(field->type), kinds[idx]) << "field " << idx;
+  }
+  EXPECT_EQ(clux_struct_get_field(derived, 1)->type,
+            clux_struct_get_field(base_type, 0)->type)
+      << "embed expansion must borrow the source field type pointers";
+  EXPECT_EQ(clux_struct_get_field(derived, 2)->type,
+            clux_struct_get_field(base_type, 1)->type)
+      << "embed expansion must borrow the source field type pointers";
+  delete_node(&decl);
+  delete_node(&base_decl);
+}
+
+/* 场景: exec_stmt_struct / exec_expr_struct_decl 拒绝路径——语句缺声明
+        体/语句匿名声明体/声明体带泛型参数表
+   预期: 各路径返回精确错误文本；泛型失败时名字不 define（lookup 产出
+         error 哨兵而非 nullptr） */
+TEST_F(ExecLiteralTest, StructStatementRejectsMissingAndGenericDeclarations) {
+  node_t *empty = create_stmt_struct_node(a);
+  clux_value_t *missing = exec_stmt_struct(ctx, empty);
+  ASSERT_NE(missing, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(missing)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(missing),
+               "struct statement requires a struct declaration");
+  delete_node(&empty);
+
+  node_t *anon_stmt = create_stmt_struct_node(a);
+  stmt_struct_node_set_struct_decl(anon_stmt,
+                                   make_struct_decl_of(a, NULL, NULL, NULL));
+  clux_value_t *anon = exec_stmt_struct(ctx, anon_stmt);
+  ASSERT_NE(anon, nullptr);
+  EXPECT_STREQ(error_message_of(anon),
+               "struct statement requires a named struct declaration");
+  delete_node(&anon_stmt);
+
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *generic_decl = make_struct_decl_of(
+      a,
+      "Cell",
+      make_static_node_of(a, CLUX_NODE_GENERIC_PARAMS, "<T>"),
+      members);
+  clux_value_t *generic = exec_expr_struct_decl(ctx, generic_decl);
+  ASSERT_NE(generic, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(generic)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(generic),
+               "generic struct is not supported yet");
+  clux_value_t *probe = clux_context_lookup(ctx, "Cell", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "the failed generic declaration must not define the name";
+  delete_node(&generic_decl);
+}
+
+/* 场景: embed 三条错误路径——embed 成员缺类型结点/嵌入非 struct 类型
+        （i32 builtin）/嵌入未声明标识符 Nope
+   预期: 前两条产出精确 embed 错误文本；第三条透传标识符求值错误文本 */
+TEST_F(ExecLiteralTest, StructDeclEmbedErrorPathsReportSemanticErrors) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(members, create_struct_embed_node(a));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  node_t *decl = make_struct_decl_of(a, "SE", NULL, members);
+  clux_value_t *missing_type = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(missing_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(missing_type)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(missing_type), "struct embed requires a type");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_embed_member_of(
+          a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  decl = make_struct_decl_of(a, "SE", NULL, members);
+  clux_value_t *not_struct = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(not_struct, nullptr);
+  EXPECT_STREQ(error_message_of(not_struct),
+               "struct embed requires a struct type");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_embed_member_of(
+          a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Nope")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  decl = make_struct_decl_of(a, "SE", NULL, members);
+  clux_value_t *undeclared = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(undeclared, nullptr);
+  EXPECT_STREQ(error_message_of(undeclared),
+               "use of undeclared identifier 'Nope'");
+  delete_node(&decl);
+}
+
+/* 场景: 字段表四条错误路径——FIELD 缺名（成员索引 0）/缺类型/类型求值
+        失败（未声明标识符 Nada）/重复字段名触发 begin 校验失败
+   预期: 前三条精确错误文本（缺名消息的 %zu 是成员索引而非字段计数）；
+         重复字段被 context 字段校验拦截后 exec 产出统一 collection
+         failed 消息，且名字不 define（lookup 为 error 哨兵） */
+TEST_F(ExecLiteralTest, StructDeclFieldErrorPathsAndCollectionFailure) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          NULL,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  node_t *decl = make_struct_decl_of(a, "SF", NULL, members);
+  clux_value_t *no_name = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(no_name, nullptr);
+  EXPECT_STREQ(error_message_of(no_name),
+               "struct 'SF' field 0 requires a name");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"), NULL));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  decl = make_struct_decl_of(a, "SF", NULL, members);
+  clux_value_t *no_type = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(no_type, nullptr);
+  EXPECT_STREQ(error_message_of(no_type),
+               "struct 'SF' field 'x' requires a type");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Nada")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  decl = make_struct_decl_of(a, "SF", NULL, members);
+  clux_value_t *bad_type = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(bad_type, nullptr);
+  EXPECT_STREQ(error_message_of(bad_type),
+               "use of undeclared identifier 'Nada'");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  decl = make_struct_decl_of(a, "SF", NULL, members);
+  clux_value_t *dup = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(dup, nullptr);
+  EXPECT_STREQ(error_message_of(dup), "struct 'SF' field collection failed");
+  clux_value_t *probe = clux_context_lookup(ctx, "SF", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "the failed declaration must not define the name";
+  delete_node(&decl);
+}
+
+/* 场景: 同名 struct 二次声明——壳已按名 define 后再次求值同名声明体
+   预期: 第二次 begin 成功（壳不去重）但 define 撞名，create_type_value
+         返回 duplicate declaration error 并作为整体结果传播 */
+TEST_F(ExecLiteralTest, StructDeclDuplicateNamePropagatesDefineError) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "Twice", NULL, members);
+  clux_value_t *first = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(first, nullptr);
+  EXPECT_FALSE(clux_value_is_error(first));
+  clux_value_t *second = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(second)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(second), "duplicate declaration 'Twice'");
+  delete_node(&decl);
+}
+
+/* 场景: 无装饰器 STMT_STRUCT 语句——语句层主路径（decorator_count == 0
+        经 exec_operand 直接执行声明本体）
+   预期: 声明按名 define（lookup 恒等），被描述类型为 STRUCT 且字段表
+         与声明体一致 */
+TEST_F(ExecLiteralTest, StructStatementWithoutDecoratorsDefinesByName) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *stmt = create_stmt_struct_node(a);
+  stmt_struct_node_set_struct_decl(
+      stmt, make_struct_decl_of(a, "Plain", NULL, members));
+  clux_value_t *result = exec_stmt_struct(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "Plain", NULL), result)
+      << "the undecorated statement path must define the name";
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_STRUCT);
+  EXPECT_EQ(clux_struct_field_count(described), 1u);
+  const clux_struct_field_t *plain_field =
+      clux_struct_find_field(described, "f");
+  ASSERT_NE(plain_field, nullptr)
+      << "the declared field must be present after the define";
+  EXPECT_STREQ(plain_field->name, "f");
+  delete_node(&stmt);
+}
+
+/* 场景: attribute 四条错误路径——var 成员带装饰器/缺名（成员索引 1）/
+        缺初值/重名 'a'
+   预期: 各路径精确错误文本（缺名消息的 %zu 是成员索引——首个成员是
+         合法字段，nameless var 位于成员位 1） */
+TEST_F(ExecLiteralTest, StructDeclAttributeErrorPaths) {
+  node_t *members = create_struct_members_node(a);
+  node_t *decorated = make_var_member_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0"));
+  stmt_var_node_add_decorator(
+      decorated,
+      make_decorator_of(
+          a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(members, decorated);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  node_t *decl = make_struct_decl_of(a, "SA", NULL, members);
+  clux_value_t *decorated_attr = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(decorated_attr, nullptr);
+  EXPECT_STREQ(error_message_of(decorated_attr),
+               "decorated struct attribute is not supported yet");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a, NULL, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+  decl = make_struct_decl_of(a, "SA1", NULL, members);
+  clux_value_t *no_name = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(no_name, nullptr);
+  EXPECT_STREQ(error_message_of(no_name),
+               "struct 'SA1' attribute 1 requires a name");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"), NULL));
+  decl = make_struct_decl_of(a, "SA2", NULL, members);
+  clux_value_t *no_init = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(no_init, nullptr);
+  EXPECT_STREQ(error_message_of(no_init),
+               "struct attribute requires an initializer");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  decl = make_struct_decl_of(a, "SA3", NULL, members);
+  clux_value_t *dup = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(dup, nullptr);
+  EXPECT_STREQ(error_message_of(dup),
+               "struct 'SA3' has duplicate attribute 'a'");
+  delete_node(&decl);
+
+  /* attribute 初值表达式求值失败：error 值原样传播。 */
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "nope")));
+  decl = make_struct_decl_of(a, "SA4", NULL, members);
+  clux_value_t *bad_init = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(bad_init, nullptr);
+  EXPECT_STREQ(error_message_of(bad_init),
+               "use of undeclared identifier 'nope'");
+  delete_node(&decl);
+}
+
+/* 场景: method 四条错误路径——func 成员带装饰器/缺函数声明体（成员
+        索引 1）/函数声明缺名（成员索引 1）/与既有 attribute 'act' 重名
+   预期: 各路径精确错误文本（重名走 attribute 重名通道而非 method 通道；
+         缺声明体/缺名消息的 %zu 是成员索引） */
+TEST_F(ExecLiteralTest, StructDeclMethodErrorPaths) {
+  node_t *members = create_struct_members_node(a);
+  node_t *decorated_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      NULL,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m"),
+      NULL,
+      create_stmt_block_node(a));
+  node_t *decorated_method = make_stmt_func_of(a, decorated_decl);
+  stmt_func_node_add_decorator(
+      decorated_method,
+      make_decorator_of(
+          a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(members, decorated_method);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  node_t *decl = make_struct_decl_of(a, "SM", NULL, members);
+  clux_value_t *decorated_method_result = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(decorated_method_result, nullptr);
+  EXPECT_STREQ(error_message_of(decorated_method_result),
+               "decorated struct method is not supported yet");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(members, create_stmt_func_node(a));
+  decl = make_struct_decl_of(a, "SM1", NULL, members);
+  clux_value_t *no_decl = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(no_decl, nullptr);
+  EXPECT_STREQ(error_message_of(no_decl),
+               "struct 'SM1' method 1 requires a function declaration");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      members,
+      make_stmt_func_of(
+          a,
+          make_func_decl_of(
+              a, NULL, NULL, NULL, NULL, NULL, create_stmt_block_node(a))));
+  decl = make_struct_decl_of(a, "SM2", NULL, members);
+  clux_value_t *no_name = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(no_name, nullptr);
+  EXPECT_STREQ(error_message_of(no_name),
+               "struct 'SM2' method 1 requires a name");
+  delete_node(&decl);
+
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "act"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+  struct_members_node_add_member(
+      members,
+      make_stmt_func_of(
+          a,
+          make_func_decl_of(
+              a,
+              NULL,
+              NULL,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "act"),
+              NULL,
+              create_stmt_block_node(a))));
+  decl = make_struct_decl_of(a, "SM3", NULL, members);
+  clux_value_t *conflict = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(conflict, nullptr);
+  EXPECT_STREQ(error_message_of(conflict),
+               "struct 'SM3' has duplicate attribute 'act'");
+  delete_node(&decl);
+
+  /* method 函数求值失败（形参类型为未声明标识符）：error 原样传播。 */
+  members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  node_t *bad_params = create_func_params_node(a);
+  func_params_node_add_param(
+      bad_params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Nada")));
+  struct_members_node_add_member(
+      members,
+      make_stmt_func_of(
+          a,
+          make_func_decl_of(
+              a,
+              NULL,
+              NULL,
+              bad_params,
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str"),
+              create_stmt_block_node(a))));
+  decl = make_struct_decl_of(a, "SM4", NULL, members);
+  clux_value_t *bad_method = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(bad_method, nullptr);
+  EXPECT_STREQ(error_message_of(bad_method),
+               "use of undeclared identifier 'Nada'");
+  delete_node(&decl);
+}
+
+/* 场景: 匿名 struct 声明（无名，字段 n: i32 + attribute v = 5）经
+        exec_expr_struct_decl_value 与 exec_expr_struct_decl 双通道求值
+   预期: 两通道都产出无名的 type value（不 define 名字）：字段表与
+         attribute 表完整（attr 值可读回 5）；同一声明体两次求值产出
+         不同类型实例（两阶段构造不做结构去重） */
+TEST_F(ExecLiteralTest, StructDeclAnonymousExprEvaluatesUnnamedTypeValue) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5")));
+  node_t *decl = make_struct_decl_of(a, NULL, NULL, members);
+
+  clux_value_t *first = exec_expr_struct_decl_value(ctx, decl);
+  ASSERT_NE(first, nullptr);
+  EXPECT_FALSE(clux_value_is_error(first));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(first)), CLUX_TYPE_TYPE);
+  clux_type_t *first_type = type_described_by(first);
+  ASSERT_NE(first_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(first_type), CLUX_TYPE_STRUCT);
+  EXPECT_EQ(clux_struct_field_count(first_type), 1u);
+  EXPECT_EQ(clux_struct_attr_count(first_type), 1u);
+  const clux_struct_attr_t *v_attr = clux_struct_find_attr(first_type, "v");
+  ASSERT_NE(v_attr, nullptr);
+  EXPECT_EQ(read_i32(v_attr->value), 5);
+
+  clux_value_t *second = exec_expr_struct_decl_value(ctx, decl);
+  ASSERT_NE(second, nullptr);
+  EXPECT_FALSE(clux_value_is_error(second));
+  EXPECT_NE(type_described_by(second), first_type)
+      << "two-phase struct construction must not dedupe structurally "
+         "identical shells";
+
+  clux_value_t *third = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(third, nullptr);
+  EXPECT_FALSE(clux_value_is_error(third));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(third)), CLUX_TYPE_TYPE)
+      << "the anonymous declaration via the declare_named path must fall "
+         "through to the unnamed type value";
+  delete_node(&decl);
+}
+
+/* 场景: STMT_STRUCT 装饰器链——[[7]] 编译期标记透传；wrap_t(u: type):
+        type { return i32; } func 装饰器真实包装（参照 interface 批次
+        e2e 模式）；[[no_such_decorator]] 失败传播
+   预期: 透传路径 DP 绑定源 type value（字段表 1 项保持、执行器不安装）；
+         包装路径 DW 被描述类型恒等 i32 builtin、执行器懒安装、名字绑定
+         包装结果；失败路径 DZ 返回 error 且名字不 define */
+TEST_F(ExecLiteralTest, StructStmtDecoratorChainWrapsAndDeclaresByName) {
+  node_t *pass_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      pass_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *pass_stmt = create_stmt_struct_node(a);
+  stmt_struct_node_set_struct_decl(
+      pass_stmt, make_struct_decl_of(a, "DP", NULL, pass_members));
+  stmt_struct_node_add_decorator(
+      pass_stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  clux_value_t *passed = exec_stmt_struct(ctx, pass_stmt);
+  ASSERT_NE(passed, nullptr);
+  EXPECT_FALSE(clux_value_is_error(passed));
+  EXPECT_EQ(clux_context_lookup(ctx, "DP", NULL), passed)
+      << "non-func decorators must still bind the value under the name";
+  clux_type_t *dp_type = type_described_by(passed);
+  ASSERT_NE(dp_type, nullptr);
+  EXPECT_EQ(clux_struct_field_count(dp_type), 1u)
+      << "non-func decorators must pass the source type value through";
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "non-func decorators must not touch the executor";
+  delete_node(&pass_stmt);
+
+  clux_type_t *meta = clux_context_get_type_type(ctx);
+  clux_type_t *wrap_params[1] = {meta};
+  clux_type_t *wrap_type = clux_context_create_func_type(
+      ctx, "wrap_t", NULL, 0, wrap_params, 1, meta);
+  ASSERT_NE(wrap_type, nullptr);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type")));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *wrap_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t"),
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type"),
+      body);
+  clux_value_t *wrap_func =
+      clux_context_create_func(ctx, wrap_type, NULL, NULL);
+  ASSERT_NE(wrap_func, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+            wrap_func);
+  clux_value_t *wrap_bound = clux_context_declare_value(
+      ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
+  ASSERT_NE(wrap_bound, nullptr);
+  EXPECT_FALSE(clux_value_is_error(wrap_bound));
+
+  node_t *wrap_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      wrap_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *wrap_stmt = create_stmt_struct_node(a);
+  stmt_struct_node_set_struct_decl(
+      wrap_stmt, make_struct_decl_of(a, "DW", NULL, wrap_members));
+  stmt_struct_node_add_decorator(
+      wrap_stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t")));
+  clux_value_t *wrapped = exec_stmt_struct(ctx, wrap_stmt);
+  ASSERT_NE(wrapped, nullptr);
+  EXPECT_FALSE(clux_value_is_error(wrapped));
+  EXPECT_EQ(clux_context_lookup(ctx, "DW", NULL), wrapped)
+      << "the decorated path must bind the wrapped value under the name";
+  clux_type_t *described = type_described_by(wrapped);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "the decorator must substitute the source struct type with its "
+         "return type";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "invoking the func decorator must lazily install the executor";
+  delete_node(&wrap_stmt);
+  delete_node(&wrap_decl);
+
+  node_t *fail_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      fail_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *fail_stmt = create_stmt_struct_node(a);
+  stmt_struct_node_set_struct_decl(
+      fail_stmt, make_struct_decl_of(a, "DZ", NULL, fail_members));
+  stmt_struct_node_add_decorator(
+      fail_stmt,
+      make_decorator_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "no_such_decorator")));
+  clux_value_t *failed = exec_stmt_struct(ctx, fail_stmt);
+  ASSERT_NE(failed, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(failed)), CLUX_TYPE_ERROR)
+      << "a failing decorator must propagate its error value";
+  clux_value_t *probe = clux_context_lookup(ctx, "DZ", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "a failing decorator must not define the name";
+  delete_node(&fail_stmt);
+}
+
+/* 场景: context 层两阶段构造直连——begin 字段校验六条 NULL 路径（缺名/
+        缺表/空表/字段缺名/字段缺类型/重名），install 对非 struct 类型与
+        attr/method/subtype 九类非法表返回 false，正向安装后三表可读，
+        二次 install（含全空）拒绝
+   预期: 校验失败通道只可观测返回值（错误值被 (void) 丢弃）；正向安装后
+         attr_count/mask/subtype 表与注入数据一致（method 判定看名单，
+         名单外同名 attr 只是普通 attribute） */
+TEST_F(ExecLiteralTest, StructContextTwoPhaseBeginAndInstallValidationPaths) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
+  clux_struct_field_t fields[2] = {{"x", i32_type}, {"y", str_type}};
+
+  clux_type_t *shell = clux_context_begin_struct_type(ctx, "SB", fields, 2);
+  ASSERT_NE(shell, nullptr);
+  EXPECT_EQ(clux_struct_field_count(shell), 2u);
+  ASSERT_NE(clux_struct_find_field(shell, "x"), nullptr);
+  EXPECT_STREQ(clux_struct_find_field(shell, "x")->name, "x");
+
+  EXPECT_EQ(clux_context_begin_struct_type(ctx, NULL, fields, 2), nullptr)
+      << "a missing name must be rejected";
+  EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", NULL, 2), nullptr)
+      << "a missing field table must be rejected";
+  EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", fields, 0), nullptr)
+      << "an empty field table must be rejected";
+  clux_struct_field_t no_name[1] = {{NULL, i32_type}};
+  EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", no_name, 1), nullptr)
+      << "a field without a name must be rejected";
+  clux_struct_field_t no_type[1] = {{"x", NULL}};
+  EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", no_type, 1), nullptr)
+      << "a field without a type must be rejected";
+  clux_struct_field_t dup[2] = {{"x", i32_type}, {"x", str_type}};
+  EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", dup, 2), nullptr)
+      << "duplicate field names must be rejected";
+
+  clux_value_t *num = clux_context_create_i32(ctx, 4, NULL, NULL);
+  ASSERT_NE(num, nullptr);
+  clux_type_t *m_params[1] = {i32_type};
+  clux_type_t *m_type =
+      clux_context_create_func_type(ctx, "m", NULL, 0, m_params, 1, i32_type);
+  ASSERT_NE(m_type, nullptr);
+  clux_value_t *func = clux_context_create_func(ctx, m_type, NULL, NULL);
+  ASSERT_NE(func, nullptr);
+
+  clux_struct_field_t one[1] = {{"n", i32_type}};
+  clux_type_t *target = clux_context_begin_struct_type(ctx, "SIN", one, 1);
+  ASSERT_NE(target, nullptr);
+
+  clux_struct_attr_t bad_attr_name[1] = {{NULL, num}};
+  clux_struct_attr_t bad_attr_value[1] = {{"n", NULL}};
+  clux_struct_attr_t dup_attr[2] = {{"a", num}, {"a", num}};
+  clux_struct_attr_t mixed_attrs[2] = {{"n", num}, {"m", func}};
+  clux_struct_attr_t nonfunc_attrs[1] = {{"m", num}};
+  const char *null_method[1] = {NULL};
+  const char *missing_method[1] = {"gone"};
+  const char *dup_method[2] = {"m", "m"};
+  const char *valid_method[1] = {"m"};
+  clux_struct_subtype_t bad_sub_name[1] = {{NULL, i32_type}};
+  clux_struct_subtype_t bad_sub_type[1] = {{"s", NULL}};
+  clux_struct_subtype_t dup_sub[2] = {{"s", i32_type}, {"s", i32_type}};
+  clux_struct_subtype_t subtypes[1] = {{"s", i32_type}};
+
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, i32_type, NULL, 0, NULL, 0, NULL, 0))
+      << "installing into a non-struct type must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, bad_attr_name, 1, valid_method, 1, subtypes, 1))
+      << "an attribute without a name must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, bad_attr_value, 1, valid_method, 1, subtypes, 1))
+      << "an attribute without a value must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, dup_attr, 2, NULL, 0, NULL, 0))
+      << "duplicate attribute names must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, NULL, 0, null_method, 1, NULL, 0))
+      << "a method without a name must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, mixed_attrs, 2, missing_method, 1, NULL, 0))
+      << "a method missing from the attribute table must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, nonfunc_attrs, 1, valid_method, 1, NULL, 0))
+      << "a method backed by a non-func attribute value must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, mixed_attrs, 2, dup_method, 2, NULL, 0))
+      << "duplicate method names must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, NULL, 0, NULL, 0, bad_sub_name, 1))
+      << "a subtype without a name must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, NULL, 0, NULL, 0, bad_sub_type, 1))
+      << "a subtype without a type must be rejected";
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, NULL, 0, NULL, 0, dup_sub, 2))
+      << "duplicate subtype names must be rejected";
+
+  EXPECT_TRUE(clux_context_install_struct_tables(
+      ctx, target, mixed_attrs, 2, valid_method, 1, subtypes, 1));
+  EXPECT_EQ(clux_struct_attr_count(target), 2u);
+  const clux_struct_attr_t *n_attr = clux_struct_find_attr(target, "n");
+  ASSERT_NE(n_attr, nullptr)
+      << "the installed attribute must be retrievable by name";
+  EXPECT_EQ(read_i32(n_attr->value), 4);
+  EXPECT_TRUE(clux_struct_is_method(target, "m"));
+  EXPECT_FALSE(clux_struct_is_method(target, "n"))
+      << "the method list determines the method mask, not the attribute table";
+  EXPECT_EQ(clux_struct_subtype_count(target), 1u);
+  ASSERT_NE(clux_struct_find_subtype(target, "s"), nullptr);
+  EXPECT_EQ(clux_struct_find_subtype(target, "s")->type, i32_type);
+  EXPECT_FALSE(clux_context_install_struct_tables(
+      ctx, target, NULL, 0, NULL, 0, NULL, 0))
+      << "a second install (even an empty one) must be rejected";
 }

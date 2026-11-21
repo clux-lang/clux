@@ -392,6 +392,22 @@ clux_value_t *clux_return_signal_get_payload(clux_value_t *signal);
 clux_type_t *clux_context_create_struct_type(clux_context_t *self,
                                              const char *name,
                                              const clux_struct_decl_t *decl);
+/* struct 两阶段构造（适配方法签名引用 struct 自身——方法形参类型急切求值
+   时字段壳须已按名 define）：begin 建字段壳（布局即时 seal，三表留空，
+   不做结构去重）并托管；install 是收尾（三表校验+驻留+安装，只允许
+   一次）。字段校验与一次性通道同构，入参非法返回 NULL/记录 error。 */
+clux_type_t *clux_context_begin_struct_type(clux_context_t *self,
+                                            const char *name,
+                                            const clux_struct_field_t *fields,
+                                            size_t field_count);
+bool clux_context_install_struct_tables(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const clux_struct_attr_t *attrs,
+                                        size_t attr_count,
+                                        const char *const *methods,
+                                        size_t method_count,
+                                        const clux_struct_subtype_t *subtypes,
+                                        size_t subtype_count);
 /* 创建 struct 零值（memset 清零，全部字段同时有效）：type 须是
    CLUX_TYPE_STRUCT。字段读写走通用 field（写穿 view）。 */
 clux_value_t *clux_context_create_struct(clux_context_t *self,

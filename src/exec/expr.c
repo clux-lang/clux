@@ -26,6 +26,10 @@
 #include "parser/node_func_type.h"
 #include "parser/node_group.h"
 #include "parser/node_slice.h"
+#include "parser/node_stmt_func.h"
+#include "parser/node_stmt_var.h"
+#include "parser/node_struct_decl.h"
+#include "parser/node_struct_member.h"
 #include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
 #include "parser/node_tuple.h"
@@ -1438,6 +1442,318 @@ clux_value_t *exec_expr_interface_decl(clux_context_t *ctx, node_t *node) {
 clux_value_t *exec_expr_interface_decl_value(clux_context_t *ctx,
                                              node_t *node) {
   return exec_expr_interface_decl_impl(ctx, node, false);
+}
+
+/* struct 定义（白皮书 §3.5）两阶段构造：func 成员形参类型急切求值
+   （self: *User 引用 struct 自身）与"壳按名 define"互为先后——先收集
+   字段表并建壳（布局即时 seal），具名时先 define 出壳的 type value
+   （方法签名此刻可解析自身），再求值 var（attribute）与 func（method）
+   成员，最后 install 三表收尾。implements 是 sema 断言（exec 忽略）；
+   泛型暂不支持；匿名 struct 合法（define 只在具名时发生——装饰器包装
+   走匿名路径，方法签名引用自身会报 use of undeclared identifier，
+   值级装饰路径待泛型批次一并处理）。 */
+static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
+                                                node_t *node,
+                                                bool declare_named) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  node_t *name_node = struct_decl_node_get_name(node);
+  char *name =
+      name_node ? location_get(node_get_location(name_node), allocator) : NULL;
+  /* 匿名 struct 合法：错误消息与引擎构造用关键字文本回退类型名。 */
+  const char *type_name = name ? name : "struct";
+  if (struct_decl_node_get_generics(node)) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "generic struct is not supported yet");
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  node_t *body = struct_decl_node_get_body(node);
+  size_t count = body ? struct_members_node_get_member_count(body) : 0;
+  /* pass A：embed 类型先行求值（依赖外部类型，不依赖壳——自引用 embed
+     此刻名字未就位，undeclared 自然拦截），同时统计字段总数（embed 按
+     声明位置就地展开，白皮书 §3.5 嵌入语义）。 */
+  clux_type_t *embed_types[count ? count : 1];
+  size_t field_total = 0;
+  clux_value_t *fail = NULL;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    node_t *member = struct_members_node_get_member(body, idx);
+    embed_types[idx] = NULL;
+    if (!member || node_get_kind(member) != CLUX_NODE_STRUCT_EMBED) {
+      if (member && node_get_kind(member) == CLUX_NODE_FIELD) {
+        field_total++;
+      }
+      continue;
+    }
+    node_t *embed_type_node = struct_embed_node_get_type(member);
+    if (!embed_type_node) {
+      fail = clux_context_create_error_message(
+          ctx, node_get_location(member), "struct embed requires a type");
+      break;
+    }
+    clux_value_t *err = NULL;
+    clux_type_t *embed_type = exec_operand_type(ctx, embed_type_node, &err);
+    if (!embed_type) {
+      fail = err;
+      break;
+    }
+    if (clux_type_get_kind(embed_type) != CLUX_TYPE_STRUCT) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(embed_type_node),
+          "struct embed requires a struct type");
+      break;
+    }
+    embed_types[idx] = embed_type;
+    field_total += clux_struct_field_count(embed_type);
+  }
+  /* pass B：填充字段表（FIELD 名字+类型；EMBED 按声明序展开），建壳并
+     具名 define（方法签名可解析 struct 名）。EMBED 展开的字段名借用自
+     embed 类型（strs 驻留），owned_names 逐槽标记仅供本地释放循环跳过
+     借用指针，避免把 embed 类型的驻留名当本地拷贝释放。 */
+  clux_struct_field_t fields[field_total ? field_total : 1];
+  const char /* nullable */ *owned_names[field_total ? field_total : 1];
+  size_t filled = 0;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    node_t *member = struct_members_node_get_member(body, idx);
+    if (member && node_get_kind(member) == CLUX_NODE_STRUCT_EMBED) {
+      clux_type_t *embed_type = embed_types[idx];
+      size_t embed_count = clux_struct_field_count(embed_type);
+      for (size_t fidx = 0; fidx < embed_count; fidx++) {
+        fields[filled] = *clux_struct_get_field(embed_type, fidx);
+        owned_names[filled] = NULL;
+        filled++;
+      }
+      continue;
+    }
+    if (!member || node_get_kind(member) != CLUX_NODE_FIELD) {
+      continue;
+    }
+    node_t *field_name_node = field_node_get_name(member);
+    if (!field_name_node) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(member),
+          "struct '%s' field %zu requires a name",
+          type_name,
+          idx);
+      break;
+    }
+    char *field_name =
+        location_get(node_get_location(field_name_node), allocator);
+    fields[filled].name = field_name;
+    owned_names[filled] = field_name;
+    node_t *field_type_node = field_node_get_type(member);
+    if (!field_type_node) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(member),
+          "struct '%s' field '%s' requires a type",
+          type_name,
+          field_name);
+      allocator_free(allocator, (void **)&field_name);
+      break;
+    }
+    clux_value_t *err = NULL;
+    fields[filled].type = exec_operand_type(ctx, field_type_node, &err);
+    if (!fields[filled].type) {
+      fail = err;
+      allocator_free(allocator, (void **)&field_name);
+      break;
+    }
+    filled++;
+  }
+  clux_type_t *type = NULL;
+  if (!fail) {
+    type = clux_context_begin_struct_type(ctx, type_name, fields, filled);
+    if (!type) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "struct '%s' field collection failed", type_name);
+    }
+  }
+  /* 字段名经 context 路径 strs 驻留（或校验失败），本地拷贝统一释放
+     （embed 展开的借用名由 owned_names 标记跳过）。 */
+  for (size_t idx = 0; idx < filled; idx++) {
+    if (owned_names[idx]) {
+      allocator_free(allocator, (void **)&owned_names[idx]);
+    }
+  }
+  clux_value_t *bound = NULL;
+  if (!fail && declare_named && name) {
+    /* 具名 define 壳：type value 通道自动 scope_define——func 成员形参
+       类型求值时 struct 名可解析。 */
+    bound = clux_context_create_type_value(ctx, type, name, loc);
+    if (!bound || clux_value_is_error(bound)) {
+      fail = bound;
+      bound = NULL;
+    }
+  }
+  /* pass C：attribute（var 成员求初值）与 method（func 成员匿名求值）
+     按声明序收集——重名在引擎校验前拦截以携带源位置。 */
+  clux_struct_attr_t attrs[count ? count : 1];
+  const char *method_names[count ? count : 1];
+  size_t attr_filled = 0;
+  size_t method_filled = 0;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    node_t *member = struct_members_node_get_member(body, idx);
+    if (!member) {
+      continue;
+    }
+    if (node_get_kind(member) == CLUX_NODE_STMT_VAR) {
+      if (stmt_var_node_get_decorator_count(member) != 0) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "decorated struct attribute is not supported yet");
+        break;
+      }
+      node_t *attr_name_node = stmt_var_node_get_name(member);
+      if (!attr_name_node) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "struct '%s' attribute %zu requires a name",
+            type_name,
+            idx);
+        break;
+      }
+      node_t *init = stmt_var_node_get_value(member);
+      if (!init) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "struct attribute requires an initializer");
+        break;
+      }
+      char *attr_name =
+          location_get(node_get_location(attr_name_node), allocator);
+      for (size_t prev = 0; prev < attr_filled && !fail; prev++) {
+        if (strcmp(attr_name, attrs[prev].name) == 0) {
+          fail = clux_context_create_error_message(
+              ctx,
+              node_get_location(attr_name_node),
+              "struct '%s' has duplicate attribute '%s'",
+              type_name,
+              attr_name);
+        }
+      }
+      if (fail) {
+        allocator_free(allocator, (void **)&attr_name);
+        break;
+      }
+      clux_value_t *value = exec_operand(ctx, init);
+      if (!value || clux_value_is_error(value)) {
+        fail = value;
+        allocator_free(allocator, (void **)&attr_name);
+        break;
+      }
+      attrs[attr_filled].name = attr_name;
+      attrs[attr_filled].value = value;
+      attr_filled++;
+      continue;
+    }
+    if (node_get_kind(member) == CLUX_NODE_STMT_FUNC) {
+      if (stmt_func_node_get_decorator_count(member) != 0) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "decorated struct method is not supported yet");
+        break;
+      }
+      node_t *func_decl = stmt_func_node_get_func_decl(member);
+      if (!func_decl) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "struct '%s' method %zu requires a function declaration",
+            type_name,
+            idx);
+        break;
+      }
+      node_t *method_name_node = func_decl_node_get_name(func_decl);
+      if (!method_name_node) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(func_decl),
+            "struct '%s' method %zu requires a name",
+            type_name,
+            idx);
+        break;
+      }
+      char *method_name =
+          location_get(node_get_location(method_name_node), allocator);
+      for (size_t prev = 0; prev < attr_filled && !fail; prev++) {
+        if (strcmp(method_name, attrs[prev].name) == 0) {
+          fail = clux_context_create_error_message(
+              ctx,
+              node_get_location(method_name_node),
+              "struct '%s' has duplicate attribute '%s'",
+              type_name,
+              method_name);
+        }
+      }
+      if (fail) {
+        allocator_free(allocator, (void **)&method_name);
+        break;
+      }
+      clux_value_t *func =
+          exec_func_decl_value(ctx, func_decl); /* 匿名求值，不 define */
+      if (!func || clux_value_is_error(func)) {
+        fail = func;
+        allocator_free(allocator, (void **)&method_name);
+        break;
+      }
+      attrs[attr_filled].name = method_name;
+      attrs[attr_filled].value = func;
+      method_names[method_filled] = method_name;
+      attr_filled++;
+      method_filled++;
+      continue;
+    }
+    /* FIELD/STRUCT_EMBED 已在字段表处理（装饰器是 metadata 标记，不参与
+       值），其余成员形态（type 等）暂无 parser 来源。 */
+  }
+  if (!fail) {
+    if (!clux_context_install_struct_tables(ctx,
+                                            type,
+                                            attrs,
+                                            attr_filled,
+                                            method_names,
+                                            method_filled,
+                                            NULL,
+                                            0)) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "struct '%s' table installation failed", type_name);
+    }
+  }
+  /* 成员名经 context 路径 strs 驻留（或校验失败），本地拷贝统一释放。 */
+  for (size_t idx = 0; idx < attr_filled; idx++) {
+    allocator_free(allocator, (void **)&attrs[idx].name);
+  }
+  if (fail) {
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  if (bound) {
+    allocator_free(allocator, (void **)&name);
+    return bound;
+  }
+  /* 匿名/装饰路径：求值出不具名的 type value（不按名 define）。 */
+  clux_value_t *value = clux_context_create_type_value(ctx, type, NULL, loc);
+  allocator_free(allocator, (void **)&name);
+  return value;
+}
+
+clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node) {
+  return exec_expr_struct_decl_impl(ctx, node, true);
+}
+
+/* 匿名 struct 值求值：仅求值出不具名的 type value（不按名 define），
+   struct 语句装饰器包装路径用——包装完成后由 declare_value 具名化。
+   注意：此路径方法签名引用 struct 自身不可解析（壳名未 define），
+   值级装饰路径待泛型批次一并处理。 */
+clux_value_t *exec_expr_struct_decl_value(clux_context_t *ctx, node_t *node) {
+  return exec_expr_struct_decl_impl(ctx, node, false);
 }
 
 /* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value

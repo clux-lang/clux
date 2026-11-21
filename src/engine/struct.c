@@ -9,8 +9,11 @@
 #include <stddef.h>
 #include <string.h>
 
-/* meta 连体单块布局：meta 本体 | 字段表 | attribute 表 | method 名单 |
-   subtype 表，delete_clux_type 释放 meta 本体即整块释放。 */
+/* meta 连体单块布局：meta 本体 | 字段表。字段表在构造时一次定局
+   （布局即时 seal）；attribute/method/subtype 三表是类型命名空间
+   成员，不参与布局，经 clux_struct_type_install 二次安装（独立块，
+   tables_block 持有，delete_meta 释放）——两阶段构造适配方法签名
+   引用 struct 自身（func 形参类型急切求值时壳须已按名可见）。 */
 typedef struct _clux_struct_meta_t {
   clux_struct_field_t *fields;
   size_t count;
@@ -20,6 +23,8 @@ typedef struct _clux_struct_meta_t {
   size_t method_count;
   clux_struct_subtype_t *subtypes;
   size_t subtype_count;
+  bool installed; /* 三表安装只允许一次（全空也置位） */
+  void *tables_block;
 } clux_struct_meta_t;
 
 static clux_struct_meta_t *struct_meta(clux_type_t *type) {
@@ -440,6 +445,17 @@ static clux_value_t *struct_safe_cast(clux_context_t *ctx,
       ctx, target, clux_value_get_data(value), NULL, NULL);
 }
 
+/* meta 析构：三表独立块（attribute/method/subtype，install 分配）随
+   delete_clux_type 释放；字段表与 meta 连体由统一通道释放。 */
+static void struct_delete_meta(clux_type_t *self) {
+  clux_struct_meta_t *meta = struct_meta(self);
+  if (!meta) {
+    return;
+  }
+  allocator_t *allocator = clux_type_get_allocator(self);
+  allocator_free(allocator, &meta->tables_block);
+}
+
 static clux_vtable_t g_struct_vtable = {
     .eq = struct_eq,
     .ne = struct_ne,
@@ -447,69 +463,125 @@ static clux_vtable_t g_struct_vtable = {
     .safe_cast = struct_safe_cast,
     .type_equal = struct_type_equal,
     .type_extends = struct_type_extends,
+    .delete_meta = struct_delete_meta,
 };
 
 clux_vtable_t *get_clux_struct_vtable(void) { return &g_struct_vtable; }
 
-clux_type_t *create_clux_struct_type(allocator_t *allocator,
-                                     const char *name,
-                                     const clux_struct_decl_t *decl) {
-  /* 字段按声明序顺序平铺（各自按自身对齐取偏移）：
-     align = max(字段 align)，size = round_up(平铺末尾, align)。
-     attribute/method/subtype 是类型命名空间成员，不参与 Data 布局。 */
+/* 三表安装核心（create 完整构造与 context 两阶段通道共用）：三表整体
+   拷入独立单块（tables_block 持有，delete_meta 释放），各名字由调用方
+   保证生命周期（context 路径经 strs 驻留）。已安装返回 false。 */
+bool clux_struct_type_install(clux_type_t *self,
+                              allocator_t *allocator,
+                              const clux_struct_attr_t *attrs,
+                              size_t attr_count,
+                              const char *const *methods,
+                              size_t method_count,
+                              const clux_struct_subtype_t *subtypes,
+                              size_t subtype_count) {
+  clux_struct_meta_t *meta = struct_meta(self);
+  if (!meta || meta->installed) {
+    return false;
+  }
+  size_t bytes = sizeof(clux_struct_attr_t) * attr_count +
+                 sizeof(const char *) * method_count +
+                 sizeof(clux_struct_subtype_t) * subtype_count;
+  char *block = bytes > 0 ? (char *)allocator_alloc(allocator, bytes) : NULL;
+  char *cursor = block;
+  meta->attrs = (clux_struct_attr_t *)cursor;
+  cursor += sizeof(clux_struct_attr_t) * attr_count;
+  if (attr_count > 0) {
+    (void)memcpy(block, attrs, sizeof(clux_struct_attr_t) * attr_count);
+  }
+  meta->attr_count = attr_count;
+  meta->methods = (const char **)cursor;
+  cursor += sizeof(const char *) * method_count;
+  if (method_count > 0) {
+    (void)memcpy(
+        (char *)meta->methods, methods, sizeof(const char *) * method_count);
+  }
+  meta->method_count = method_count;
+  meta->subtypes = (clux_struct_subtype_t *)cursor;
+  if (subtype_count > 0) {
+    (void)memcpy((char *)meta->subtypes,
+                 subtypes,
+                 sizeof(clux_struct_subtype_t) * subtype_count);
+  }
+  meta->subtype_count = subtype_count;
+  meta->tables_block = block;
+  meta->installed = true;
+  return true;
+}
+
+/* 建壳核心：字段按声明序顺序平铺（各自按自身对齐取偏移），
+   align = max(字段 align)，size = round_up(平铺末尾, align)。
+   attribute/method/subtype 是类型命名空间成员，不参与 Data 布局。
+   字段表一次定局（布局即时 seal），三表留空待 install——两阶段构造
+   适配方法签名引用 struct 自身（壳先按名 define）。 */
+static clux_type_t *
+struct_type_create_from_fields(allocator_t *allocator,
+                               const char *name,
+                               const clux_struct_field_t *fields,
+                               size_t field_count) {
   size_t align = 1;
-  for (size_t idx = 0; idx < decl->field_count; idx++) {
-    size_t field_align = clux_type_get_align(decl->fields[idx].type);
+  for (size_t idx = 0; idx < field_count; idx++) {
+    size_t field_align = clux_type_get_align(fields[idx].type);
     if (field_align > align) {
       align = field_align;
     }
   }
   size_t end = 0;
-  for (size_t idx = 0; idx < decl->field_count; idx++) {
-    size_t field_align = clux_type_get_align(decl->fields[idx].type);
-    size_t field_size = clux_type_get_size(decl->fields[idx].type);
+  for (size_t idx = 0; idx < field_count; idx++) {
+    size_t field_align = clux_type_get_align(fields[idx].type);
+    size_t field_size = clux_type_get_size(fields[idx].type);
     end = (end + field_align - 1) / field_align * field_align + field_size;
   }
   size_t size = (end + align - 1) / align * align;
   clux_type_t *type = create_clux_type(
       allocator, CLUX_TYPE_STRUCT, name, size, align, get_clux_struct_vtable());
-  /* meta 与四张表连体成单块分配：delete_clux_type 释放 meta 本体即整块释放 */
-  size_t bytes = sizeof(clux_struct_meta_t) +
-                 sizeof(clux_struct_field_t) * decl->field_count +
-                 sizeof(clux_struct_attr_t) * decl->attr_count +
-                 sizeof(const char *) * decl->method_count +
-                 sizeof(clux_struct_subtype_t) * decl->subtype_count;
+  /* meta 与字段表连体单块分配：delete_clux_type 释放 meta 本体即整块释放 */
+  size_t bytes =
+      sizeof(clux_struct_meta_t) + sizeof(clux_struct_field_t) * field_count;
   clux_struct_meta_t *meta = clux_type_create_meta(type, bytes);
   char *cursor = (char *)meta + sizeof(clux_struct_meta_t);
   meta->fields = (clux_struct_field_t *)cursor;
-  cursor += sizeof(clux_struct_field_t) * decl->field_count;
-  (void)memcpy(meta->fields,
-               decl->fields,
-               sizeof(clux_struct_field_t) * decl->field_count);
-  meta->count = decl->field_count;
-  meta->attrs = (clux_struct_attr_t *)cursor;
-  cursor += sizeof(clux_struct_attr_t) * decl->attr_count;
-  if (decl->attr_count > 0) {
-    (void)memcpy(meta->attrs,
-                 decl->attrs,
-                 sizeof(clux_struct_attr_t) * decl->attr_count);
-  }
-  meta->attr_count = decl->attr_count;
-  meta->methods = (const char **)cursor;
-  cursor += sizeof(const char *) * decl->method_count;
-  if (decl->method_count > 0) {
-    (void)memcpy(meta->methods,
-                 decl->methods,
-                 sizeof(const char *) * decl->method_count);
-  }
-  meta->method_count = decl->method_count;
-  meta->subtypes = (clux_struct_subtype_t *)cursor;
-  if (decl->subtype_count > 0) {
-    (void)memcpy(meta->subtypes,
-                 decl->subtypes,
-                 sizeof(clux_struct_subtype_t) * decl->subtype_count);
-  }
-  meta->subtype_count = decl->subtype_count;
+  (void)memcpy(meta->fields, fields, sizeof(clux_struct_field_t) * field_count);
+  meta->count = field_count;
+  meta->attrs = NULL;
+  meta->attr_count = 0;
+  meta->methods = NULL;
+  meta->method_count = 0;
+  meta->subtypes = NULL;
+  meta->subtype_count = 0;
+  meta->installed = false;
+  meta->tables_block = NULL;
   clux_type_seal(type); /* 布局即时定局：构造完成即完整 */
+  return type;
+}
+
+clux_type_t *create_clux_struct_type_shell(allocator_t *allocator,
+                                           const char *name,
+                                           const clux_struct_field_t *fields,
+                                           size_t field_count) {
+  return struct_type_create_from_fields(allocator, name, fields, field_count);
+}
+
+clux_type_t *create_clux_struct_type(allocator_t *allocator,
+                                     const char *name,
+                                     const clux_struct_decl_t *decl) {
+  clux_type_t *type = struct_type_create_from_fields(
+      allocator, name, decl->fields, decl->field_count);
+  if (!type) {
+    return NULL;
+  }
+  /* 完整构造：三表即装（对外语义与一次性构造保持一致） */
+  (void)clux_struct_type_install(type,
+                                 allocator,
+                                 decl->attrs,
+                                 decl->attr_count,
+                                 decl->methods,
+                                 decl->method_count,
+                                 decl->subtypes,
+                                 decl->subtype_count);
   return type;
 }
