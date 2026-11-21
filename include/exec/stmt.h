@@ -10,6 +10,7 @@ clux_value_t *exec_stmt_type(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_func(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_union(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_enum(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_interface(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_block(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_expr(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_return(clux_context_t *ctx, node_t *node);

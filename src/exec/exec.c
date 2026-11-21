@@ -43,7 +43,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_EXPR_ENUM_DECL*/ exec_expr_enum_decl,
     /*CLUX_NODE_EXPR_STRUCT_DECL*/ NULL,
     /*CLUX_NODE_EXPR_BITFIELD_DECL*/ NULL,
-    /*CLUX_NODE_EXPR_INTERFACE_DECL*/ NULL,
+    /*CLUX_NODE_EXPR_INTERFACE_DECL*/ exec_expr_interface_decl,
     /*CLUX_NODE_INTERFACE_MEMBERS*/ NULL,
     /*CLUX_NODE_STRUCT_MEMBERS*/ NULL,
     /*CLUX_NODE_STRUCT_EMBED*/ NULL,
@@ -90,7 +90,7 @@ static exec_fn_t g_exec_callbacks[CLUX_NODE_KIND_MAX] = {
     /*CLUX_NODE_STMT_EXTERN_VAR*/ NULL,
     /*CLUX_NODE_STMT_STATIC_ASSERT*/ NULL,
     /*CLUX_NODE_STMT_ASSERT*/ NULL,
-    /*CLUX_NODE_STMT_INTERFACE*/ NULL,
+    /*CLUX_NODE_STMT_INTERFACE*/ exec_stmt_interface,
 };
 
 static const char *node_kind_name(node_kind_t kind) {

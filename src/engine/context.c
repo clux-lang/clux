@@ -328,8 +328,8 @@ clux_value_t *clux_context_create_value(clux_context_t *self,
                                         ptr_handle_t data,
                                         const char *name,
                                         const location_t *loc) {
-  /* seal 即完整性判据：未 seal 的类型（两阶段未定局的壳、永不 seal
-     的 void）不得作为值类型。 */
+  /* seal 即完整性判据：未 seal 的类型（两阶段未定局的壳、永不 seal 的
+     void/interface）不得作为值类型。 */
   if (!clux_type_is_seal(type)) {
     const char *type_name = clux_type_get_name(type);
     clux_error_t *err = create_error(self->allocator,
@@ -1056,6 +1056,84 @@ clux_type_t *clux_context_create_enum_type(clux_context_t *self,
   }
   clux_type_t *type =
       create_clux_enum_type(self->allocator, name, underlying, interned, count);
+  (void)vec_push(self->named_types, type);
+  return type;
+}
+
+/* 创建具名 interface 类型（白皮书 §3.10、§6.9）：纯编译期结构约束——
+   成员是方法签名（名 + func 类型，无捕获），不产生运行期对象/虚表。
+   永不 seal（与 void 同族天然不完整）：create_value 的 seal 门禁由此
+   拒绝 interface 作值类型。结构去重：已存在成员名+签名按声明序一致的
+   实例时恒等返回。 */
+clux_type_t *
+clux_context_create_interface_type(clux_context_t *self,
+                                   const char *name,
+                                   const clux_interface_member_t *members,
+                                   size_t count) {
+  if (!name || !members || count == 0) {
+    (void)clux_context_create_error_message(
+        self, NULL, "interface requires a name and at least one member");
+    return NULL;
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    if (!members[idx].name || !members[idx].func) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "interface '%s' member %zu requires a name and a signature",
+          name,
+          idx);
+      return NULL;
+    }
+    if (clux_type_get_kind(members[idx].func) != CLUX_TYPE_FUNC) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "interface '%s' member '%s' signature must be a func type",
+          name,
+          members[idx].name);
+      return NULL;
+    }
+    if (clux_func_capture_count(members[idx].func) != 0) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "interface '%s' member '%s' signature cannot have captures",
+          name,
+          members[idx].name);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(members[idx].name, members[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "interface '%s' has duplicate member '%s'",
+            name,
+            members[idx].name);
+        return NULL;
+      }
+    }
+  }
+  /* 结构去重：已存在成员名+签名按声明序一致的实例时恒等返回。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_interface_members_equal(existing, members, count)) {
+      return existing;
+    }
+  }
+  /* 成员名经 strs 驻留（随 context 释放），成员表由类型 meta 持有；
+     签名 func 类型借用 context 的具名类型表（其生命周期覆盖本类型）。 */
+  clux_interface_member_t interned[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    size_t len = strlen(members[idx].name);
+    char *member_name = clux_context_alloc_str(self, len);
+    (void)memcpy(member_name, members[idx].name, len);
+    interned[idx].name = member_name;
+    interned[idx].func = members[idx].func;
+  }
+  clux_type_t *type =
+      create_clux_interface_type(self->allocator, name, interned, count);
   (void)vec_push(self->named_types, type);
   return type;
 }

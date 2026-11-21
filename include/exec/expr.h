@@ -26,6 +26,10 @@ clux_value_t *exec_expr_union_value(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_enum_decl(clux_context_t *ctx, node_t *node);
 /* 匿名 enum 值求值：不按名 define，供 enum 装饰器包装路径使用。 */
 clux_value_t *exec_expr_enum_decl_value(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_expr_interface_decl(clux_context_t *ctx, node_t *node);
+/* 匿名 interface 值求值：不按名 define，供 interface 装饰器包装路径
+   使用。 */
+clux_value_t *exec_expr_interface_decl_value(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_assign(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_ternary(clux_context_t *ctx, node_t *node);

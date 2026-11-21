@@ -8,6 +8,7 @@
 #include "engine/enum.h"
 #include "engine/func.h"
 #include "engine/interface.h"
+#include "engine/interface_type.h"
 #include "engine/struct.h"
 #include "engine/union.h"
 #include <stdbool.h>
@@ -280,6 +281,19 @@ clux_type_t *clux_context_create_enum_type(clux_context_t *self,
                                            clux_type_t *underlying,
                                            const clux_enum_variant_t *variants,
                                            size_t count);
+/* 创建具名 interface 类型（白皮书 §3.10、§6.9）：纯编译期结构约束——
+   成员是方法签名（名 + func 类型，无捕获），不产生运行期对象/虚表。
+   永不 seal（与 void 同族天然不完整）：create_value 的 seal 门禁由此
+   拒绝 interface 作值类型（变量创建/类型标注等值位置）。成员名经 strs
+   驻留。结构判等（成员名+签名按声明序一致即同一类型）：已存在结构相同
+   的实例时恒等返回之，类型由 context 的具名类型表托管释放。入参非法
+   （缺名/空成员表/成员缺名缺签名/签名非 func/签名带捕获/重名）返回
+   NULL 并记录 error。 */
+clux_type_t *
+clux_context_create_interface_type(clux_context_t *self,
+                                   const char *name,
+                                   const clux_interface_member_t *members,
+                                   size_t count);
 /* 激活成员：切换 tag 为该成员声明序号并清零 payload，返回原值；未知
    成员返回语义化 error，shadow 值原样返回（无数据可变）。仅 tag union
    支持，其余类型返回 error。 */

@@ -43,6 +43,10 @@
 #include "parser/node_enum_variant.h"
 #include "engine/enum.h"
 #include "parser/node_field.h"
+#include "parser/node_interface_decl.h"
+#include "parser/node_stmt_interface.h"
+#include "parser/node_generic_param.h"
+#include "engine/interface_type.h"
 #include "engine/scope.h"
 #include "exec/call.h"
 #include "parser/node_subscript.h"
@@ -836,7 +840,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_STMT_VAR || kind == CLUX_NODE_STMT_FUNC ||
         kind == CLUX_NODE_EXPR_UNION || kind == CLUX_NODE_STMT_UNION ||
         kind == CLUX_NODE_EXPR_ENUM_DECL || kind == CLUX_NODE_STMT_ENUM ||
-        kind == CLUX_NODE_STMT_TYPE;
+        kind == CLUX_NODE_EXPR_INTERFACE_DECL ||
+        kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE;
     if (synthetic_skip) {
       continue;
     }
@@ -9461,4 +9466,966 @@ TEST_F(ExecLiteralTest, BlockHoistDefineTimeExecutionErrorBreaksBlock) {
   EXPECT_STREQ(error_message_of(result),
                "use of undeclared identifier 'nosuch'");
   delete_node(&block);
+}
+
+/* ---- exec_expr_interface_decl / exec_stmt_interface：interface 类型
+       （纯编译期结构约束，永不 seal——seal 门禁拒绝值位置）---- */
+
+/* 合成 interface 声明结点：name_text 为 NULL 表示匿名，generics/body
+   允许为 NULL 构造容错路径（成员表为 NULL 即空成员表），delete 根结点
+   时递归释放全部子结点。 */
+static node_t *make_interface_decl_of(allocator_t *allocator,
+                                      const char *name_text,
+                                      node_t *generics,
+                                      node_t *body) {
+  node_t *node = create_interface_decl_node(allocator);
+  interface_decl_node_set_keyword(
+      node, make_text_node(allocator, CLUX_NODE_SYMBOL, "interface"));
+  if (name_text) {
+    interface_decl_node_set_name(
+        node,
+        make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  }
+  interface_decl_node_set_generics(node, generics);
+  interface_decl_node_set_body(node, body);
+  return node;
+}
+
+/* 合成单成员成员表 interface { func write(data: i32): void; }——成员是
+   无函数体的 FUNC_DECL 签名。with_body/captures 供校验路径构造非法
+   成员（带体/带捕获），member_name 覆盖成员名。 */
+static node_t *make_interface_members_of(allocator_t *allocator,
+                                         const char *member_name,
+                                         bool with_body,
+                                         node_t *captures) {
+  node_t *params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "data"),
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = NULL;
+  if (with_body) {
+    body = create_stmt_block_node(allocator);
+  }
+  node_t *member = make_func_decl_of(
+      allocator,
+      captures,
+      NULL,
+      params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, member_name),
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+      body);
+  node_t *members = create_interface_members_node(allocator);
+  interface_members_node_add_member(members, member);
+  return members;
+}
+
+/* ---- 引擎层：clux_context_create_interface_type / interface_type.c ---- */
+
+/* 场景: 合法成员表经 context 创建 interface 类型
+   预期: kind INTERFACE、布局无意义（size 0 / align 1，与 void 一致）、
+         永不 seal；成员表按声明序可查：count、get_member 命中与越界
+         NULL、find_member 命中/未命中/NULL 名容错、签名借用恒等；
+         NULL 类型查询全部安全容错 */
+TEST_F(ExecLiteralTest, InterfaceEngineCreatesZeroLayoutUnsealedType) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *params[] = {i32_type};
+  clux_type_t *sig = clux_context_create_func_type(
+      ctx, "write", NULL, 0, params, 1, void_type);
+  ASSERT_NE(sig, nullptr);
+  clux_interface_member_t members[] = {{"write", sig}};
+  clux_type_t *type =
+      clux_context_create_interface_type(ctx, "IEng", members, 1);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(type), CLUX_TYPE_INTERFACE);
+  EXPECT_STREQ(clux_type_get_name(type), "IEng");
+  EXPECT_EQ(clux_type_get_size(type), 0u)
+      << "interface has no runtime object (size 0 like void)";
+  EXPECT_EQ(clux_type_get_align(type), 1u);
+  EXPECT_FALSE(clux_type_is_seal(type)) << "interface never seals";
+  EXPECT_EQ(clux_interface_member_count(type), 1u);
+  const clux_interface_member_t *member = clux_interface_get_member(type, 0);
+  ASSERT_NE(member, nullptr);
+  EXPECT_STREQ(member->name, "write");
+  EXPECT_EQ(member->func, sig)
+      << "the member signature is borrowed as-is from the caller table";
+  EXPECT_EQ(clux_interface_get_member(type, 1), nullptr)
+      << "an out-of-range index must yield NULL";
+  EXPECT_EQ(clux_interface_find_member(type, "write"), member);
+  EXPECT_EQ(clux_interface_find_member(type, "flush"), nullptr);
+  EXPECT_EQ(clux_interface_find_member(type, NULL), nullptr);
+  EXPECT_EQ(clux_interface_member_count(NULL), 0u);
+  EXPECT_EQ(clux_interface_get_member(NULL, 0), nullptr);
+  EXPECT_EQ(clux_interface_find_member(NULL, "write"), nullptr);
+}
+
+/* 场景: context 入参校验——缺名 / 空成员表 / 成员缺名 / 成员缺签名 /
+        签名非 FUNC / 签名带捕获 / 成员重名
+   预期: 均返回 NULL 且不建型（引擎错误经内部 errors 通道记录，公开 API
+         无取回接口——NULL 返回即全部可观测行为）；对照组的合法入参
+         建型成功（校验不误伤） */
+TEST_F(ExecLiteralTest, InterfaceEngineRejectsInvalidInputs) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *params[] = {i32_type};
+  clux_type_t *sig =
+      clux_context_create_func_type(ctx, "sig", NULL, 0, params, 1, void_type);
+  ASSERT_NE(sig, nullptr);
+  clux_func_capture_t captures[] = {{"c", i32_type}};
+  clux_type_t *closure_sig = clux_context_create_func_type(
+      ctx, "csig", captures, 1, NULL, 0, void_type);
+  ASSERT_NE(closure_sig, nullptr);
+  clux_interface_member_t ok[] = {{"write", sig}};
+  clux_interface_member_t nameless[] = {{NULL, sig}};
+  clux_interface_member_t sigless[] = {{"write", NULL}};
+  clux_interface_member_t nonfunc[] = {{"write", i32_type}};
+  clux_interface_member_t captured[] = {{"write", closure_sig}};
+  clux_interface_member_t duplicate[] = {{"write", sig}, {"write", sig}};
+  EXPECT_EQ(clux_context_create_interface_type(ctx, NULL, ok, 1), nullptr)
+      << "a missing name must be rejected";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "I", NULL, 1), nullptr)
+      << "a missing member table must be rejected";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "I", ok, 0), nullptr)
+      << "an empty member table must be rejected";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "I", nameless, 1), nullptr)
+      << "a member without a name must be rejected";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "I", sigless, 1), nullptr)
+      << "a member without a signature must be rejected";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "I", nonfunc, 1), nullptr)
+      << "a non-func signature must be rejected";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "I", captured, 1), nullptr)
+      << "a signature with captures must be rejected";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "I", duplicate, 2), nullptr)
+      << "duplicate member names must be rejected";
+  clux_type_t *type = clux_context_create_interface_type(ctx, "IOk", ok, 1);
+  ASSERT_NE(type, nullptr) << "the valid control input must still build";
+  EXPECT_EQ(clux_type_get_kind(type), CLUX_TYPE_INTERFACE);
+}
+
+/* 场景: 结构判等与去重——members_equal / clux_type_equal / context
+        find-or-dedup 三通道
+   预期: 结构一致（成员名 + 签名按声明序）即判等：context 路径恒等返回
+         既有实例（类型名不参与）；成员名不同 / 签名不同 / 成员数不同 /
+         声明序不同均判不等；非 interface 类型 members_equal 恒 false；
+         引擎直连构造的两个同构实例 clux_type_equal 为 true 且指针不同 */
+TEST_F(ExecLiteralTest, InterfaceEngineStructuralEqualityAndDedup) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *one_i32[] = {i32_type};
+  clux_type_t *one_str[] = {str_type};
+  clux_type_t *sig_write = clux_context_create_func_type(
+      ctx, "write", NULL, 0, one_i32, 1, void_type);
+  ASSERT_NE(sig_write, nullptr);
+  clux_type_t *sig_write_str = clux_context_create_func_type(
+      ctx, "write_str", NULL, 0, one_str, 1, void_type);
+  ASSERT_NE(sig_write_str, nullptr);
+  clux_type_t *sig_flush =
+      clux_context_create_func_type(ctx, "flush", NULL, 0, NULL, 0, void_type);
+  ASSERT_NE(sig_flush, nullptr);
+  clux_interface_member_t m_write[] = {{"write", sig_write}};
+  clux_interface_member_t m_write_str[] = {{"write", sig_write_str}};
+  clux_interface_member_t m_flush[] = {{"flush", sig_flush}};
+  clux_interface_member_t m_two[] = {{"write", sig_write},
+                                     {"flush", sig_flush}};
+  clux_interface_member_t m_swapped[] = {{"flush", sig_flush},
+                                         {"write", sig_write}};
+  clux_type_t *type =
+      clux_context_create_interface_type(ctx, "ID1", m_write, 1);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "ID1", m_write, 1), type)
+      << "identical input must dedupe by returning the existing instance";
+  EXPECT_EQ(clux_context_create_interface_type(ctx, "ID2", m_write, 1), type)
+      << "the type name does not participate in structural equality";
+  EXPECT_NE(clux_context_create_interface_type(ctx, "ID3", m_write_str, 1),
+            type)
+      << "a different signature with the same member name must not dedupe";
+  EXPECT_NE(clux_context_create_interface_type(ctx, "ID4", m_flush, 1), type)
+      << "a different member name must not dedupe";
+  EXPECT_NE(clux_context_create_interface_type(ctx, "ID5", m_two, 2), type)
+      << "a different member count must not dedupe";
+  EXPECT_NE(clux_context_create_interface_type(ctx, "ID6", m_swapped, 2), type)
+      << "a different declaration order must not dedupe";
+  EXPECT_TRUE(clux_interface_members_equal(type, m_write, 1));
+  EXPECT_FALSE(clux_interface_members_equal(type, m_write_str, 1));
+  EXPECT_FALSE(clux_interface_members_equal(type, m_two, 2));
+  EXPECT_FALSE(clux_interface_members_equal(i32_type, m_write, 1))
+      << "a non-interface type is never structurally equal";
+  clux_type_t *raw_a = create_clux_interface_type(a, "RawA", m_write, 1);
+  clux_type_t *raw_b = create_clux_interface_type(a, "RawB", m_write, 1);
+  ASSERT_NE(raw_a, nullptr);
+  ASSERT_NE(raw_b, nullptr);
+  EXPECT_NE(raw_a, raw_b)
+      << "the engine constructor always builds a fresh instance";
+  EXPECT_TRUE(clux_type_equal(raw_a, raw_b))
+      << "clux_type_equal on interfaces compares member structure only";
+  EXPECT_TRUE(clux_type_equal(raw_a, raw_a));
+  EXPECT_FALSE(clux_type_equal(raw_a, i32_type))
+      << "an interface is never structurally equal to a non-interface type";
+  delete_clux_type(&raw_a);
+  delete_clux_type(&raw_b);
+}
+
+/* 场景: 成员名驻留——context 创建路径经 clux_context_alloc_str 拷贝登记
+   预期: meta 持有的成员名是 context 侧拷贝（与调用方表项指针不同、
+         内容相同）；重复查询指针稳定；结构去重命中时回读的成员表
+         指针恒等 */
+TEST_F(ExecLiteralTest, InterfaceEngineInternsMemberNames) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *params[] = {i32_type};
+  clux_type_t *sig = clux_context_create_func_type(
+      ctx, "write", NULL, 0, params, 1, void_type);
+  ASSERT_NE(sig, nullptr);
+  clux_interface_member_t members[] = {{"write", sig}};
+  clux_type_t *type =
+      clux_context_create_interface_type(ctx, "IStr", members, 1);
+  ASSERT_NE(type, nullptr);
+  const clux_interface_member_t *member = clux_interface_get_member(type, 0);
+  ASSERT_NE(member, nullptr);
+  EXPECT_NE(member->name, members[0].name)
+      << "the member name must be an interned copy, not the caller pointer";
+  EXPECT_STREQ(member->name, "write");
+  EXPECT_EQ(clux_interface_find_member(type, "write"), member)
+      << "repeated lookups must yield the same stable pointer";
+  clux_type_t *dedup =
+      clux_context_create_interface_type(ctx, "IStr2", members, 1);
+  ASSERT_EQ(dedup, type)
+      << "structurally identical input must dedupe to the existing instance";
+  EXPECT_EQ(clux_interface_get_member(dedup, 0), member)
+      << "a dedup hit must read back the same interned member table";
+}
+
+/* 场景: interface IN { func write(data: i32): void; } 具名声明
+   预期: 产出 type value 并按名 define（lookup 恒等）；被描述类型 kind
+         INTERFACE、名 "IN"、永不 seal；成员表可查且越界返回 NULL */
+TEST_F(ExecLiteralTest, InterfaceDeclNamedDefinesTypeValue) {
+  node_t *decl = make_interface_decl_of(
+      a, "IN", NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *declared = exec_expr_interface_decl(ctx, decl);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_FALSE(clux_value_is_error(declared));
+  EXPECT_EQ(clux_context_lookup(ctx, "IN", NULL), declared)
+      << "the named declaration must define the type value by name";
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(declared)),
+            CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(declared);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_INTERFACE);
+  EXPECT_STREQ(clux_type_get_name(described), "IN");
+  EXPECT_FALSE(clux_type_is_seal(described));
+  EXPECT_EQ(clux_interface_member_count(described), 1u);
+  const clux_interface_member_t *member =
+      clux_interface_get_member(described, 0);
+  ASSERT_NE(member, nullptr);
+  EXPECT_STREQ(member->name, "write");
+  EXPECT_EQ(clux_interface_get_member(described, 1), nullptr)
+      << "an out-of-range index must yield NULL";
+  delete_node(&decl);
+}
+
+/* 场景: 匿名 interface { func write(data: i32): void; }——表达式位置合法，
+        含空成员表（body 槽为 NULL）的类型名回退路径
+   预期: 合法形态产出不具名 type value（不 define：lookup("interface")
+         为 NULL）、引擎类型名回退关键字文本 "interface"；空成员表报
+         "interface 'interface' requires at least one member" */
+TEST_F(ExecLiteralTest, InterfaceDeclAnonymousYieldsUnnamedValue) {
+  node_t *decl = make_interface_decl_of(
+      a, NULL, NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *result = exec_expr_interface_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_INTERFACE);
+  EXPECT_STREQ(clux_type_get_name(described), "interface")
+      << "an anonymous declaration falls back to the keyword text";
+  clux_value_t *probe = clux_context_lookup(ctx, "interface", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "an anonymous declaration must not define a name";
+  delete_node(&decl);
+
+  node_t *empty = make_interface_decl_of(a, NULL, NULL, NULL);
+  clux_value_t *empty_result = exec_expr_interface_decl(ctx, empty);
+  ASSERT_NE(empty_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(empty_result),
+               "interface 'interface' requires at least one member");
+  delete_node(&empty);
+}
+
+/* 场景: interface 作值类型——直接 create_value 与 var x: IWriter 标注
+        （经 create_tdz_value）两条通道
+   预期: 均被 create_value 的 seal 门禁拒绝，统一报
+         "cannot create a value of incomplete type 'IWriter'" */
+TEST_F(ExecLiteralTest, InterfaceDeclSealGateRejectsValuePositions) {
+  node_t *decl = make_interface_decl_of(
+      a, "IWriter", NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *declared = exec_expr_interface_decl(ctx, decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared));
+  clux_type_t *described = type_described_by(declared);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_INTERFACE);
+  ASSERT_FALSE(clux_type_is_seal(described));
+
+  /* 通道一：直接以 interface 类型创建值。 */
+  clux_value_t *direct =
+      clux_context_create_value(ctx, described, 0, "x", NULL);
+  ASSERT_NE(direct, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(direct)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(direct),
+               "cannot create a value of incomplete type 'IWriter'");
+
+  /* 通道二：var x: IWriter = undefined（TDZ 声明内调 create_value）。 */
+  node_t *var = make_stmt_var("x",
+                              CLUX_NODE_LITERAL_IDENTIFIER,
+                              "IWriter",
+                              CLUX_NODE_LITERAL_UNDEFINED,
+                              "undefined");
+  clux_value_t *tdz = exec_stmt_var(ctx, var);
+  ASSERT_NE(tdz, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tdz)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(tdz),
+               "cannot create a value of incomplete type 'IWriter'");
+  delete_node(&var);
+  delete_node(&decl);
+}
+
+/* 场景: interface IA { ... } 与 interface IB { ... } 成员结构完全一致
+   预期: 引擎结构去重（成员名 + 签名判等，类型名不参与）——两份声明
+         描述同一个被驻留类型（指针恒等） */
+TEST_F(ExecLiteralTest, InterfaceDeclDeduplicatesStructurallyIdentical) {
+  node_t *ia = make_interface_decl_of(
+      a, "IA", NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *ia_result = exec_expr_interface_decl(ctx, ia);
+  ASSERT_NE(ia_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(ia_result));
+  node_t *ib = make_interface_decl_of(
+      a, "IB", NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *ib_result = exec_expr_interface_decl(ctx, ib);
+  ASSERT_NE(ib_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(ib_result));
+  EXPECT_EQ(clux_context_lookup(ctx, "IA", NULL), ia_result);
+  EXPECT_EQ(clux_context_lookup(ctx, "IB", NULL), ib_result);
+  EXPECT_EQ(type_described_by(ia_result), type_described_by(ib_result))
+      << "structurally identical interfaces must dedupe to one type";
+  delete_node(&ib);
+  delete_node(&ia);
+}
+
+/* 场景: 泛型 interface IG[W] { ... }
+   预期: 报 "generic interface is not supported yet"（等泛型批次接入） */
+TEST_F(ExecLiteralTest, InterfaceDeclGenericFormRejected) {
+  node_t *generics = create_generic_params_node(a);
+  node_t *decl = make_interface_decl_of(
+      a, "IG", generics, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *result = exec_expr_interface_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "generic interface is not supported yet");
+  clux_value_t *probe = clux_context_lookup(ctx, "IG", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "a rejected declaration must not define a name";
+  delete_node(&decl);
+}
+
+/* 场景: 成员形状校验五路——成员非 FUNC_DECL / 成员缺名 / 成员带函数体 /
+        成员带捕获 / 成员带泛型
+   预期: 各报对应语义错误消息（均在引擎构造前拦截以携带成员源位置） */
+TEST_F(ExecLiteralTest, InterfaceDeclMemberShapeErrors) {
+  node_t *not_sig_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      not_sig_members, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "oops"));
+  node_t *not_sig = make_interface_decl_of(a, "MS", NULL, not_sig_members);
+  clux_value_t *not_sig_result = exec_expr_interface_decl(ctx, not_sig);
+  ASSERT_NE(not_sig_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(not_sig_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(not_sig_result),
+               "interface 'MS' member must be a function signature");
+  clux_value_t *probe = clux_context_lookup(ctx, "MS", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "a rejected declaration must not define a name";
+  delete_node(&not_sig);
+
+  node_t *nameless_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      nameless_members,
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        NULL,
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+                        NULL));
+  node_t *nameless = make_interface_decl_of(a, "MN", NULL, nameless_members);
+  clux_value_t *nameless_result = exec_expr_interface_decl(ctx, nameless);
+  ASSERT_NE(nameless_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(nameless_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(nameless_result),
+               "interface 'MN' member 0 requires a name");
+  delete_node(&nameless);
+
+  node_t *with_body = make_interface_decl_of(
+      a, "MB", NULL, make_interface_members_of(a, "write", true, NULL));
+  clux_value_t *body_result = exec_expr_interface_decl(ctx, with_body);
+  ASSERT_NE(body_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(body_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(body_result),
+               "interface 'MB' member 'write' must be a signature, not a "
+               "function body");
+  delete_node(&with_body);
+
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(
+      captures,
+      make_capture_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "c"),
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *with_captures = make_interface_decl_of(
+      a, "MC", NULL, make_interface_members_of(a, "write", false, captures));
+  clux_value_t *captures_result = exec_expr_interface_decl(ctx, with_captures);
+  ASSERT_NE(captures_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(captures_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(captures_result),
+               "interface 'MC' member 'write' cannot have captures");
+  delete_node(&with_captures);
+
+  node_t *generic_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      generic_members,
+      make_func_decl_of(
+          a,
+          NULL,
+          create_generic_params_node(a),
+          create_func_params_node(a),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+          NULL));
+  node_t *generic = make_interface_decl_of(a, "MG", NULL, generic_members);
+  clux_value_t *generic_result = exec_expr_interface_decl(ctx, generic);
+  ASSERT_NE(generic_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(generic_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(generic_result),
+               "interface 'MG' member 'write' cannot be generic");
+  delete_node(&generic);
+}
+
+/* 场景: 成员签名校验四路——成员缺返回类型 / 成员重名 / 空成员表（空结点
+        与 body 槽 NULL 两种形态）
+   预期: 各报对应语义错误消息 */
+TEST_F(ExecLiteralTest, InterfaceDeclMemberSignatureErrors) {
+  node_t *no_ret_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      no_ret_members,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          create_func_params_node(a),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          NULL,
+          NULL));
+  node_t *no_ret = make_interface_decl_of(a, "MR", NULL, no_ret_members);
+  clux_value_t *no_ret_result = exec_expr_interface_decl(ctx, no_ret);
+  ASSERT_NE(no_ret_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(no_ret_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(no_ret_result),
+               "interface 'MR' member 'write' requires a return type");
+  delete_node(&no_ret);
+
+  node_t *duplicate_member = create_interface_members_node(a);
+  interface_members_node_add_member(
+      duplicate_member,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          create_func_params_node(a),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+          NULL));
+  interface_members_node_add_member(
+      duplicate_member,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          create_func_params_node(a),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+          NULL));
+  node_t *dup = make_interface_decl_of(a, "MD", NULL, duplicate_member);
+  clux_value_t *dup_result = exec_expr_interface_decl(ctx, dup);
+  ASSERT_NE(dup_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(dup_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(dup_result),
+               "interface 'MD' has duplicate member 'write'");
+  delete_node(&dup);
+
+  node_t *empty =
+      make_interface_decl_of(a, "MQ", NULL, create_interface_members_node(a));
+  clux_value_t *empty_result = exec_expr_interface_decl(ctx, empty);
+  ASSERT_NE(empty_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(empty_result),
+               "interface 'MQ' requires at least one member");
+  delete_node(&empty);
+
+  node_t *null_body = make_interface_decl_of(a, "MQ0", NULL, NULL);
+  clux_value_t *null_body_result = exec_expr_interface_decl(ctx, null_body);
+  ASSERT_NE(null_body_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(null_body_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(null_body_result),
+               "interface 'MQ0' requires at least one member");
+  delete_node(&null_body);
+}
+
+/* 场景: 参数级校验三路——rest 变参成员 / 参数缺类型 / 参数类型解析失败
+   预期: rest 与缺类型报精确消息；类型解析失败传播公共求值通道的 error
+         值（kind ERROR），且声明名不被 define */
+TEST_F(ExecLiteralTest, InterfaceDeclParameterErrors) {
+  node_t *rest_params = create_func_params_node(a);
+  func_params_node_add_param(rest_params,
+                             make_node(CLUX_NODE_EXPR_REST, "..."));
+  node_t *rest_members_real = create_interface_members_node(a);
+  interface_members_node_add_member(
+      rest_members_real,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          rest_params,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+          NULL));
+  node_t *rest = make_interface_decl_of(a, "MV", NULL, rest_members_real);
+  clux_value_t *rest_result = exec_expr_interface_decl(ctx, rest);
+  ASSERT_NE(rest_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rest_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(rest_result),
+               "variadic interface member is not supported yet");
+  delete_node(&rest);
+
+  node_t *typeless_params = create_func_params_node(a);
+  func_params_node_add_param(
+      typeless_params,
+      make_named_param_of(
+          a, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "data"), NULL));
+  node_t *typeless_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      typeless_members,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          typeless_params,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+          NULL));
+  node_t *typeless = make_interface_decl_of(a, "MP", NULL, typeless_members);
+  clux_value_t *typeless_result = exec_expr_interface_decl(ctx, typeless);
+  ASSERT_NE(typeless_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(typeless_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(typeless_result),
+               "interface 'MP' member 'write' parameter 0 requires a type");
+  delete_node(&typeless);
+
+  node_t *unknown_params = create_func_params_node(a);
+  func_params_node_add_param(
+      unknown_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "data"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "no_such_type")));
+  node_t *unknown_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      unknown_members,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          unknown_params,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+          NULL));
+  node_t *unknown = make_interface_decl_of(a, "MU", NULL, unknown_members);
+  clux_value_t *unknown_result = exec_expr_interface_decl(ctx, unknown);
+  ASSERT_NE(unknown_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(unknown_result)),
+            CLUX_TYPE_ERROR)
+      << "a param type resolution failure must propagate the error value";
+  clux_value_t *probe = clux_context_lookup(ctx, "MU", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "a rejected declaration must not define a name";
+  delete_node(&unknown);
+
+  /* 参数槽为 NULL（func_params_node_get_param 返回 NULL 的容错路径）。 */
+  node_t *null_params = create_func_params_node(a);
+  func_params_node_add_param(null_params, NULL);
+  node_t *null_member_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      null_member_members,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          null_params,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+          NULL));
+  node_t *null_param_decl =
+      make_interface_decl_of(a, "MP0", NULL, null_member_members);
+  clux_value_t *null_param_result =
+      exec_expr_interface_decl(ctx, null_param_decl);
+  ASSERT_NE(null_param_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(null_param_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(null_param_result),
+               "interface 'MP0' member 'write' parameter 0 requires a type");
+  delete_node(&null_param_decl);
+
+  /* 返回类型求值失败：错误经公共类型求值通道传播。 */
+  node_t *bad_ret_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      bad_ret_members,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          create_func_params_node(a),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "no_such_ret"),
+          NULL));
+  node_t *bad_ret = make_interface_decl_of(a, "MR0", NULL, bad_ret_members);
+  clux_value_t *bad_ret_result = exec_expr_interface_decl(ctx, bad_ret);
+  ASSERT_NE(bad_ret_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_ret_result)),
+            CLUX_TYPE_ERROR)
+      << "a return type resolution failure must propagate the error value";
+  delete_node(&bad_ret);
+}
+
+/* 场景: 复合签名——interface IC { func f(a: i32, b: *i32): *i32;
+        func g(): void; } 多成员、多参数、指针复合类型
+   预期: 成员按声明序可查；签名经 create_func_type 通道构造并与显式
+         构造的期望类型结构恒等（指针相同——func 类型按结构驻留） */
+TEST_F(ExecLiteralTest, InterfaceDeclCompositeSignatures) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *void_type = clux_context_builtin_type(ctx, CLUX_TYPE_VOID);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+
+  node_t *f_params = create_func_params_node(a);
+  func_params_node_add_param(
+      f_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      f_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+          make_binary_of(
+              a,
+              NULL,
+              make_node(CLUX_NODE_SYMBOL, "*"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"))));
+  node_t *f_members = create_interface_members_node(a);
+  interface_members_node_add_member(
+      f_members,
+      make_func_decl_of(
+          a,
+          NULL,
+          NULL,
+          f_params,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+          make_binary_of(
+              a,
+              NULL,
+              make_node(CLUX_NODE_SYMBOL, "*"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")),
+          NULL));
+  interface_members_node_add_member(
+      f_members,
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "g"),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+                        NULL));
+  node_t *decl = make_interface_decl_of(a, "IC", NULL, f_members);
+  clux_value_t *declared = exec_expr_interface_decl(ctx, decl);
+  ASSERT_NE(declared, nullptr);
+  EXPECT_FALSE(clux_value_is_error(declared));
+  EXPECT_EQ(clux_context_lookup(ctx, "IC", NULL), declared);
+  clux_type_t *described = type_described_by(declared);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_INTERFACE);
+  EXPECT_EQ(clux_interface_member_count(described), 2u);
+
+  clux_type_t *f_signature_params[] = {i32_type, ptr_i32};
+  clux_type_t *expected_f = clux_context_create_func_type(
+      ctx, "f", NULL, 0, f_signature_params, 2, ptr_i32);
+  ASSERT_NE(expected_f, nullptr);
+  clux_type_t *expected_g =
+      clux_context_create_func_type(ctx, "g", NULL, 0, NULL, 0, void_type);
+  ASSERT_NE(expected_g, nullptr);
+  const clux_interface_member_t *member_f =
+      clux_interface_get_member(described, 0);
+  ASSERT_NE(member_f, nullptr);
+  EXPECT_STREQ(member_f->name, "f");
+  EXPECT_EQ(member_f->func, expected_f)
+      << "the f signature must be interned with the explicit create_func_type "
+         "channel";
+  const clux_interface_member_t *member_g =
+      clux_interface_get_member(described, 1);
+  ASSERT_NE(member_g, nullptr);
+  EXPECT_STREQ(member_g->name, "g");
+  EXPECT_EQ(member_g->func, expected_g);
+  EXPECT_EQ(clux_interface_find_member(described, "f"), member_f);
+  EXPECT_EQ(clux_interface_find_member(described, "g"), member_g);
+  EXPECT_EQ(clux_interface_find_member(described, "h"), nullptr);
+  delete_node(&decl);
+}
+
+/* 场景: STMT_INTERFACE 语句层校验三路——缺声明 / 匿名声明无装饰器 /
+        匿名声明带装饰器
+   预期: 前者报 "interface statement requires an interface declaration"，
+         后两者报 "interface statement requires a named interface
+         declaration"（语句包裹层强制具名，匿名只在表达式位置合法） */
+TEST_F(ExecLiteralTest, InterfaceStmtValidationErrors) {
+  node_t *missing = create_stmt_interface_node(a);
+  clux_value_t *missing_result = exec_stmt_interface(ctx, missing);
+  ASSERT_NE(missing_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(missing_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(missing_result),
+               "interface statement requires an interface declaration");
+  delete_node(&missing);
+
+  node_t *anon = create_stmt_interface_node(a);
+  stmt_interface_node_set_interface_decl(
+      anon,
+      make_interface_decl_of(
+          a, NULL, NULL, make_interface_members_of(a, "write", false, NULL)));
+  clux_value_t *anon_result = exec_stmt_interface(ctx, anon);
+  ASSERT_NE(anon_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(anon_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(anon_result),
+               "interface statement requires a named interface declaration");
+  delete_node(&anon);
+
+  node_t *decorated = create_stmt_interface_node(a);
+  stmt_interface_node_set_interface_decl(
+      decorated,
+      make_interface_decl_of(
+          a, NULL, NULL, make_interface_members_of(a, "write", false, NULL)));
+  stmt_interface_node_add_decorator(
+      decorated,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *decorated_result = exec_stmt_interface(ctx, decorated);
+  ASSERT_NE(decorated_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(decorated_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(decorated_result),
+               "interface statement requires a named interface declaration");
+  delete_node(&decorated);
+
+  /* 装饰路径的匿名求值失败：结构非法的声明经 exec_expr_interface_decl_value
+     求值出 error，直接返回且名字不被 define。 */
+  node_t *invalid = create_stmt_interface_node(a);
+  stmt_interface_node_set_interface_decl(
+      invalid,
+      make_interface_decl_of(a, "DQ", NULL, create_interface_members_node(a)));
+  stmt_interface_node_add_decorator(
+      invalid,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *invalid_result = exec_stmt_interface(ctx, invalid);
+  ASSERT_NE(invalid_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(invalid_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(invalid_result),
+               "interface 'DQ' requires at least one member");
+  delete_node(&invalid);
+}
+
+/* 场景: STMT_INTERFACE 与 EXPR_INTERFACE_DECL 分派——两者经 exec_node
+        顶层槽位表注册递归
+   预期: stmt 路径按 exec_stmt_interface 定义具名 type value；expr 路径
+         按 exec_expr_interface_decl 定义；两者结构一致故描述同一被驻留
+         interface 类型（引擎去重指针恒等） */
+TEST_F(ExecLiteralTest, InterfaceStmtDispatchDefinesByName) {
+  node_t *stmt = create_stmt_interface_node(a);
+  stmt_interface_node_set_interface_decl(
+      stmt,
+      make_interface_decl_of(
+          a,
+          "IStmt",
+          NULL,
+          make_interface_members_of(a, "write", false, NULL)));
+  clux_value_t *result = exec_node(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "IStmt", NULL), result)
+      << "the interface statement must define the type value by name";
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_INTERFACE);
+  EXPECT_FALSE(clux_type_is_seal(described));
+  EXPECT_EQ(clux_interface_member_count(described), 1u);
+  delete_node(&stmt);
+
+  node_t *decl = make_interface_decl_of(
+      a, "IExpr", NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *expr_result = exec_node(ctx, decl);
+  ASSERT_NE(expr_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(expr_result));
+  EXPECT_EQ(clux_context_lookup(ctx, "IExpr", NULL), expr_result)
+      << "the interface expression must define the type value by name";
+  EXPECT_EQ(type_described_by(expr_result), described)
+      << "structurally identical declarations must dedupe to one type";
+  delete_node(&decl);
+}
+
+/* 场景: STMT_INTERFACE 非函数装饰器透传——[[7]]（数值）与 [[i32]]（type
+        value）求值成功但非 func，按编译期标记跳过包装
+   预期: 源 type value 原样透传并按名 define：被描述类型仍为 INTERFACE
+         （成员数 1）、lookup 恒等；不触发执行器安装（保持 NULL） */
+TEST_F(ExecLiteralTest, InterfaceStmtNonFuncDecoratorsPassThrough) {
+  node_t *stmt = create_stmt_interface_node(a);
+  stmt_interface_node_set_interface_decl(
+      stmt,
+      make_interface_decl_of(
+          a, "IDN", NULL, make_interface_members_of(a, "write", false, NULL)));
+  stmt_interface_node_add_decorator(
+      stmt, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  stmt_interface_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *result = exec_stmt_interface(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "IDN", NULL), result)
+      << "non-func decorators must still bind the value under the name";
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_INTERFACE);
+  EXPECT_EQ(clux_interface_member_count(described), 1u)
+      << "non-func decorators must pass the source type value through";
+  EXPECT_EQ(clux_context_get_executor(ctx), nullptr)
+      << "non-func decorators must not touch the executor";
+  delete_node(&stmt);
+}
+
+/* 场景: STMT_INTERFACE 装饰器链 e2e——装饰器是 comptime func 值
+        wrap_t(u: type): type { return i32; }，interface DI { ... }
+        经 [[wrap_t]] 包装；失败装饰器 [[no_such_decorator]] 传播 error
+   预期: 匿名求值源类型值 → invoke wrap_t（type value 作实参进帧，
+         return i32 出帧）→ 最终名字 DI 绑定包装后的返回值：被描述类型
+         恒等于 i32 builtin（证明包装真实发生而非透传）、invoke 前懒安装
+         帧协议执行器；失败装饰器返回 error 值且名字不被 define */
+TEST_F(ExecLiteralTest, InterfaceStmtFuncDecoratorWrapsEndToEnd) {
+  clux_type_t *meta = clux_context_get_type_type(ctx);
+  clux_type_t *wrap_params[1] = {meta};
+  clux_type_t *wrap_type = clux_context_create_func_type(
+      ctx, "wrap_t", NULL, 0, wrap_params, 1, meta);
+  ASSERT_NE(wrap_type, nullptr);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type")));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *wrap_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t"),
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type"),
+      body);
+  clux_value_t *wrap_func =
+      clux_context_create_func(ctx, wrap_type, NULL, NULL);
+  ASSERT_NE(wrap_func, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+            wrap_func);
+  clux_value_t *wrap_bound = clux_context_declare_value(
+      ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
+  ASSERT_NE(wrap_bound, nullptr);
+  EXPECT_FALSE(clux_value_is_error(wrap_bound));
+
+  node_t *stmt = create_stmt_interface_node(a);
+  stmt_interface_node_set_interface_decl(
+      stmt,
+      make_interface_decl_of(
+          a, "DI", NULL, make_interface_members_of(a, "write", false, NULL)));
+  stmt_interface_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t")));
+  clux_value_t *result = exec_stmt_interface(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_context_lookup(ctx, "DI", NULL), result)
+      << "the decorated path must bind the wrapped value under the name";
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "the decorator must substitute the source interface type with its "
+         "return type";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "invoking the func decorator must lazily install the executor";
+  delete_node(&stmt);
+  delete_node(&wrap_decl);
+
+  node_t *fail_stmt = create_stmt_interface_node(a);
+  stmt_interface_node_set_interface_decl(
+      fail_stmt,
+      make_interface_decl_of(
+          a, "DZ", NULL, make_interface_members_of(a, "write", false, NULL)));
+  stmt_interface_node_add_decorator(
+      fail_stmt,
+      make_decorator_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "no_such_decorator")));
+  clux_value_t *fail_result = exec_stmt_interface(ctx, fail_stmt);
+  ASSERT_NE(fail_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(fail_result)),
+            CLUX_TYPE_ERROR)
+      << "a failing decorator must propagate its error value";
+  clux_value_t *probe = clux_context_lookup(ctx, "DZ", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
+      << "a failing decorator must not define the name";
+  delete_node(&fail_stmt);
 }

@@ -10,6 +10,7 @@
 #include "engine/value.h"
 #include "engine/cunion.h"
 #include "engine/enum.h"
+#include "engine/interface_type.h"
 #include "engine/union.h"
 #include "exec/exec.h"
 #include "parser/node.h"
@@ -18,6 +19,7 @@
 #include "parser/node_enum_decl.h"
 #include "parser/node_enum_variant.h"
 #include "parser/node_field.h"
+#include "parser/node_interface_decl.h"
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
@@ -1202,6 +1204,240 @@ clux_value_t *exec_expr_enum_decl(clux_context_t *ctx, node_t *node) {
    enum 语句装饰器包装路径用——包装完成后由 declare_value 具名化。 */
 clux_value_t *exec_expr_enum_decl_value(clux_context_t *ctx, node_t *node) {
   return exec_expr_enum_decl_impl(ctx, node, false);
+}
+
+/* interface 定义（白皮书 §3.10、§6.9）：interface Name { func sig; ... }，
+   纯编译期结构约束——成员逐个求值为方法签名（名 + func 类型，经
+   clux_context_create_func_type 构造，与显式 func 类型表达式结构一致即
+   恒等），不产生运行期对象/虚表。成员必须是签名：缺名/带函数体/带
+   捕获/带泛型/缺返回类型在构造前拦截以携带源位置；约束满足是结构的，
+   implements 断言属于 sema 阶段（exec 不检查）。结构去重恒等返回；
+   产出 type value（外层 TYPE kind 已 seal，创建合法），具名（NAME 槽
+   非空）时按名 define 进当前作用域（重名报 duplicate），匿名（NAME
+   缺省）合法——引擎类型名用关键字文本回退，不 define。interface 类型
+   本身永不 seal：作值类型（var x: I 等）由 create_value 的 seal 门禁
+   拒绝（"cannot create a value of incomplete type"）。泛型 interface
+   （[W]）暂不支持，等泛型批次接入。declare_named=false 时仅求值出
+   不具名的 type value（装饰器包装路径：具名化推迟到包装完成后的
+   declare_value）。 */
+static clux_value_t *exec_expr_interface_decl_impl(clux_context_t *ctx,
+                                                   node_t *node,
+                                                   bool declare_named) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  node_t *name_node = interface_decl_node_get_name(node);
+  char *name =
+      name_node ? location_get(node_get_location(name_node), allocator) : NULL;
+  /* 匿名 interface 合法：错误消息与引擎构造用关键字文本回退类型名，
+     define 只在具名（name 非空）时发生。 */
+  const char *type_name = name;
+  if (!type_name) {
+    type_name = "interface";
+  }
+  if (interface_decl_node_get_generics(node)) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "generic interface is not supported yet");
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  node_t *body = interface_decl_node_get_body(node);
+  size_t count = body ? interface_members_node_get_member_count(body) : 0;
+  if (count == 0) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "interface '%s' requires at least one member", type_name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  clux_interface_member_t members[count];
+  size_t filled = 0;
+  clux_value_t *fail = NULL;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    node_t *member = interface_members_node_get_member(body, idx);
+    if (!member || node_get_kind(member) != CLUX_NODE_EXPR_FUNC_DECL) {
+      fail = clux_context_create_error_message(
+          ctx,
+          member ? node_get_location(member) : loc,
+          "interface '%s' member must be a function signature",
+          type_name);
+      break;
+    }
+    node_t *member_name_node = func_decl_node_get_name(member);
+    char *member_name =
+        member_name_node
+            ? location_get(node_get_location(member_name_node), allocator)
+            : NULL;
+    node_t *member_fail_loc = member_name_node ? member_name_node : member;
+    if (!member_name) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(member_fail_loc),
+          "interface '%s' member %zu requires a name",
+          type_name,
+          idx);
+      break;
+    }
+    if (func_decl_node_get_body(member)) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(member),
+          "interface '%s' member '%s' must be a signature, not a function "
+          "body",
+          type_name,
+          member_name);
+      allocator_free(allocator, (void **)&member_name);
+      break;
+    }
+    if (func_decl_node_get_captures(member)) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(member),
+          "interface '%s' member '%s' cannot have captures",
+          type_name,
+          member_name);
+      allocator_free(allocator, (void **)&member_name);
+      break;
+    }
+    if (func_decl_node_get_generics(member)) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(member),
+          "interface '%s' member '%s' cannot be generic",
+          type_name,
+          member_name);
+      allocator_free(allocator, (void **)&member_name);
+      break;
+    }
+    node_t *return_node = func_decl_node_get_return(member);
+    if (!return_node) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(member),
+          "interface '%s' member '%s' requires a return type",
+          type_name,
+          member_name);
+      allocator_free(allocator, (void **)&member_name);
+      break;
+    }
+    /* 参数序列求值：FUNC_PARAM 取 TYPE 槽，rest（变参/参数包）暂不
+       支持。FUNC_PARAM 只取类型——签名不携带形参名。 */
+    node_t *params_node = func_decl_node_get_params(member);
+    size_t param_count =
+        params_node ? func_params_node_get_param_count(params_node) : 0;
+    clux_type_t *params[param_count];
+    for (size_t pidx = 0; pidx < param_count && !fail; pidx++) {
+      node_t *param = func_params_node_get_param(params_node, pidx);
+      if (!param) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "interface '%s' member '%s' parameter %zu requires a type",
+            type_name,
+            member_name,
+            pidx);
+        break;
+      }
+      if (node_get_kind(param) == CLUX_NODE_EXPR_REST) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(param),
+            "variadic interface member is not supported yet");
+        break;
+      }
+      node_t *param_type_node = node_get_kind(param) == CLUX_NODE_FUNC_PARAM
+                                    ? func_param_node_get_type(param)
+                                    : param;
+      if (!param_type_node) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "interface '%s' member '%s' parameter %zu requires a type",
+            type_name,
+            member_name,
+            pidx);
+        break;
+      }
+      clux_value_t *err = NULL;
+      params[pidx] = exec_operand_type(ctx, param_type_node, &err);
+      if (!params[pidx]) {
+        fail = err;
+        break;
+      }
+    }
+    clux_type_t *return_type = NULL;
+    if (!fail) {
+      clux_value_t *err = NULL;
+      return_type = exec_operand_type(ctx, return_node, &err);
+      if (!return_type) {
+        fail = err;
+      }
+    }
+    if (!fail) {
+      /* 重名在引擎校验前拦截以携带源位置。 */
+      for (size_t prev = 0; prev < filled; prev++) {
+        if (strcmp(member_name, members[prev].name) == 0) {
+          fail = clux_context_create_error_message(
+              ctx,
+              node_get_location(member_name_node),
+              "interface '%s' has duplicate member '%s'",
+              type_name,
+              member_name);
+          break;
+        }
+      }
+    }
+    if (!fail) {
+      clux_type_t *signature = clux_context_create_func_type(
+          ctx, member_name, NULL, 0, params, param_count, return_type);
+      if (!signature) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(member),
+            "interface '%s' member '%s' signature creation failed",
+            type_name,
+            member_name);
+      } else {
+        members[filled].name = member_name;
+        members[filled].func = signature;
+        filled++;
+      }
+    }
+    if (fail) {
+      allocator_free(allocator, (void **)&member_name);
+    }
+  }
+  clux_type_t *type = NULL;
+  if (!fail) {
+    type = clux_context_create_interface_type(ctx, type_name, members, filled);
+  }
+  /* 成员名经 context 路径 strs 驻留，本地拷贝统一释放。 */
+  for (size_t idx = 0; idx < filled; idx++) {
+    allocator_free(allocator, (void **)&members[idx].name);
+  }
+  if (fail) {
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  if (!type) {
+    clux_value_t *create_fail = clux_context_create_error_message(
+        ctx, loc, "interface type creation failed");
+    allocator_free(allocator, (void **)&name);
+    return create_fail;
+  }
+  clux_value_t *value = clux_context_create_type_value(
+      ctx, type, (declare_named && name) ? name : NULL, loc);
+  allocator_free(allocator, (void **)&name);
+  return value;
+}
+
+clux_value_t *exec_expr_interface_decl(clux_context_t *ctx, node_t *node) {
+  return exec_expr_interface_decl_impl(ctx, node, true);
+}
+
+/* 匿名 interface 值求值：仅求值出不具名的 type value（不按名 define），
+   interface 语句装饰器包装路径用——包装完成后由 declare_value 具名化。 */
+clux_value_t *exec_expr_interface_decl_value(clux_context_t *ctx,
+                                             node_t *node) {
+  return exec_expr_interface_decl_impl(ctx, node, false);
 }
 
 /* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value

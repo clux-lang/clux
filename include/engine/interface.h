@@ -86,6 +86,12 @@ typedef enum _clux_type_kind_t {
   /* enum（枚举尾部追加，不打断既有序号）：具名整数常量集（白皮书
      §3.6），布局与底层整数类型一致，variant 值是编译期整数常量。 */
   CLUX_TYPE_ENUM,
+  /* interface（枚举尾部追加，不打断既有序号）：纯编译期结构约束
+     （白皮书 §3.10、§6.9）——成员是方法签名（名 + func 类型），满足
+     是结构的（提供全部成员名+签名一致），不产生运行期对象/虚表。
+     永不 seal、天然不完整（与 void 同族）：create_value 的 seal 门禁
+     从根上拒绝 interface 作值类型（变量创建/类型标注等值位置）。 */
+  CLUX_TYPE_INTERFACE,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
