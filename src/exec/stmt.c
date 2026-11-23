@@ -18,18 +18,21 @@
 #include "parser/node_func_decl.h"
 #include "parser/node_interface_decl.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_do_while.h"
 #include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_interface.h"
+#include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_struct_decl.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_stmt_while.h"
 #include "parser/node_union.h"
 #include <string.h>
 
@@ -395,11 +398,12 @@ exec_stmt_var_define(clux_context_t *ctx, node_t *node, clux_value_t *target) {
   return clux_context_assign(ctx, target, value, node_get_location(value_node));
 }
 
-/* 块出口协议：error / return signal / 最后语句值都注册在块作用域内，
-   作用域销毁后继续引用即悬空——先回退作用域，再转换出值（error 借
-   err 指针在外层重建，err 本体归 context 的 errors 向量，值销毁不动
-   本体；signal 载荷与普通值克隆，与「函数返回一律 copy」的值语义
-   一致）。
+/* 块出口协议：error / return signal / break/continue signal / 最后
+   语句值都注册在块作用域内，作用域销毁后继续引用即悬空——先回退作用
+   域，再转换出值（error 借 err 指针在外层重建，err 本体归 context 的
+   errors 向量，值销毁不动本体；signal 载荷与普通值克隆，与「函数返回
+   一律 copy」的值语义一致；break/continue signal 无载荷，直接重建同种
+   信号）。
    栈平衡：从真实栈顶逐层走 pop_scope 直到块自身——任何未配对退出
    的中间层都走各自的 pop 通道销毁（不依赖 delete 跳层递归删，defer
    批次的挂点就在每层出口），以 global 兜底防越界挂死。块自身的
@@ -455,7 +459,9 @@ clux_value_t *exec_stmt_block(clux_context_t *ctx, node_t *node) {
       }
       clux_value_t *value = exec_node(ctx, stmt);
       result = value;
-      if (clux_value_is_error(value) || clux_value_is_return_signal(value)) {
+      if (clux_value_is_error(value) || clux_value_is_return_signal(value) ||
+          clux_value_is_break_signal(value) ||
+          clux_value_is_continue_signal(value)) {
         break;
       }
     }
@@ -475,6 +481,10 @@ clux_value_t *exec_stmt_block(clux_context_t *ctx, node_t *node) {
     clux_value_t *cloned =
         payload ? clux_context_clone(ctx, payload, NULL) : NULL;
     out = clux_context_create_return_signal(ctx, cloned);
+  } else if (clux_value_is_break_signal(result)) {
+    out = clux_context_create_break_signal(ctx);
+  } else if (clux_value_is_continue_signal(result)) {
+    out = clux_context_create_continue_signal(ctx);
   } else if (result) {
     out = clux_context_clone(ctx, result, NULL);
   }
@@ -555,6 +565,127 @@ clux_value_t *exec_stmt_empty(clux_context_t *ctx, node_t *node) {
   (void)ctx;
   (void)node;
   return NULL;
+}
+
+/* 循环条件求值公共体（while/do-while 共用）：条件经 exec_operand 求值
+   必须产出 bool（操作数 error 优先传播），成功经 *out_cond 写出布尔值，
+   失败返回语义化 error。 */
+static clux_value_t *stmt_loop_cond_of(clux_context_t *ctx,
+                                       node_t *cond_node,
+                                       const char *stmt_name,
+                                       bool *out_cond) {
+  clux_value_t *cond = exec_operand(ctx, cond_node);
+  if (!cond) {
+    return clux_context_create_error_message(ctx,
+                                             node_get_location(cond_node),
+                                             "%s condition requires a value",
+                                             stmt_name);
+  }
+  if (clux_value_is_error(cond)) {
+    return cond;
+  }
+  clux_type_t *type = clux_value_get_type(cond);
+  if (clux_type_get_kind(type) != CLUX_TYPE_BOOL) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(cond_node),
+        "%s condition must be 'bool', got '%s'",
+        stmt_name,
+        type_name ? type_name : "<unknown>");
+  }
+  *out_cond = *(bool *)clux_value_get_raw(cond, 0);
+  return NULL;
+}
+
+/* break;（白皮书 §4.10）：产出 break signal（无载荷），语句层原样
+   上抛，唯一消费点是最近一层循环边界（消费即退出循环）。 */
+clux_value_t *exec_stmt_break(clux_context_t *ctx, node_t *node) {
+  (void)node;
+  return clux_context_create_break_signal(ctx);
+}
+
+/* continue;（白皮书 §4.10）：产出 continue signal（无载荷），语句层
+   原样上抛，唯一消费点是最近一层循环边界（消费即进入下一轮）。 */
+clux_value_t *exec_stmt_continue(clux_context_t *ctx, node_t *node) {
+  (void)node;
+  return clux_context_create_continue_signal(ctx);
+}
+
+/* while 语句 while (cond) { body }（白皮书 §4.6）：先判条件（必须
+   bool）后执行——false 即退出。body 值分流：error / return signal
+   原样上抛；break signal 消费（退出循环）；continue signal 与其余值
+   丢弃进下一轮。循环语句无值（NULL）。 */
+clux_value_t *exec_stmt_while(clux_context_t *ctx, node_t *node) {
+  node_t *cond_node = stmt_while_node_get_condition(node);
+  if (!cond_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "while statement requires a condition");
+  }
+  node_t *body_node = stmt_while_node_get_body(node);
+  if (!body_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "while statement requires a body");
+  }
+  for (;;) {
+    bool cond_bool = false;
+    clux_value_t *fail = stmt_loop_cond_of(ctx, cond_node, "while", &cond_bool);
+    if (fail) {
+      return fail;
+    }
+    if (!cond_bool) {
+      return NULL;
+    }
+    clux_value_t *value = exec_node(ctx, body_node);
+    if (!value) {
+      continue;
+    }
+    if (clux_value_is_error(value) || clux_value_is_return_signal(value)) {
+      return value;
+    }
+    if (clux_value_is_break_signal(value)) {
+      return NULL;
+    }
+  }
+}
+
+/* do-while 语句 do { body } while (cond);（白皮书 §4.7）：body 先
+   执行一次再判条件（必须 bool）——break signal 在判定前消费（直接
+   退出，不触发条件求值），continue signal 消费后落到条件判定；条件
+   false 即退出。循环语句无值（NULL）。 */
+clux_value_t *exec_stmt_do_while(clux_context_t *ctx, node_t *node) {
+  node_t *body_node = stmt_do_while_node_get_body(node);
+  if (!body_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "do-while statement requires a body");
+  }
+  node_t *cond_node = stmt_do_while_node_get_condition(node);
+  if (!cond_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "do-while statement requires a condition");
+  }
+  for (;;) {
+    clux_value_t *value = exec_node(ctx, body_node);
+    if (value) {
+      if (clux_value_is_error(value) || clux_value_is_return_signal(value)) {
+        return value;
+      }
+      if (clux_value_is_break_signal(value)) {
+        return NULL;
+      }
+    }
+    bool cond_bool = false;
+    clux_value_t *fail =
+        stmt_loop_cond_of(ctx, cond_node, "do-while", &cond_bool);
+    if (fail) {
+      return fail;
+    }
+    if (!cond_bool) {
+      return NULL;
+    }
+  }
 }
 
 /* 函数语句 <decorator>* [export]? [comptime]? <func_decl>（白皮书 §3.3、

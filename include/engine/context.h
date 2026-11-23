@@ -389,6 +389,14 @@ clux_value_t *clux_context_create_return_signal(clux_context_t *self,
 bool clux_value_is_return_signal(clux_value_t *value);
 /* 信号载荷读取（借用）：非 return signal 返回 NULL。 */
 clux_value_t *clux_return_signal_get_payload(clux_value_t *signal);
+/* break/continue signal（循环跳转的展开通道）：break/continue 语句产出
+   信号值（无载荷），语句层原样上抛，唯一消费点是最近一层循环边界；
+   逃逸到循环边界之外由执行层报 "break/continue outside of a loop"。
+   无载荷即零尺寸值（data=0），与空 tuple 同族。 */
+clux_value_t *clux_context_create_break_signal(clux_context_t *self);
+bool clux_value_is_break_signal(clux_value_t *value);
+clux_value_t *clux_context_create_continue_signal(clux_context_t *self);
+bool clux_value_is_continue_signal(clux_value_t *value);
 /* 创建具名 struct 类型（白皮书 §3.5）：声明体一次性传入——字段表必填，
    attribute（含 method 本体）/method 名单/subtype 三表可选。字段按声明
    序顺序平铺（C 布局），所有字段同时有效；attribute/method/subtype 是

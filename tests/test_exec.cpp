@@ -51,6 +51,9 @@
 #include "parser/node_field.h"
 #include "parser/node_interface_decl.h"
 #include "parser/node_stmt_interface.h"
+#include "parser/node_stmt_jump.h"
+#include "parser/node_stmt_while.h"
+#include "parser/node_stmt_do_while.h"
 #include "parser/node_generic_param.h"
 #include "engine/interface_type.h"
 #include "engine/struct.h"
@@ -875,7 +878,9 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE ||
         kind == CLUX_NODE_EXPR_STRUCT_DECL || kind == CLUX_NODE_STMT_STRUCT ||
         kind == CLUX_NODE_EXPR_CONSTRUCT || kind == CLUX_NODE_EXPR_BUILTIN ||
-        kind == CLUX_NODE_STMT_IF || kind == CLUX_NODE_STMT_EMPTY;
+        kind == CLUX_NODE_STMT_IF || kind == CLUX_NODE_STMT_EMPTY ||
+        kind == CLUX_NODE_STMT_BREAK || kind == CLUX_NODE_STMT_CONTINUE ||
+        kind == CLUX_NODE_STMT_WHILE || kind == CLUX_NODE_STMT_DO_WHILE;
     if (synthetic_skip) {
       continue;
     }
@@ -16003,4 +16008,663 @@ TEST_F(ExecLiteralTest, ExecStmtIfBranchBlocksUseIndependentScopes) {
   ASSERT_FALSE(clux_value_is_error(value2)) << error_message_of(value2);
   EXPECT_EQ(read_i32(value2), 9) << "else-block local x must resolve to 9";
   delete_node(&skipped);
+}
+
+/* ---- exec_stmt_break/continue/while/do_while（白皮书 §4.6、§4.7、§4.10）----
+ */
+
+/* 合成 while 语句 while (cond) { body }。 */
+static node_t *
+make_stmt_while_of(allocator_t *allocator, node_t *cond, node_t *body) {
+  node_t *node = create_stmt_while_node(allocator);
+  stmt_while_node_set_condition(node, cond);
+  if (body) {
+    stmt_while_node_set_body(node, body);
+  }
+  return node;
+}
+
+/* 合成 do-while 语句 do { body } while (cond);。 */
+static node_t *
+make_stmt_do_while_of(allocator_t *allocator, node_t *body, node_t *cond) {
+  node_t *node = create_stmt_do_while_node(allocator);
+  if (body) {
+    stmt_do_while_node_set_body(node, body);
+  }
+  if (cond) {
+    stmt_do_while_node_set_condition(node, cond);
+  }
+  return node;
+}
+
+/* 合成单条语句块 { stmt }。 */
+static node_t *make_block_of(allocator_t *allocator, node_t *stmt) {
+  node_t *block = create_stmt_block_node(allocator);
+  stmt_block_node_add_stmt(block, stmt);
+  return block;
+}
+
+/* 场景: while (true) { break; }——break signal 被最近一层循环边界消费
+   预期: 循环正常退出，循环语句无值（NULL），非 error */
+TEST_F(ExecLiteralTest, ExecStmtBreakExitsWhile) {
+  node_t *loop =
+      make_stmt_while_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                         make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr)
+      << "break must be consumed by the loop boundary with no loop value";
+  delete_node(&loop);
+}
+
+/* 场景: 嵌套循环 while (true) { while (true) { break; } break; }——break
+        只退最近一层
+   预期: 内层 break 消费于内层边界，外层随后的 break 消费于外层边界，
+         整体正常退出无值 */
+TEST_F(ExecLiteralTest, ExecStmtBreakOnlyExitsInnermostLoop) {
+  node_t *inner =
+      make_stmt_while_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                         make_block_of(a, create_stmt_break_node(a)));
+  node_t *outer_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(outer_body, inner);
+  stmt_block_node_add_stmt(outer_body, create_stmt_break_node(a));
+  node_t *outer = make_stmt_while_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"), outer_body);
+  clux_value_t *value = exec_node(ctx, outer);
+  EXPECT_EQ(value, nullptr)
+      << "each break must be consumed by its nearest loop boundary";
+  delete_node(&outer);
+}
+
+/* 场景: while (false) { 11 }——条件先判后执行
+   预期: body 不执行，循环语句无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtWhileFalseSkipsBody) {
+  node_t *loop = make_stmt_while_of(
+      a,
+      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"),
+      make_block_of(a, make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11")));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr)
+      << "a false condition must skip the body and yield no loop value";
+  delete_node(&loop);
+}
+
+/* 场景: do { break; } while (true)——do-while 的 body 先执行，break 在
+        条件判定前消费
+   预期: 直接退出，true 条件不触发死循环 */
+TEST_F(ExecLiteralTest, ExecStmtDoWhileBreakSkipsCondition) {
+  node_t *loop = make_stmt_do_while_of(
+      a,
+      make_block_of(a, create_stmt_break_node(a)),
+      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr)
+      << "break in a do-while body must exit before the condition is "
+         "evaluated";
+  delete_node(&loop);
+}
+
+/* 场景: do { 11 } while (false)——do-while 的 body 先执行一次
+   预期: 执行一次后条件判 false 退出，循环语句无值（NULL，非 11） */
+TEST_F(ExecLiteralTest, ExecStmtDoWhileRunsBodyOnce) {
+  node_t *loop = make_stmt_do_while_of(
+      a,
+      make_block_of(a, make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11")),
+      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr)
+      << "a loop statement yields no value even when the body produces one";
+  delete_node(&loop);
+}
+
+/* 场景: while (11)——条件必须 bool
+   预期: "while condition must be 'bool', got 'i32'" */
+TEST_F(ExecLiteralTest, ExecStmtWhileConditionMustBeBool) {
+  node_t *loop =
+      make_stmt_while_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                         make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a non-bool condition must be rejected";
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "while condition must be 'bool', got '") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: while/do-while 缺条件或缺 body——容错报错
+   预期: "requires a condition"/"requires a body" 语义化 error */
+TEST_F(ExecLiteralTest, ExecStmtLoopsRequireConditionAndBody) {
+  node_t *no_cond = create_stmt_while_node(a);
+  stmt_while_node_set_body(no_cond, create_stmt_block_node(a));
+  clux_value_t *value = exec_node(ctx, no_cond);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "while statement requires a condition") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&no_cond);
+
+  node_t *no_body = make_stmt_while_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"), NULL);
+  clux_value_t *value2 = exec_node(ctx, no_body);
+  ASSERT_NE(value2, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value2));
+  EXPECT_TRUE(strstr(error_message_of(value2),
+                     "while statement requires a body") != nullptr)
+      << "actual: " << error_message_of(value2);
+  delete_node(&no_body);
+
+  node_t *dw_no_body = create_stmt_do_while_node(a);
+  stmt_do_while_node_set_condition(
+      dw_no_body, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *value3 = exec_node(ctx, dw_no_body);
+  ASSERT_NE(value3, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value3));
+  EXPECT_TRUE(strstr(error_message_of(value3),
+                     "do-while statement requires a body") != nullptr)
+      << "actual: " << error_message_of(value3);
+  delete_node(&dw_no_body);
+}
+
+/* 场景: 块内 break 而无循环包裹——signal 经块出口协议原样上抛
+        （逃逸到循环边界之外由调用方判定）
+   预期: exec_node 产出 break signal（is_break_signal 为 true） */
+TEST_F(ExecLiteralTest, ExecStmtBreakEscapesBlockAsSignal) {
+  node_t *block = make_block_of(a, create_stmt_break_node(a));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_TRUE(clux_value_is_break_signal(value))
+      << "a break without a loop must escape the block as a break signal";
+  EXPECT_FALSE(clux_value_is_continue_signal(value));
+  delete_node(&block);
+}
+
+/* 场景: continue 逃逸块边界（无循环消费）
+   预期: 块出口重建 continue signal 原样上抛 */
+TEST_F(ExecLiteralTest, ExecStmtContinueEscapesBlockAsSignal) {
+  node_t *block = make_block_of(a, create_stmt_continue_node(a));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_TRUE(clux_value_is_continue_signal(value))
+      << "a continue without a loop must escape the block as a continue "
+         "signal";
+  EXPECT_FALSE(clux_value_is_break_signal(value));
+  delete_node(&block);
+}
+
+/* 合成赋值表达式语句 name = value;：value 为完整表达式子树，
+   delete 根节点时递归释放全部子节点。 */
+static node_t *
+make_assign_stmt_of(allocator_t *allocator, const char *name, node_t *value) {
+  node_t *assign = create_assign_node(allocator);
+  assign_node_set_left(
+      assign, make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name));
+  assign_node_set_symbol(assign,
+                         make_text_node(allocator, CLUX_NODE_SYMBOL, "="));
+  assign_node_set_value(assign, value);
+  return make_stmt_expr_of(allocator, assign);
+}
+
+/* 场景: continue 在 while 中真实多轮消费——var i = 0 配
+        while (i < 3) { i = i + 1; continue; }
+   预期: 每轮 continue 丢弃 body 余下流程进下一轮（若被误当 break 循环
+         提前终止 i 将停在 1；若未消费则死循环），最终 i == 3 且循环
+         无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtWhileContinueConsumedPerRound) {
+  node_t *ivar_decl =
+      make_stmt_var("i", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, ivar_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(body, create_stmt_continue_node(a));
+  node_t *loop = make_stmt_while_of(
+      a,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr)
+      << "a fully consumed while loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "i", NULL)), 3)
+      << "continue must start the next round, running all 3 increments";
+  delete_node(&loop);
+  delete_node(&ivar_decl);
+}
+
+/* 场景: while 的 body 块产 NULL（块尾空语句）——NULL 值放行进下一轮
+   预期: 循环继续执行（var n 从 3 两轮递减到 1，条件 1 < n 转 false
+         退出），循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtWhileNullBodyValueContinuesLoop) {
+  clux_value_t *n = clux_context_create_i32(ctx, 3, "n", NULL);
+  ASSERT_NE(n, nullptr);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "-"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(body, create_stmt_empty_node(a));
+  node_t *loop = make_stmt_while_of(
+      a,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n")),
+      body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a while loop yields no value";
+  EXPECT_EQ(read_i32(n), 1)
+      << "a NULL body value must not stop the loop before the condition "
+         "turns false";
+  delete_node(&loop);
+}
+
+/* 场景: while 与 do-while 的 body 内 exec 失败（STMT_IMPORT 替身——
+        模块级语句槽位 NULL 是设计决定，exec 必产 error）
+   预期: error 原样透传出循环（消息含 "STMT_IMPORT"），首轮即中断，
+         不触发死循环 */
+TEST_F(ExecLiteralTest, ExecStmtLoopBodyErrorPropagates) {
+  node_t *w_loop = make_stmt_while_of(
+      a,
+      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+      make_block_of(a, make_text_node(a, CLUX_NODE_STMT_IMPORT, "imp")));
+  clux_value_t *value = exec_node(ctx, w_loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a failing body statement must abort the while loop";
+  EXPECT_TRUE(strstr(error_message_of(value), "STMT_IMPORT") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&w_loop);
+
+  node_t *dw_loop = make_stmt_do_while_of(
+      a,
+      make_block_of(a, make_text_node(a, CLUX_NODE_STMT_IMPORT, "imp")),
+      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *value2 = exec_node(ctx, dw_loop);
+  ASSERT_NE(value2, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value2))
+      << "a failing body statement must abort the do-while loop";
+  EXPECT_TRUE(strstr(error_message_of(value2), "STMT_IMPORT") != nullptr)
+      << "actual: " << error_message_of(value2);
+  delete_node(&dw_loop);
+}
+
+/* 场景: while body 内 return 语句——return signal 原样透传出循环边界
+   预期: while 语句的 exec 结果是 return signal（非 error），载荷 42
+         可回读（若循环误消费会得 NULL；若误拆包会丢失 signal 形态） */
+TEST_F(ExecLiteralTest, ExecStmtWhileBodyReturnSignalPropagates) {
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "42"));
+  node_t *loop =
+      make_stmt_while_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                         make_block_of(a, ret));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  ASSERT_TRUE(clux_value_is_return_signal(value))
+      << "the loop must propagate the return signal untouched";
+  EXPECT_FALSE(clux_value_is_break_signal(value));
+  EXPECT_FALSE(clux_value_is_continue_signal(value));
+  clux_value_t *payload = clux_return_signal_get_payload(value);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(read_i32(payload), 42);
+  delete_node(&loop);
+}
+
+/* 场景: while 条件 exec 失败（STMT_IMPORT 替身产 error）
+   预期: error 原样透传（消息含 "STMT_IMPORT"），不走 "must be bool"
+         类型检查路径（证明 error 优先级高于类型判定） */
+TEST_F(ExecLiteralTest, ExecStmtWhileConditionErrorPropagates) {
+  node_t *loop =
+      make_stmt_while_of(a,
+                         make_text_node(a, CLUX_NODE_STMT_IMPORT, "imp"),
+                         make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a failing condition must propagate its error";
+  EXPECT_TRUE(strstr(error_message_of(value), "STMT_IMPORT") != nullptr)
+      << "actual: " << error_message_of(value);
+  EXPECT_EQ(strstr(error_message_of(value), "must be 'bool'"), nullptr)
+      << "the error must pass through before the bool type check";
+  delete_node(&loop);
+}
+
+/* 场景: while 条件节点 exec 返回 NULL（块内仅空语句）
+   预期: 条件无值报语义化 error "while condition requires a value" */
+TEST_F(ExecLiteralTest, ExecStmtWhileConditionRequiresAValue) {
+  node_t *loop =
+      make_stmt_while_of(a,
+                         make_block_of(a, create_stmt_empty_node(a)),
+                         make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a valueless condition must be reported as an error";
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "while condition requires a value") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: do-while 条件三变体——error 替身透传 / NULL 无值 / 非 bool（i32）
+   预期: error 消息含 "STMT_IMPORT"；NULL 报 "do-while condition
+         requires a value"；i32 报 "do-while condition must be 'bool', "
+         "got 'i32'"（前缀 "do-while" 语义化区分 while） */
+TEST_F(ExecLiteralTest, ExecStmtDoWhileConditionVariants) {
+  node_t *err_loop =
+      make_stmt_do_while_of(a,
+                            make_block_of(a, create_stmt_empty_node(a)),
+                            make_text_node(a, CLUX_NODE_STMT_IMPORT, "imp"));
+  clux_value_t *err_value = exec_node(ctx, err_loop);
+  ASSERT_NE(err_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(err_value));
+  EXPECT_TRUE(strstr(error_message_of(err_value), "STMT_IMPORT") != nullptr)
+      << "actual: " << error_message_of(err_value);
+  delete_node(&err_loop);
+
+  node_t *null_loop =
+      make_stmt_do_while_of(a,
+                            make_block_of(a, create_stmt_empty_node(a)),
+                            make_block_of(a, create_stmt_empty_node(a)));
+  clux_value_t *null_value = exec_node(ctx, null_loop);
+  ASSERT_NE(null_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(null_value));
+  EXPECT_TRUE(strstr(error_message_of(null_value),
+                     "do-while condition requires a value") != nullptr)
+      << "actual: " << error_message_of(null_value);
+  delete_node(&null_loop);
+
+  node_t *i32_loop =
+      make_stmt_do_while_of(a,
+                            make_block_of(a, create_stmt_empty_node(a)),
+                            make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *i32_value = exec_node(ctx, i32_loop);
+  ASSERT_NE(i32_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(i32_value));
+  EXPECT_TRUE(strstr(error_message_of(i32_value),
+                     "do-while condition must be 'bool', got 'i32'") != nullptr)
+      << "actual: " << error_message_of(i32_value);
+  delete_node(&i32_loop);
+}
+
+/* 场景: do-while 缺条件节点（body 存在）
+   预期: 容错报错 "do-while statement requires a condition"（区别于
+         while 的同名消息与 do-while 缺 body 消息） */
+TEST_F(ExecLiteralTest, ExecStmtDoWhileRequiresACondition) {
+  node_t *loop = create_stmt_do_while_node(a);
+  stmt_do_while_node_set_body(loop, create_stmt_block_node(a));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "do-while statement requires a condition") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: do-while 中 continue 落到条件判定——var i = 0 配
+        do { i = i + 1; continue; } while (i < 3);
+   预期: continue 跳过 body 余下流程但条件仍每轮判定，i == 3 后
+         条件转 false 退出；循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtDoWhileContinueFallsToCondition) {
+  node_t *ivar_decl =
+      make_stmt_var("i", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, ivar_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(body, create_stmt_continue_node(a));
+  node_t *loop = make_stmt_do_while_of(
+      a,
+      body,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a do-while loop yields no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "i", NULL)), 3)
+      << "continue must fall through to the condition each round";
+  delete_node(&loop);
+  delete_node(&ivar_decl);
+}
+
+/* 场景: do-while 的 body 块产 NULL（块尾空语句）——NULL 值落到条件判定
+   预期: 条件仍逐轮判定（var n 递减，条件 1 < n 转 false 退出，
+         n == 1），循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtDoWhileNullBodyFallsToCondition) {
+  clux_value_t *n = clux_context_create_i32(ctx, 3, "n", NULL);
+  ASSERT_NE(n, nullptr);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "-"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(body, create_stmt_empty_node(a));
+  node_t *loop = make_stmt_do_while_of(
+      a,
+      body,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n")));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a do-while loop yields no value";
+  EXPECT_EQ(read_i32(n), 1)
+      << "a NULL body value must fall through to the condition check";
+  delete_node(&loop);
+}
+
+/* 场景: 块出口协议——break/continue signal 穿过任意嵌套块抵达循环边界
+   预期: 块套块的 break 穿两层块被 while 消费（循环立即退出，无 signal
+         泄漏）；块套块的 continue 穿两层块进下一轮（var i 两轮递增至 2
+         后条件转 false 自然退出） */
+TEST_F(ExecLiteralTest, ExecStmtLoopSignalsCrossNestedBlocks) {
+  node_t *brk_loop = make_stmt_while_of(
+      a,
+      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+      make_block_of(
+          a, make_block_of(a, make_block_of(a, create_stmt_break_node(a)))));
+  clux_value_t *brk_value = exec_node(ctx, brk_loop);
+  EXPECT_EQ(brk_value, nullptr)
+      << "break must cross the nested blocks and be consumed by the loop "
+         "boundary, leaking no signal";
+  delete_node(&brk_loop);
+
+  clux_value_t *i = clux_context_create_i32(ctx, 0, "i", NULL);
+  ASSERT_NE(i, nullptr);
+  node_t *inner = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      inner,
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(inner, create_stmt_continue_node(a));
+  node_t *cont_loop = make_stmt_while_of(
+      a,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "2")),
+      make_block_of(a, make_block_of(a, inner)));
+  clux_value_t *cont_value = exec_node(ctx, cont_loop);
+  EXPECT_EQ(cont_value, nullptr)
+      << "continue must cross the nested blocks and keep the loop running";
+  EXPECT_EQ(read_i32(i), 2)
+      << "each round must run the increment before continue crosses out";
+  delete_node(&cont_loop);
+}
+
+/* 场景: 嵌套 while——内层 continue 只作用内层循环（不得波及外层）
+   预期: 外层 2 轮，每轮内层 3 轮 continue 后自然终止；内层循环后的
+         外层语句每轮照常执行——total = 3 + 10 + 3 + 10 = 26 */
+TEST_F(ExecLiteralTest, ExecStmtNestedWhileContinueOnlyAffectsInnerLoop) {
+  clux_value_t *total = clux_context_create_i32(ctx, 0, "total", NULL);
+  ASSERT_NE(total, nullptr);
+  clux_value_t *i = clux_context_create_i32(ctx, 0, "i", NULL);
+  ASSERT_NE(i, nullptr);
+
+  node_t *inner_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      inner_body,
+      make_assign_stmt_of(
+          a,
+          "j",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "j"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(
+      inner_body,
+      make_assign_stmt_of(
+          a,
+          "total",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "total"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(inner_body, create_stmt_continue_node(a));
+  node_t *inner_loop = make_stmt_while_of(
+      a,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "j"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      inner_body);
+
+  node_t *outer_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      outer_body,
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(
+      outer_body,
+      make_stmt_var("j", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0"));
+  stmt_block_node_add_stmt(outer_body, inner_loop);
+  stmt_block_node_add_stmt(
+      outer_body,
+      make_assign_stmt_of(
+          a,
+          "total",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "total"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10"))));
+  node_t *outer_loop = make_stmt_while_of(
+      a,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "2")),
+      outer_body);
+  clux_value_t *value = exec_node(ctx, outer_loop);
+  EXPECT_EQ(value, nullptr) << "a while loop yields no value";
+  EXPECT_EQ(read_i32(i), 2) << "the outer loop must run both rounds";
+  EXPECT_EQ(read_i32(total), 26)
+      << "the inner continue must not skip the outer tail statement "
+         "(3 + 10 per outer round)";
+  delete_node(&outer_loop);
+}
+
+/* 场景: break/continue 逃逸函数帧边界——函数体内无循环直接跳转，
+        帧 exit 前的 escape 检查先于 fallthrough（missing return）报错
+   预期: escb(): break → "break outside of a loop"；
+         escc(): continue → "continue outside of a loop"（而非
+         "missing return"，证明 escape 分支优先判定） */
+TEST_F(ExecLiteralTest, ExecStmtBreakAndContinueEscapeFrameToError) {
+  node_t *break_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "escb"),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *break_func = exec_expr_func_decl(ctx, break_decl);
+  ASSERT_NE(break_func, nullptr);
+  node_t *break_call = make_call_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "escb"), 0, NULL);
+  clux_value_t *break_value = exec_expr_call(ctx, break_call);
+  ASSERT_NE(break_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(break_value))
+      << "a break escaping the frame must become an error";
+  EXPECT_STREQ(error_message_of(break_value), "break outside of a loop")
+      << "the frame escape check takes priority over missing return";
+  delete_node(&break_call);
+  delete_node(&break_decl);
+
+  node_t *cont_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "escc"),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        make_block_of(a, create_stmt_continue_node(a)));
+  clux_value_t *cont_func = exec_expr_func_decl(ctx, cont_decl);
+  ASSERT_NE(cont_func, nullptr);
+  node_t *cont_call = make_call_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "escc"), 0, NULL);
+  clux_value_t *cont_value = exec_expr_call(ctx, cont_call);
+  ASSERT_NE(cont_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(cont_value))
+      << "a continue escaping the frame must become an error";
+  EXPECT_STREQ(error_message_of(cont_value), "continue outside of a loop")
+      << "the frame escape check takes priority over missing return";
+  delete_node(&cont_call);
+  delete_node(&cont_decl);
 }

@@ -92,6 +92,13 @@ typedef enum _clux_type_kind_t {
      永不 seal、天然不完整（与 void 同族）：create_value 的 seal 门禁
      从根上拒绝 interface 作值类型（变量创建/类型标注等值位置）。 */
   CLUX_TYPE_INTERFACE,
+  /* break/continue signal（枚举尾部追加，不打断既有序号）：循环跳转的
+     展开通道——break/continue 语句产出信号值（无载荷），语句层原样
+     上抛，唯一消费点是最近一层循环边界；逃逸到循环边界之外（帧边界
+     /顶层）即 "break/continue outside of a loop"。与 return signal
+     同族的引擎级控制值，不属于类型系统的用户可见面。 */
+  CLUX_TYPE_BREAK_SIGNAL,
+  CLUX_TYPE_CONTINUE_SIGNAL,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

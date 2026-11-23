@@ -132,6 +132,18 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
     return frame_exit(ctx, frame, caller, fail);
   }
   clux_value_t *result = exec_node(ctx, body);
+  /* break/continue signal 逃逸到帧边界：循环跳转的唯一消费点是最近一层
+     循环边界，直达帧说明循环边界缺失（break/continue 写在循环外）。 */
+  if (clux_value_is_break_signal(result)) {
+    fail = clux_context_create_error_message(
+        ctx, decl_loc, "break outside of a loop");
+    return frame_exit(ctx, frame, caller, fail);
+  }
+  if (clux_value_is_continue_signal(result)) {
+    fail = clux_context_create_error_message(
+        ctx, decl_loc, "continue outside of a loop");
+    return frame_exit(ctx, frame, caller, fail);
+  }
   /* fallthrough：无 return（块产出普通最后语句值或空块 NULL）统一报
      missing return——clux 的函数体必须显式 return（白皮书 §4.11）。 */
   if (!result ||

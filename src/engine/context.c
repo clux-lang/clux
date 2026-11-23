@@ -76,6 +76,8 @@ struct _clux_context_t {
     clux_type_t *type_void;
     clux_type_t *type_func_template;
     clux_type_t *type_return_signal;
+    clux_type_t *type_break_signal;
+    clux_type_t *type_continue_signal;
   } builtin_types;
 };
 /* 内建类型布局即时可知：创建即 seal（完整）。void 是唯一例外——
@@ -240,6 +242,12 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                             sizeof(clux_value_t *),
                             alignof(clux_value_t *),
                             NULL);
+  /* break/continue signal：与 return signal 同族的引擎级控制值，无载荷
+     （循环跳转不携带数据），vtable 全空，仅在循环边界构造/判定/消费。 */
+  ctx->builtin_types.type_break_signal = create_sealed_builtin(
+      allocator, CLUX_TYPE_BREAK_SIGNAL, "break_signal", 0, 1, NULL);
+  ctx->builtin_types.type_continue_signal = create_sealed_builtin(
+      allocator, CLUX_TYPE_CONTINUE_SIGNAL, "continue_signal", 0, 1, NULL);
   /* 类型名与 identifier 合一（白皮书 §2.1）：内建类型作为 type value
      按名注册进 global scope，script 层经 context_lookup 按名查找，
      与用户类型/变量共用同一查找通道。机制上统一处理；遮蔽内建
@@ -310,6 +318,8 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_error);
   delete_clux_type(&ctx->builtin_types.type_void);
   delete_clux_type(&ctx->builtin_types.type_return_signal);
+  delete_clux_type(&ctx->builtin_types.type_break_signal);
+  delete_clux_type(&ctx->builtin_types.type_continue_signal);
   delete_vec(&ctx->errors);
   rbtree_foreach(ctx->strs, (rbtree_callback_t)strs_dispose, ctx->allocator);
   delete_rbtree(&ctx->strs);
@@ -1475,6 +1485,26 @@ clux_value_t *clux_return_signal_get_payload(clux_value_t *signal) {
     return NULL;
   }
   return *(clux_value_t **)clux_value_get_raw(signal, 0);
+}
+/* break/continue signal（循环跳转的展开通道）：无载荷——break/continue
+   语句产出信号值，语句层原样上抛，唯一消费点是最近一层循环边界；
+   逃逸到循环边界之外由执行层报 "break/continue outside of a
+   loop"。 */
+clux_value_t *clux_context_create_break_signal(clux_context_t *self) {
+  return clux_context_create_value(
+      self, self->builtin_types.type_break_signal, 0, NULL, NULL);
+}
+bool clux_value_is_break_signal(clux_value_t *value) {
+  return value && clux_type_kind_unwrap(clux_value_get_type(value)) ==
+                      CLUX_TYPE_BREAK_SIGNAL;
+}
+clux_value_t *clux_context_create_continue_signal(clux_context_t *self) {
+  return clux_context_create_value(
+      self, self->builtin_types.type_continue_signal, 0, NULL, NULL);
+}
+bool clux_value_is_continue_signal(clux_value_t *value) {
+  return value && clux_type_kind_unwrap(clux_value_get_type(value)) ==
+                      CLUX_TYPE_CONTINUE_SIGNAL;
 }
 /* 字段表校验（一次性 create 与两阶段 begin 共用）：缺名/空表/字段缺名
    缺类型/重名记录语义化 error 并返回 false。 */

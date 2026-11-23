@@ -17,6 +17,10 @@ clux_value_t *exec_stmt_expr(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_return(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_if(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_empty(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_break(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_continue(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_while(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_do_while(clux_context_t *ctx, node_t *node);
 #ifdef __cplusplus
 }
 #endif
