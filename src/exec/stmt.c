@@ -18,9 +18,11 @@
 #include "parser/node_func_decl.h"
 #include "parser/node_interface_decl.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
+#include "parser/node_stmt_if.h"
 #include "parser/node_stmt_interface.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
@@ -504,6 +506,55 @@ clux_value_t *exec_stmt_return(clux_context_t *ctx, node_t *node) {
     }
   }
   return clux_context_create_return_signal(ctx, payload);
+}
+
+/* if 语句 if (cond) { then } [else ...]（白皮书 §4.4）：条件经
+   exec_operand 求值必须是 bool——true 执行 then、false 执行 else；
+   else 缺失且条件为 false 时语句无值（NULL，与空块同一契约）。
+   分支经 exec_node 执行——块语句出口已转换出作用域外的值，return
+   signal 原样上抛交调用帧边界；else if 链是嵌套的 STMT_IF，递归
+   自然覆盖。 */
+clux_value_t *exec_stmt_if(clux_context_t *ctx, node_t *node) {
+  node_t *cond_node = stmt_if_node_get_condition(node);
+  if (!cond_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "if statement requires a condition");
+  }
+  node_t *then_node = stmt_if_node_get_then(node);
+  if (!then_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "if statement requires a then branch");
+  }
+  clux_value_t *cond = exec_operand(ctx, cond_node);
+  if (!cond || clux_value_is_error(cond)) {
+    return cond;
+  }
+  clux_type_t *type = clux_value_get_type(cond);
+  if (clux_type_get_kind(type) != CLUX_TYPE_BOOL) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(cond_node),
+        "if condition must be 'bool', got '%s'",
+        type_name ? type_name : "<unknown>");
+  }
+  bool cond_bool = *(bool *)clux_value_get_raw(cond, 0);
+  if (cond_bool) {
+    return exec_node(ctx, then_node);
+  }
+  node_t *else_node = stmt_if_node_get_else(node);
+  if (!else_node) {
+    return NULL;
+  }
+  return exec_node(ctx, else_node);
+}
+
+/* 空语句 `;`（白皮书 §4.14）：不产生操作，只占一个语句位置——产
+   NULL（无值，与空块同一契约，block 出口协议对 NULL 结果天然放行）。 */
+clux_value_t *exec_stmt_empty(clux_context_t *ctx, node_t *node) {
+  (void)ctx;
+  (void)node;
+  return NULL;
 }
 
 /* 函数语句 <decorator>* [export]? [comptime]? <func_decl>（白皮书 §3.3、

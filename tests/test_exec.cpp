@@ -32,7 +32,9 @@
 #include "parser/node_func_type.h"
 #include "parser/node_call.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_if.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_union.h"
@@ -833,14 +835,15 @@ TEST_F(ExecLiteralTest, ExecNodeUnregisteredLiteralKindError) {
   delete_node(&node);
 }
 
-/* 场景: 逐一触发一个未注册 kind 的精确名字（node_kind_name 的 STMT_EMPTY case）
+/* 场景: 逐一触发一个未注册 kind 的精确名字（node_kind_name 的 STMT_IMPORT case；
+   模块级语句按 CTFE 边界永不做 exec 分派，是稳定的未注册替身）
    预期: 错误消息包含 kind 的准确名字 */
-TEST_F(ExecLiteralTest, ExecNodeUnsupportedKindNameStmtEmpty) {
-  node_t *node = make_node(CLUX_NODE_STMT_EMPTY, "...");
+TEST_F(ExecLiteralTest, ExecNodeUnsupportedKindNameStmtImport) {
+  node_t *node = make_node(CLUX_NODE_STMT_IMPORT, "...");
   clux_value_t *value = exec_node(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT");
   delete_node(&node);
 }
 
@@ -871,7 +874,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_INTERFACE_DECL ||
         kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE ||
         kind == CLUX_NODE_EXPR_STRUCT_DECL || kind == CLUX_NODE_STMT_STRUCT ||
-        kind == CLUX_NODE_EXPR_CONSTRUCT || kind == CLUX_NODE_EXPR_BUILTIN;
+        kind == CLUX_NODE_EXPR_CONSTRUCT || kind == CLUX_NODE_EXPR_BUILTIN ||
+        kind == CLUX_NODE_STMT_IF || kind == CLUX_NODE_STMT_EMPTY;
     if (synthetic_skip) {
       continue;
     }
@@ -2708,30 +2712,30 @@ TEST_F(ExecLiteralTest, SubscriptRequiresExactlyOneIndex) {
   delete_node(&two_args);
 }
 
-/* 场景: base 子节点求值为 error（未注册 kind STMT_EMPTY）
-   预期: error 透传——"unsupported node kind: STMT_EMPTY" */
+/* 场景: base 子节点求值为 error（未注册 kind STMT_IMPORT）
+   预期: error 透传——"unsupported node kind: STMT_IMPORT" */
 TEST_F(ExecLiteralTest, SubscriptPropagatesBaseError) {
-  node_t *node = make_subscript_of(make_node(CLUX_NODE_STMT_EMPTY, "..."),
+  node_t *node = make_subscript_of(make_node(CLUX_NODE_STMT_IMPORT, "..."),
                                    make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
   clux_value_t *value = exec_expr_subscript(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT");
   delete_node(&node);
 }
 
-/* 场景: index 子节点求值为 error（未注册 kind STMT_EMPTY），base 正常
-   预期: index 的 error 透传——"unsupported node kind: STMT_EMPTY" */
+/* 场景: index 子节点求值为 error（未注册 kind STMT_IMPORT），base 正常
+   预期: index 的 error 透传——"unsupported node kind: STMT_IMPORT" */
 TEST_F(ExecLiteralTest, SubscriptPropagatesIndexError) {
   ASSERT_NE(make_i32_array("arr_e", 4), nullptr);
 
   node_t *node =
       make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_e"),
-                        make_node(CLUX_NODE_STMT_EMPTY, "..."));
+                        make_node(CLUX_NODE_STMT_IMPORT, "..."));
   clux_value_t *value = exec_expr_subscript(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT");
   delete_node(&node);
 }
 
@@ -2854,22 +2858,22 @@ TEST_F(ExecLiteralTest, SliceOpenEndpoints) {
   delete_node(&whole);
 }
 
-/* 场景: base 子节点求值为 error（未注册 kind STMT_EMPTY）
-   预期: error 透传——"unsupported node kind: STMT_EMPTY" */
+/* 场景: base 子节点求值为 error（未注册 kind STMT_IMPORT）
+   预期: error 透传——"unsupported node kind: STMT_IMPORT" */
 TEST_F(ExecLiteralTest, SlicePropagatesBaseError) {
   node_t *node = make_slice_of("bad[1:3]",
-                               make_node(CLUX_NODE_STMT_EMPTY, "..."),
+                               make_node(CLUX_NODE_STMT_IMPORT, "..."),
                                make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
                                make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
   clux_value_t *value = exec_expr_slice(ctx, node);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_EMPTY");
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT");
   delete_node(&node);
 }
 
-/* 场景: lo/hi 子节点求值为 error（未注册 kind STMT_EMPTY），base 正常
-   预期: 端点 error 透传——"unsupported node kind: STMT_EMPTY"。
+/* 场景: lo/hi 子节点求值为 error（未注册 kind STMT_IMPORT），base 正常
+   预期: 端点 error 透传——"unsupported node kind: STMT_IMPORT"。
          base 成功在先，lo 先于 hi 求值 */
 TEST_F(ExecLiteralTest, SlicePropagatesEndpointErrors) {
   ASSERT_NE(make_i32_array("arr_pe", 4), nullptr);
@@ -2877,23 +2881,25 @@ TEST_F(ExecLiteralTest, SlicePropagatesEndpointErrors) {
   node_t *lo_node =
       make_slice_of("arr_pe[bad:3]",
                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_pe"),
-                    make_node(CLUX_NODE_STMT_EMPTY, "..."),
+                    make_node(CLUX_NODE_STMT_IMPORT, "..."),
                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
   clux_value_t *lo_value = exec_expr_slice(ctx, lo_node);
   ASSERT_NE(lo_value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(lo_value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(lo_value), "unsupported node kind: STMT_EMPTY");
+  EXPECT_STREQ(error_message_of(lo_value),
+               "unsupported node kind: STMT_IMPORT");
   delete_node(&lo_node);
 
   node_t *hi_node =
       make_slice_of("arr_pe[1:bad]",
                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "arr_pe"),
                     make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
-                    make_node(CLUX_NODE_STMT_EMPTY, "..."));
+                    make_node(CLUX_NODE_STMT_IMPORT, "..."));
   clux_value_t *hi_value = exec_expr_slice(ctx, hi_node);
   ASSERT_NE(hi_value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(hi_value)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(hi_value), "unsupported node kind: STMT_EMPTY");
+  EXPECT_STREQ(error_message_of(hi_value),
+               "unsupported node kind: STMT_IMPORT");
   delete_node(&hi_node);
 }
 
@@ -3779,17 +3785,17 @@ TEST_F(ExecLiteralTest, QualifierPrefixOperandNotTypeValueErrors) {
   delete_node(&node);
 }
 
-/* 场景: 类型前缀操作数子节点求值出错（RIGHT=STMT_EMPTY 裸节点）
-   预期: error 透传——"unsupported node kind: STMT_EMPTY" */
+/* 场景: 类型前缀操作数子节点求值出错（RIGHT=STMT_IMPORT 裸节点）
+   预期: error 透传——"unsupported node kind: STMT_IMPORT" */
 TEST_F(ExecLiteralTest, TypePrefixPropagatesOperandError) {
   node_t *node = make_binary_of(a,
                                 NULL,
                                 make_node(CLUX_NODE_SYMBOL, "*"),
-                                make_node(CLUX_NODE_STMT_EMPTY, "..."));
+                                make_node(CLUX_NODE_STMT_IMPORT, "..."));
   clux_value_t *result = exec_expr_binary(ctx, node);
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_EMPTY");
+  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_IMPORT");
   delete_node(&node);
 }
 
@@ -3807,11 +3813,11 @@ TEST_F(ExecLiteralTest, TypePrefixMissingOperandRequiresNode) {
 
 /* 场景: 数组长度/元素子节点求值出错（长度先求值故其 error 优先透传；
          长度合法时元素的 error 透传）
-   预期: 均报 "unsupported node kind: STMT_EMPTY" */
+   预期: 均报 "unsupported node kind: STMT_IMPORT" */
 TEST_F(ExecLiteralTest, ArrayPropagatesLengthAndElementErrors) {
   node_t *bad_length =
       make_binary_of(a,
-                     make_node(CLUX_NODE_STMT_EMPTY, "..."),
+                     make_node(CLUX_NODE_STMT_IMPORT, "..."),
                      make_node(CLUX_NODE_SYMBOL, "[]"),
                      make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
   clux_value_t *length_result = exec_expr_binary(ctx, bad_length);
@@ -3819,20 +3825,20 @@ TEST_F(ExecLiteralTest, ArrayPropagatesLengthAndElementErrors) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(length_result)),
             CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(length_result),
-               "unsupported node kind: STMT_EMPTY");
+               "unsupported node kind: STMT_IMPORT");
   delete_node(&bad_length);
 
   node_t *bad_element =
       make_binary_of(a,
                      make_node(CLUX_NODE_LITERAL_NUMERIC, "2"),
                      make_node(CLUX_NODE_SYMBOL, "[]"),
-                     make_node(CLUX_NODE_STMT_EMPTY, "..."));
+                     make_node(CLUX_NODE_STMT_IMPORT, "..."));
   clux_value_t *element_result = exec_expr_binary(ctx, bad_element);
   ASSERT_NE(element_result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(element_result)),
             CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(element_result),
-               "unsupported node kind: STMT_EMPTY");
+               "unsupported node kind: STMT_IMPORT");
   delete_node(&bad_element);
 }
 
@@ -8226,18 +8232,18 @@ TEST_F(ExecLiteralTest, EnumVariantValueNotIntegerReports) {
   delete_node(&shadow_decl);
 }
 
-/* 场景: 成员值求值错误透传——enum VE: u8 { Red = <STMT_EMPTY> } 值表达式
+/* 场景: 成员值求值错误透传——enum VE: u8 { Red = <STMT_IMPORT> } 值表达式
         求值即失败
-   预期: 值求值错误原样透传，报 "unsupported node kind: STMT_EMPTY" */
+   预期: 值求值错误原样透传，报 "unsupported node kind: STMT_IMPORT" */
 TEST_F(ExecLiteralTest, EnumVariantValueErrorPropagates) {
   node_t *variants = create_enum_variants_node(a);
   enum_variants_node_add_variant(
-      variants, make_enum_variant_of(a, "Red", CLUX_NODE_STMT_EMPTY, "stmt"));
+      variants, make_enum_variant_of(a, "Red", CLUX_NODE_STMT_IMPORT, "stmt"));
   node_t *decl = make_enum_decl_of(a, "VE", "u8", variants);
   clux_value_t *result = exec_expr_enum_decl(ctx, decl);
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_EMPTY")
+  EXPECT_STREQ(error_message_of(result), "unsupported node kind: STMT_IMPORT")
       << "the variant value evaluation failure must propagate unchanged";
   delete_node(&decl);
 }
@@ -15656,4 +15662,345 @@ TEST_F(ExecLiteralTest, DuckTypedStructPointerSafeCastReturnsIdenticalValue) {
   delete_node(&ctor);
   delete_node(&decl_b);
   delete_node(&decl_a);
+}
+
+/* ---- exec_stmt_if / exec_stmt_empty（白皮书 §4.4、§4.14）---- */
+
+/* 合成完整 if 语句 cond { then } [else]：else_branch 为 NULL 表示无 else，
+   delete 根节点时递归释放全部子节点。 */
+static node_t *make_stmt_if_of(allocator_t *allocator,
+                               node_t *cond,
+                               node_t *then_branch,
+                               node_t *else_branch) {
+  node_t *node = create_stmt_if_node(allocator);
+  stmt_if_node_set_condition(node, cond);
+  stmt_if_node_set_then(node, then_branch);
+  if (else_branch) {
+    stmt_if_node_set_else(node, else_branch);
+  }
+  return node;
+}
+
+/* 合成表达式语句 expr;：语句值即表达式值。 */
+static node_t *make_stmt_expr_of(allocator_t *allocator, node_t *expr) {
+  node_t *node = create_stmt_expr_node(allocator);
+  stmt_expr_node_set_expr(node, expr);
+  return node;
+}
+
+/* 合成以 kind/text 字面量为体的表达式语句。 */
+static node_t *
+make_text_stmt(allocator_t *allocator, node_kind_t kind, const char *text) {
+  return make_stmt_expr_of(allocator, make_text_node(allocator, kind, text));
+}
+
+/* 场景: if (true) 走 then 分支，语句值即分支值
+   预期: 产 i32 11，else 分支不执行 */
+TEST_F(ExecLiteralTest, ExecStmtIfTrueRunsThenBranch) {
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "22"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(value), 11);
+  delete_node(&node);
+}
+
+/* 场景: if (false) 走 else 分支
+   预期: 产 i32 22，then 分支不执行 */
+TEST_F(ExecLiteralTest, ExecStmtIfFalseRunsElseBranch) {
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "22"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 22);
+  delete_node(&node);
+}
+
+/* 场景: if (false) 无 else
+   预期: 语句无值（NULL，与空块同一契约） */
+TEST_F(ExecLiteralTest, ExecStmtIfFalseWithoutElseYieldsNoValue) {
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                      NULL);
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr) << "if without a taken branch yields no value";
+  delete_node(&node);
+}
+
+/* 场景: else if 链（嵌套 STMT_IF 作 else 分支）逐级判别
+   预期: 外层/中层均为 false 时最内层 else 生效，产 33 */
+TEST_F(ExecLiteralTest, ExecStmtIfElseIfChainResolvesInnermost) {
+  node_t *inner =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "22"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "33"));
+  node_t *outer =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                      inner);
+  clux_value_t *value = exec_node(ctx, outer);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 33);
+  delete_node(&outer);
+}
+
+/* 场景: 条件不是 bool（数值字面量）
+   预期: 报 "if condition must be 'bool', got '<type>'" */
+TEST_F(ExecLiteralTest, ExecStmtIfConditionMustBeBool) {
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "22"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "if condition must be 'bool', got '") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&node);
+}
+
+/* 场景: 缺条件 / 缺 then 分支的残缺 if 节点
+   预期: 分别报 "if statement requires a condition" /
+                  "if statement requires a then branch" */
+TEST_F(ExecLiteralTest, ExecStmtIfMissingPartsReportError) {
+  node_t *bare = create_stmt_if_node(a);
+  clux_value_t *value = exec_node(ctx, bare);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value), "if statement requires a condition");
+  delete_node(&bare);
+
+  node_t *with_cond = create_stmt_if_node(a);
+  stmt_if_node_set_condition(
+      with_cond, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  clux_value_t *value2 = exec_node(ctx, with_cond);
+  ASSERT_NE(value2, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value2));
+  EXPECT_STREQ(error_message_of(value2), "if statement requires a then branch");
+  delete_node(&with_cond);
+}
+
+/* 场景: 条件求值为 error（未注册 kind STMT_IMPORT）
+   预期: error 原样透传——"unsupported node kind: STMT_IMPORT" */
+TEST_F(ExecLiteralTest, ExecStmtIfPropagatesConditionError) {
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_STMT_IMPORT, "import"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                      NULL);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT");
+  delete_node(&node);
+}
+
+/* 场景: then 分支产 return signal（如函数体内提前返回）
+   预期: signal 原样上抛（载荷 i32 42），语句层不消费 */
+TEST_F(ExecLiteralTest, ExecStmtIfPropagatesReturnSignal) {
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "42"));
+  node_t *node = make_stmt_if_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"), ret, NULL);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(value))
+      << "if must propagate the return signal, not consume it";
+  clux_value_t *payload = clux_return_signal_get_payload(value);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(read_i32(payload), 42);
+  delete_node(&node);
+}
+
+/* 场景: 空语句 `;` 不产生操作，只占一个语句位置
+   预期: 产 NULL（无值） */
+TEST_F(ExecLiteralTest, ExecStmtEmptyYieldsNoValue) {
+  node_t *node = make_text_node(a, CLUX_NODE_STMT_EMPTY, ";");
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr) << "empty statement yields no value";
+  delete_node(&node);
+}
+
+/* 场景: 块内空语句不打断执行、不覆盖块结果（末语句值保持）
+   预期: 块值仍为最后语句的 i32 7 */
+TEST_F(ExecLiteralTest, ExecStmtEmptyInBlockKeepsLastValue) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block, make_text_node(a, CLUX_NODE_STMT_EMPTY, ";"));
+  stmt_block_node_add_stmt(block,
+                           make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "7"));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 7);
+  delete_node(&block);
+}
+
+/* 场景: then 分支为 STMT_BLOCK——分支经 exec_node 走块执行，块出口
+        按协议把末语句值克隆出作用域
+   预期: 块尾表达式语句值 i32 21 即 if 语句值 */
+TEST_F(ExecLiteralTest, ExecStmtIfThenBlockYieldsBlockValue) {
+  node_t *then_block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(then_block,
+                           make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "21"));
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                      then_block,
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "22"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(value), 21)
+      << "then block must export its last statement value";
+  delete_node(&node);
+}
+
+/* 场景: else 分支为 STMT_BLOCK——false 走 else 的块出口协议
+   预期: 块尾表达式语句值 i32 22 即 if 语句值，then 不执行 */
+TEST_F(ExecLiteralTest, ExecStmtIfElseBlockYieldsBlockValue) {
+  node_t *else_block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(else_block,
+                           make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "22"));
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "21"),
+                      else_block);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 22)
+      << "else block must export its last statement value";
+  delete_node(&node);
+}
+
+/* 场景: 条件经括号分组（EXPR_GROUP）包裹 bool 字面量——分组不改变
+        求值结果与类型判别
+   预期: 走 then 分支产 i32 31 */
+TEST_F(ExecLiteralTest, ExecStmtIfGroupedBoolCondition) {
+  node_t *node = make_stmt_if_of(
+      a,
+      make_group_of(make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true")),
+      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "31"),
+      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "32"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 31)
+      << "grouped bool condition must resolve through to then";
+  delete_node(&node);
+}
+
+/* 场景: 条件求值产 NULL（条件为空语句——exec_operand 返回无值）
+   预期: exec_stmt_if 原样返回 NULL（不构造 error、不执行分支） */
+TEST_F(ExecLiteralTest, ExecStmtIfNullConditionPropagatesNoValue) {
+  node_t *node =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_STMT_EMPTY, ";"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "31"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "32"));
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr)
+      << "a NULL condition evaluation must propagate as no value";
+  delete_node(&node);
+}
+
+/* 场景: 块内 if 语句求值失败（非 bool 条件）居中——错误中断块执行，
+        尾随语句不再执行（若继续执行块值将是尾随语句的 i32 9）
+   预期: 块出口转换为 error，信息含 "if condition must be 'bool'" */
+TEST_F(ExecLiteralTest, ExecStmtIfErrorInterruptsSubsequentStatements) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "11"),
+                      NULL));
+  stmt_block_node_add_stmt(block,
+                           make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "9"));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "the failing if must abort the block, not fall through to 9";
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "if condition must be 'bool', got '") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&block);
+}
+
+/* 场景: if 语句作为块尾——if 语句值经块出口协议成为块值
+   预期: 块值即 then 分支值 i32 13 */
+TEST_F(ExecLiteralTest, ExecStmtIfValueAsBlockTail) {
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(block,
+                           make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "5"));
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "13"),
+                      NULL));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 13)
+      << "the trailing if statement value must become the block value";
+  delete_node(&block);
+}
+
+/* 场景: then 块与 else 块各自声明同名 var x——分支块作用域相互独立，
+        未执行分支的声明不占据名字（若作用域泄漏会在重声明/查找上失败）
+   预期: true 走 then 块产 5，false 走 else 块产 9 */
+TEST_F(ExecLiteralTest, ExecStmtIfBranchBlocksUseIndependentScopes) {
+  node_t *then_block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      then_block,
+      make_stmt_var("x", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "5"));
+  stmt_block_node_add_stmt(
+      then_block, make_text_stmt(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  node_t *taken =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                      then_block,
+                      NULL);
+  clux_value_t *value = exec_node(ctx, taken);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 5) << "then-block local x must resolve to 5";
+  delete_node(&taken);
+
+  node_t *else_block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      else_block,
+      make_stmt_var("x", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "9"));
+  stmt_block_node_add_stmt(
+      else_block, make_text_stmt(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  node_t *skipped =
+      make_stmt_if_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"),
+                      make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "5"),
+                      else_block);
+  clux_value_t *value2 = exec_node(ctx, skipped);
+  ASSERT_NE(value2, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value2)) << error_message_of(value2);
+  EXPECT_EQ(read_i32(value2), 9) << "else-block local x must resolve to 9";
+  delete_node(&skipped);
 }
