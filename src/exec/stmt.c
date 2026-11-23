@@ -4,9 +4,13 @@
 #include "core/location.h"
 #include "engine/context.h"
 #include "engine/error.h"
+#include "engine/array.h"
+#include "engine/context.h"
 #include "engine/interface.h"
 #include "engine/qualifier.h"
 #include "engine/scope.h"
+#include "engine/slice.h"
+#include "engine/tuple.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include "exec/call.h"
@@ -22,6 +26,8 @@
 #include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_for.h"
+#include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_interface.h"
@@ -598,6 +604,35 @@ static clux_value_t *stmt_loop_cond_of(clux_context_t *ctx,
   return NULL;
 }
 
+/* 循环出口值重建（块出口协议的循环版）：排干 owner 内嵌套的子 scope
+   ——但保留 owner 本身（out 挂在其上仍存活）——先 swap 到 outer 在
+   其中重建 error / return signal（新建值由 outer track），最后才
+   delete owner。顺序不可颠倒：先销毁 owner 再读 out 即 use-after-free。 */
+static clux_value_t *scope_exit_rebuild(clux_context_t *ctx,
+                                        clux_scope_t *outer,
+                                        clux_scope_t *owner,
+                                        clux_value_t *out) {
+  clux_scope_t *global = clux_context_get_global_scope(ctx);
+  clux_scope_t *current = clux_context_get_scope(ctx);
+  while (current != owner && current != global) {
+    clux_context_pop_scope(ctx);
+    current = clux_context_get_scope(ctx);
+  }
+  (void)clux_context_swap_scope(ctx, outer);
+  clux_value_t *rebuilt = NULL;
+  if (clux_value_is_error(out)) {
+    clux_error_t *err = *(clux_error_t **)clux_value_get_raw(out, 0);
+    rebuilt = clux_context_create_error(ctx, err);
+  } else if (clux_value_is_return_signal(out)) {
+    clux_value_t *payload = clux_return_signal_get_payload(out);
+    clux_value_t *cloned =
+        payload ? clux_context_clone(ctx, payload, NULL) : NULL;
+    rebuilt = clux_context_create_return_signal(ctx, cloned);
+  }
+  delete_clux_scope(&owner);
+  return rebuilt;
+}
+
 /* break;（白皮书 §4.10）：产出 break signal（无载荷），语句层原样
    上抛，唯一消费点是最近一层循环边界（消费即退出循环）。 */
 clux_value_t *exec_stmt_break(clux_context_t *ctx, node_t *node) {
@@ -686,6 +721,173 @@ clux_value_t *exec_stmt_do_while(clux_context_t *ctx, node_t *node) {
       return NULL;
     }
   }
+}
+
+/* for 语句 for (init; cond; update) { body }（白皮书 §4.8）：三段式
+   循环——init 先执行一次（STMT_VAR 或表达式，可省略），变量生命周期
+   为整个 for 语句（独立 scope）；cond 可省略（缺省视为 true），给出时
+   必须 bool；update 每轮 body 后执行（可省略），continue 落到 update、
+   break 消费退出（跳过 update）。循环语句无值（NULL）。 */
+clux_value_t *exec_stmt_for(clux_context_t *ctx, node_t *node) {
+  node_t *body_node = stmt_for_node_get_body(node);
+  if (!body_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "for statement requires a body");
+  }
+  node_t *init_node = stmt_for_node_get_init(node);
+  node_t *cond_node = stmt_for_node_get_condition(node);
+  node_t *update_node = stmt_for_node_get_update(node);
+  clux_scope_t *outer = clux_context_get_scope(ctx);
+  clux_context_push_scope(ctx);
+  clux_scope_t *loop_scope = clux_context_get_scope(ctx);
+  clux_value_t *out = NULL;
+  if (init_node) {
+    clux_value_t *init = exec_node(ctx, init_node);
+    if (init && clux_value_is_error(init)) {
+      out = init;
+    }
+  }
+  for (; !out;) {
+    if (cond_node) {
+      bool cond_bool = false;
+      clux_value_t *fail = stmt_loop_cond_of(ctx, cond_node, "for", &cond_bool);
+      if (fail) {
+        out = fail;
+        break;
+      }
+      if (!cond_bool) {
+        break;
+      }
+    }
+    clux_value_t *value = exec_node(ctx, body_node);
+    if (value) {
+      if (clux_value_is_error(value) || clux_value_is_return_signal(value)) {
+        out = value;
+        break;
+      }
+      if (clux_value_is_break_signal(value)) {
+        break;
+      }
+    }
+    if (update_node) {
+      clux_value_t *update = exec_node(ctx, update_node);
+      if (update && clux_value_is_error(update)) {
+        out = update;
+        break;
+      }
+    }
+  }
+  /* 出口协议：排干循环作用域并在 outer 中重建 error / return signal，
+     避免 pop_scope 销毁后返回悬空值。 */
+  return scope_exit_rebuild(ctx, outer, loop_scope, out);
+}
+
+/* foreach 语句 foreach ([var] name [: type]? of iterable) { body }
+   （白皮书 §4.9）：逐元素迭代——iterable 求值一次后按长度（array 取
+   类型长度 / slice 读胖指针 len / tuple 取元素个数）逐索引经 index vtable
+   取元素 view；迭代变量每轮独立 scope 内 declare（借用即拷贝落地，
+   与 clux 值语义一致），显式类型标注走 safe_cast；body 值分流同 for。
+   var 关键字有无是静态可写性约束，exec 层不区分；comptime foreach 是
+   编译期展开语义，不经此通道。循环语句无值（NULL）。 */
+clux_value_t *exec_stmt_foreach(clux_context_t *ctx, node_t *node) {
+  node_t *iterable_node = stmt_foreach_node_get_iterable(node);
+  if (!iterable_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "foreach statement requires an iterable");
+  }
+  node_t *body_node = stmt_foreach_node_get_body(node);
+  if (!body_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "foreach statement requires a body");
+  }
+  node_t *name_node = stmt_foreach_node_get_name(node);
+  if (!name_node) {
+    return clux_context_create_error_message(ctx,
+                                             node_get_location(node),
+                                             "foreach statement requires an "
+                                             "iteration variable");
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name = location_get(node_get_location(name_node), allocator);
+  clux_value_t *iterable = exec_operand(ctx, iterable_node);
+  if (clux_value_is_error(iterable)) {
+    allocator_free(allocator, (void **)&name);
+    return iterable;
+  }
+  clux_type_kind_t kind = clux_type_kind_unwrap(clux_value_get_type(iterable));
+  size_t count = 0;
+  switch (kind) {
+  case CLUX_TYPE_ARRAY:
+    count = clux_array_get_length(clux_value_get_type(iterable));
+    break;
+  case CLUX_TYPE_SLICE:
+    count = ((clux_slice_data_t *)clux_value_get_raw(iterable, 0))->len;
+    break;
+  case CLUX_TYPE_TUPLE:
+    count = clux_tuple_elem_count(clux_value_get_type(iterable));
+    break;
+  default: {
+    const char *type_name = clux_type_get_name(clux_value_get_type(iterable));
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx,
+        node_get_location(iterable_node),
+        "foreach iterable must be an array, slice, or tuple, got '%s'",
+        type_name ? type_name : "<unknown>");
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  }
+  node_t *type_node = stmt_foreach_node_get_type(node);
+  clux_scope_t *outer = clux_context_get_scope(ctx);
+  clux_value_t *out = NULL;
+  bool done = false;
+  for (size_t idx = 0; idx < count && !done; idx++) {
+    clux_context_push_scope(ctx);
+    clux_scope_t *round_scope = clux_context_get_scope(ctx);
+    clux_value_t *round_out = NULL;
+    clux_value_t *index = clux_context_create_i64(
+        ctx, (int64_t)idx, NULL, node_get_location(iterable_node));
+    clux_value_t *element =
+        clux_context_index(ctx, iterable, index, node_get_location(node));
+    if (clux_value_is_error(element)) {
+      round_out = element;
+    } else if (type_node) {
+      clux_value_t *type_fail = NULL;
+      clux_type_t *type = stmt_var_type_of(ctx, type_node, &type_fail);
+      if (!type) {
+        round_out = type_fail;
+      } else {
+        element = clux_context_safe_cast(
+            ctx, element, type, node_get_location(type_node));
+        if (clux_value_is_error(element)) {
+          round_out = element;
+        }
+      }
+    }
+    if (!round_out) {
+      clux_value_t *declared = clux_context_declare_value(
+          ctx, element, name, node_get_location(name_node));
+      if (!declared || clux_value_is_error(declared)) {
+        round_out = declared;
+        done = true;
+      }
+    }
+    if (!round_out) {
+      clux_value_t *value = exec_node(ctx, body_node);
+      if (value) {
+        if (clux_value_is_error(value) || clux_value_is_return_signal(value)) {
+          round_out = value;
+          done = true;
+        } else if (clux_value_is_break_signal(value)) {
+          done = true;
+        }
+      }
+    }
+    /* 本轮出口：排干轮作用域并在 outer 中重建 error / return signal */
+    out = scope_exit_rebuild(ctx, outer, round_scope, round_out);
+  }
+  allocator_free(allocator, (void **)&name);
+  return out;
 }
 
 /* 函数语句 <decorator>* [export]? [comptime]? <func_decl>（白皮书 §3.3、

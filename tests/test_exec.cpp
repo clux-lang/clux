@@ -35,6 +35,8 @@
 #include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_if.h"
+#include "parser/node_stmt_for.h"
+#include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_union.h"
@@ -880,7 +882,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_CONSTRUCT || kind == CLUX_NODE_EXPR_BUILTIN ||
         kind == CLUX_NODE_STMT_IF || kind == CLUX_NODE_STMT_EMPTY ||
         kind == CLUX_NODE_STMT_BREAK || kind == CLUX_NODE_STMT_CONTINUE ||
-        kind == CLUX_NODE_STMT_WHILE || kind == CLUX_NODE_STMT_DO_WHILE;
+        kind == CLUX_NODE_STMT_WHILE || kind == CLUX_NODE_STMT_DO_WHILE ||
+        kind == CLUX_NODE_STMT_FOR || kind == CLUX_NODE_STMT_FOREACH;
     if (synthetic_skip) {
       continue;
     }
@@ -16667,4 +16670,800 @@ TEST_F(ExecLiteralTest, ExecStmtBreakAndContinueEscapeFrameToError) {
       << "the frame escape check takes priority over missing return";
   delete_node(&cont_call);
   delete_node(&cont_decl);
+}
+
+/* ---- exec_stmt_for/foreach（白皮书 §4.8、§4.9）---- */
+
+/* 合成 for 语句 for (init; cond; update) { body }：三段均可为 NULL
+   （省略段），root location 覆盖 "for" 供错误定位。 */
+static node_t *make_stmt_for_of(allocator_t *allocator,
+                                node_t *init,
+                                node_t *cond,
+                                node_t *update,
+                                node_t *body) {
+  node_t *node = create_stmt_for_node(allocator);
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = "for";
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = loc.begin.offset + 3;
+  loc.end.column = 4;
+  loc.end.line = 1;
+  node_set_location(node, &loc);
+  if (init) {
+    stmt_for_node_set_init(node, init);
+  }
+  if (cond) {
+    stmt_for_node_set_condition(node, cond);
+  }
+  if (update) {
+    stmt_for_node_set_update(node, update);
+  }
+  if (body) {
+    stmt_for_node_set_body(node, body);
+  }
+  return node;
+}
+
+/* 合成 foreach 语句 foreach (var name of iterable) { body }：
+   name_text 是迭代变量名字面文本（exec 按 location 提取），
+   TYPE 槽省略，iterable 为完整表达式子树，body 为块结点。 */
+static node_t *make_stmt_foreach_of(allocator_t *allocator,
+                                    const char *name_text,
+                                    node_t *iterable,
+                                    node_t *body) {
+  node_t *node = create_stmt_foreach_node(allocator);
+  stmt_foreach_node_set_keyword(
+      node, make_text_node(allocator, CLUX_NODE_SYMBOL, "var"));
+  stmt_foreach_node_set_name(
+      node, make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  stmt_foreach_node_set_iterable(node, iterable);
+  if (body) {
+    stmt_foreach_node_set_body(node, body);
+  }
+  return node;
+}
+
+/* 场景: for (var i = 0; i < 3; i = i + 1) { n = n + 1; } 完整三段式
+   预期: body 执行 3 轮（n == 3），循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtForRunsFullCycle) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  node_t *loop = make_stmt_for_of(
+      a,
+      make_stmt_var("i", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0"),
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))),
+      body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a for loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 3)
+      << "the body must run all 3 rounds";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: for (;;) { break; }——三段全部省略，条件缺省视为 true，
+        break 消费退出
+   预期: 正常退出无值（NULL），非 error、非死循环 */
+TEST_F(ExecLiteralTest, ExecStmtForOmittedSegmentsBreakExit) {
+  node_t *loop = make_stmt_for_of(
+      a, NULL, NULL, NULL, make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr)
+      << "break must exit an omitted-segment for with no value";
+  delete_node(&loop);
+}
+
+/* 场景: for (var i = 0; i < 3; i = i + 1) { n = n + 1; continue; }——
+        continue 落到 update（C 语义）
+   预期: 3 轮后正常退出（若 continue 误跳过 update 将死循环，
+         误当 break 则 n 停在 1），n == 3 */
+TEST_F(ExecLiteralTest, ExecStmtForContinueFallsToUpdate) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(body, create_stmt_continue_node(a));
+  node_t *loop = make_stmt_for_of(
+      a,
+      make_stmt_var("i", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0"),
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))),
+      body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a for loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 3)
+      << "continue must fall through to the update and run all 3 rounds";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: for 缺 body——容错报错
+   预期: "for statement requires a body" 语义化 error */
+TEST_F(ExecLiteralTest, ExecStmtForRequiresBody) {
+  node_t *loop = create_stmt_for_node(a);
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "for statement requires a body") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: foreach (var x of arr) { n = n + x; }——[4]i32 数组逐元素累加
+        （元素预填 10/11/12/13）
+   预期: n == 46，循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtForeachArraySumsElements) {
+  ASSERT_NE(make_i32_array("arr_f", 4), nullptr);
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"))));
+  node_t *loop = make_stmt_foreach_of(
+      a, "x", make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_f"), body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a foreach loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 46)
+      << "10 + 11 + 12 + 13 must be accumulated across all 4 elements";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: foreach (var x of arr) { n = n + x; break; }——break 消费退出
+   预期: 只累加首元素，n == 10 */
+TEST_F(ExecLiteralTest, ExecStmtForeachBreakStopsAtFirst) {
+  ASSERT_NE(make_i32_array("arr_fb", 4), nullptr);
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"))));
+  stmt_block_node_add_stmt(body, create_stmt_break_node(a));
+  node_t *loop = make_stmt_foreach_of(
+      a, "x", make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_fb"), body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a foreach loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 10)
+      << "only the first element (10) must be accumulated before the break";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: foreach (var x of v)——v 是 i32 标量，非可迭代类型
+   预期: "foreach iterable must be an array, slice, or tuple, got 'i32'" */
+TEST_F(ExecLiteralTest, ExecStmtForeachRejectsScalarIterable) {
+  node_t *v_decl =
+      make_stmt_var("v", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "42");
+  clux_value_t *declared = exec_node(ctx, v_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *loop =
+      make_stmt_foreach_of(a,
+                           "x",
+                           make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+                           make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a scalar iterable must be rejected";
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "foreach iterable must be an array, slice, or tuple, "
+                     "got 'i32'") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+  delete_node(&v_decl);
+}
+
+/* 场景: foreach 缺 iterable——容错报错
+   预期: "foreach statement requires an iterable" 语义化 error */
+TEST_F(ExecLiteralTest, ExecStmtForeachRequiresIterable) {
+  node_t *loop = create_stmt_foreach_node(a);
+  stmt_foreach_node_set_body(loop, create_stmt_block_node(a));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "foreach statement requires an iterable") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: for (import; ; ) { break; }——init 段求值产 error（未注册 kind）
+   预期: error 原样上抛——"unsupported node kind: STMT_IMPORT" */
+TEST_F(ExecLiteralTest, ExecStmtForInitErrorPropagates) {
+  node_t *loop =
+      make_stmt_for_of(a,
+                       make_text_node(a, CLUX_NODE_STMT_IMPORT, "import"),
+                       NULL,
+                       NULL,
+                       make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "an init-segment error must propagate out of the for statement";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: for (; 10; )——条件求值产 i32 而非 bool
+   预期: "for condition must be 'bool', got 'i32'" */
+TEST_F(ExecLiteralTest, ExecStmtForConditionMustBeBool) {
+  node_t *loop =
+      make_stmt_for_of(a,
+                       NULL,
+                       make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10"),
+                       NULL,
+                       make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a non-bool for condition must be rejected";
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "for condition must be 'bool', got 'i32'") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: for (; ;) 的条件位放空语句——exec 求值产 NULL（无值）
+   预期: "for condition requires a value" */
+TEST_F(ExecLiteralTest, ExecStmtForConditionRequiresAValue) {
+  node_t *loop = make_stmt_for_of(a,
+                                  NULL,
+                                  make_text_node(a, CLUX_NODE_STMT_EMPTY, ";"),
+                                  NULL,
+                                  make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a valueless for condition must be rejected";
+  EXPECT_STREQ(error_message_of(value), "for condition requires a value")
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: for (; import; )——条件求值产 error（未注册 kind）
+   预期: error 原样上抛——"unsupported node kind: STMT_IMPORT" */
+TEST_F(ExecLiteralTest, ExecStmtForConditionErrorPropagates) {
+  node_t *loop =
+      make_stmt_for_of(a,
+                       NULL,
+                       make_text_node(a, CLUX_NODE_STMT_IMPORT, "import"),
+                       NULL,
+                       make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a condition error must propagate out of the for statement";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: for (;;) { n = n + 1; import }——body 先执行一轮，随后 update
+        段求值产 error
+   预期: error 上抛，且 body 已执行过（n == 1）证明 error 来自 update */
+TEST_F(ExecLiteralTest, ExecStmtForUpdateErrorPropagates) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  node_t *loop =
+      make_stmt_for_of(a,
+                       NULL,
+                       make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                       make_text_stmt(a, CLUX_NODE_STMT_IMPORT, "import"),
+                       body);
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "an update-segment error must propagate out of the for statement";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 1)
+      << "the body must have run one round before the update error";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: for (;;) { import }——body 内语句求值产 error
+   预期: error 原样上抛，不再进入下一轮 */
+TEST_F(ExecLiteralTest, ExecStmtForBodyErrorPropagates) {
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body,
+                           make_text_stmt(a, CLUX_NODE_STMT_IMPORT, "import"));
+  node_t *loop =
+      make_stmt_for_of(a,
+                       NULL,
+                       make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                       NULL,
+                       body);
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a body error must propagate out of the for statement";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: for (;;) { return 42; }——body 产 return signal（如函数体内
+        提前返回）
+   预期: signal 原样上抛（载荷 i32 42），循环边界不消费 */
+TEST_F(ExecLiteralTest, ExecStmtForBodyReturnSignalPropagates) {
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "42"));
+  node_t *loop =
+      make_stmt_for_of(a,
+                       NULL,
+                       make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                       NULL,
+                       make_block_of(a, ret));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(value))
+      << "for must propagate the return signal, not consume it";
+  clux_value_t *payload = clux_return_signal_get_payload(value);
+  ASSERT_NE(payload, nullptr) << "the return signal payload must survive";
+  EXPECT_EQ(read_i32(payload), 42)
+      << "the payload value must be rebuilt intact through scope exit";
+  delete_node(&loop);
+}
+
+/* 场景: for (;;) { return; }——无载荷 return 语句在循环体内触发
+   预期: return signal 原样上抛且 payload 为 NULL（出口重建的
+         NULL-payload 通道），循环无值语义不吞 signal */
+TEST_F(ExecLiteralTest, ExecStmtForBodyReturnSignalWithoutPayload) {
+  node_t *ret = create_stmt_return_node(a);
+  node_t *loop =
+      make_stmt_for_of(a,
+                       NULL,
+                       make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+                       NULL,
+                       make_block_of(a, ret));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(value))
+      << "a payload-less return must still propagate as a return signal";
+  EXPECT_EQ(clux_return_signal_get_payload(value), nullptr)
+      << "payload must stay NULL through the scope-exit rebuild";
+  delete_node(&loop);
+}
+
+/* 场景: for (var i = 0; i < 3; i = i + 1) { }——push_scope 包整条语句，
+        init 变量生命周期止于 for 语句
+   预期: 循环结束后 lookup "i" 为 NULL（i 在循环外不可见） */
+TEST_F(ExecLiteralTest, ExecStmtForInitVariableScopedToLoop) {
+  node_t *loop = make_stmt_for_of(
+      a,
+      make_stmt_var("i", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0"),
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))),
+      create_stmt_block_node(a));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a for loop must yield no value";
+  clux_value_t *leaked = clux_context_lookup(ctx, "i", NULL);
+  ASSERT_NE(leaked, nullptr);
+  EXPECT_TRUE(clux_value_is_error(leaked))
+      << "the init variable must not leak out of the for statement scope";
+  EXPECT_TRUE(strstr(error_message_of(leaked),
+                     "use of undeclared identifier 'i'") != nullptr)
+      << "actual: " << error_message_of(leaked);
+  delete_node(&loop);
+}
+
+/* 场景: for (;;) { break; n = n + 1 } 形态的变体——break 消费退出且
+        跳过 update 段：for (;;) { break; } 带更新段 n = n + 1
+   预期: update 不执行（n 保持 0），循环无值退出 */
+TEST_F(ExecLiteralTest, ExecStmtForBreakSkipsUpdate) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *loop = make_stmt_for_of(
+      a,
+      NULL,
+      make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"),
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))),
+      make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "break must exit the for loop with no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 0)
+      << "break must skip the update segment entirely";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: foreach (var x of arr[1:3]) { n = n + x; }——slice 胖指针按
+        len 迭代（元素 11/12）
+   预期: n == 23，循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtForeachIteratesSlice) {
+  ASSERT_NE(make_i32_array("arr_fs", 4), nullptr);
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"))));
+  node_t *loop = make_stmt_foreach_of(
+      a,
+      "x",
+      make_slice_of("arr_fs[1:3]",
+                    make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_fs"),
+                    make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+                    make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a foreach loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 23)
+      << "11 + 12 must be accumulated across the 2-element slice";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: foreach (var x of {1, 2}) { n = n + x; }——匿名 tuple 构造值按
+        元素个数迭代
+   预期: n == 3，循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtForeachIteratesTuple) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *anon = make_construct_of(a, NULL);
+  construct_node_add_elem(anon,
+                          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  construct_node_add_elem(anon,
+                          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"))));
+  node_t *loop = make_stmt_foreach_of(a, "x", anon, body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a foreach loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 3)
+      << "1 + 2 must be accumulated across both tuple elements";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: foreach (var x: i32 of arr) { n = n + x; }——显式类型标注与
+        元素类型匹配，safe_cast 恒等放行
+   预期: 标注路径声明成功，n == 46（10+11+12+13） */
+TEST_F(ExecLiteralTest, ExecStmtForeachTypeAnnotationMatches) {
+  ASSERT_NE(make_i32_array("arr_ta", 4), nullptr);
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"))));
+  node_t *loop = make_stmt_foreach_of(
+      a, "x", make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_ta"), body);
+  stmt_foreach_node_set_type(
+      loop, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a foreach loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 46)
+      << "the i32 annotation must accept i32 elements and run all 4 rounds";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: foreach (var x: str of arr)——i32 元素 safe_cast 到 str 无转换
+        通道
+   预期: 语义化 error（cast 失败），不是崩溃或静默通过 */
+TEST_F(ExecLiteralTest, ExecStmtForeachTypeAnnotationCastFails) {
+  ASSERT_NE(make_i32_array("arr_tf", 4), nullptr);
+  node_t *loop = make_stmt_foreach_of(
+      a,
+      "x",
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_tf"),
+      make_block_of(a, create_stmt_break_node(a)));
+  stmt_foreach_node_set_type(
+      loop, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "str"));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "casting an i32 element to str must fail the foreach statement";
+  EXPECT_TRUE(strstr(error_message_of(value),
+                     "cannot safely cast 'i32' to 'str'") != nullptr)
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: foreach (var x: import of arr)——TYPE 槽类型表达式求值产 error
+   预期: error 原样上抛——"unsupported node kind: STMT_IMPORT" */
+TEST_F(ExecLiteralTest, ExecStmtForeachTypeResolutionFails) {
+  ASSERT_NE(make_i32_array("arr_tr", 4), nullptr);
+  node_t *loop = make_stmt_foreach_of(
+      a,
+      "x",
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_tr"),
+      make_block_of(a, create_stmt_break_node(a)));
+  stmt_foreach_node_set_type(
+      loop, make_text_node(a, CLUX_NODE_STMT_IMPORT, "import"));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a TYPE-slot resolution error must propagate out of foreach";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: foreach (var x of import)——iterable 求值产 error（未注册 kind）
+   预期: error 原样上抛——"unsupported node kind: STMT_IMPORT" */
+TEST_F(ExecLiteralTest, ExecStmtForeachIterableErrorPropagates) {
+  node_t *loop =
+      make_stmt_foreach_of(a,
+                           "x",
+                           make_text_node(a, CLUX_NODE_STMT_IMPORT, "import"),
+                           make_block_of(a, create_stmt_break_node(a)));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "an iterable evaluation error must propagate out of foreach";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: foreach (var x of arr) { import }——body 内语句求值产 error
+   预期: error 原样上抛，不再进入下一轮 */
+TEST_F(ExecLiteralTest, ExecStmtForeachBodyErrorPropagates) {
+  ASSERT_NE(make_i32_array("arr_be", 4), nullptr);
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body,
+                           make_text_stmt(a, CLUX_NODE_STMT_IMPORT, "import"));
+  node_t *loop = make_stmt_foreach_of(
+      a, "x", make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_be"), body);
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a body error must propagate out of the foreach statement";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  delete_node(&loop);
+}
+
+/* 场景: foreach (var x of arr) { return 42; }——body 产 return signal
+   预期: signal 原样上抛（载荷 i32 42），循环边界不消费 */
+TEST_F(ExecLiteralTest, ExecStmtForeachBodyReturnSignalPropagates) {
+  ASSERT_NE(make_i32_array("arr_rs", 4), nullptr);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "42"));
+  node_t *loop = make_stmt_foreach_of(
+      a,
+      "x",
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_rs"),
+      make_block_of(a, ret));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_return_signal(value))
+      << "foreach must propagate the return signal, not consume it";
+  clux_value_t *payload = clux_return_signal_get_payload(value);
+  ASSERT_NE(payload, nullptr) << "the return signal payload must survive";
+  EXPECT_EQ(read_i32(payload), 42)
+      << "the payload value must be rebuilt intact through scope exit";
+  delete_node(&loop);
+}
+
+/* 场景: foreach (var x of arr) { n = n + x; continue; }——continue
+        signal 被循环边界消费，进入下一轮
+   预期: 4 轮全部执行，n == 46 */
+TEST_F(ExecLiteralTest, ExecStmtForeachContinueRunsAllRounds) {
+  ASSERT_NE(make_i32_array("arr_co", 4), nullptr);
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  clux_value_t *declared = exec_node(ctx, n_decl);
+  ASSERT_NE(declared, nullptr);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"))));
+  stmt_block_node_add_stmt(body, create_stmt_continue_node(a));
+  node_t *loop = make_stmt_foreach_of(
+      a, "x", make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_co"), body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a foreach loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 46)
+      << "continue must be consumed per round and all 4 elements accumulated";
+  delete_node(&loop);
+  delete_node(&n_decl);
+}
+
+/* 场景: foreach 缺 body（iterable 已给）——容错报错
+   预期: "foreach statement requires a body" 语义化 error */
+TEST_F(ExecLiteralTest, ExecStmtForeachRequiresBody) {
+  node_t *loop = create_stmt_foreach_node(a);
+  stmt_foreach_node_set_iterable(
+      loop, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr"));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value), "foreach statement requires a body");
+  delete_node(&loop);
+}
+
+/* 场景: foreach 缺迭代变量（iterable/body 已给）——容错报错
+   预期: "foreach statement requires an iteration variable" 语义化 error */
+TEST_F(ExecLiteralTest, ExecStmtForeachRequiresIterationVariable) {
+  node_t *loop = create_stmt_foreach_node(a);
+  stmt_foreach_node_set_iterable(
+      loop, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr"));
+  stmt_foreach_node_set_body(loop, create_stmt_block_node(a));
+  clux_value_t *value = exec_node(ctx, loop);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value),
+               "foreach statement requires an iteration variable");
+  delete_node(&loop);
+}
+
+/* 场景: foreach (var x of arr) { }——迭代变量在每轮独立 scope 内声明，
+        循环结束后销毁
+   预期: 循环结束后 lookup "x" 为 NULL（x 在循环外不可见） */
+TEST_F(ExecLiteralTest, ExecStmtForeachIterationVariableScopedPerRound) {
+  ASSERT_NE(make_i32_array("arr_sc", 2), nullptr);
+  node_t *loop = make_stmt_foreach_of(
+      a,
+      "x",
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_sc"),
+      create_stmt_block_node(a));
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a foreach loop must yield no value";
+  clux_value_t *leaked = clux_context_lookup(ctx, "x", NULL);
+  ASSERT_NE(leaked, nullptr);
+  EXPECT_TRUE(clux_value_is_error(leaked))
+      << "the iteration variable must not leak out of the loop scope";
+  EXPECT_TRUE(strstr(error_message_of(leaked),
+                     "use of undeclared identifier 'x'") != nullptr)
+      << "actual: " << error_message_of(leaked);
+  delete_node(&loop);
 }

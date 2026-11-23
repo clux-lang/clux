@@ -21,6 +21,8 @@ clux_value_t *exec_stmt_break(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_continue(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_while(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_do_while(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_for(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_foreach(clux_context_t *ctx, node_t *node);
 #ifdef __cplusplus
 }
 #endif
