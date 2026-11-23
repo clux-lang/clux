@@ -255,8 +255,8 @@ TEST(ParserTest, PushErrorAppends) {
   parser_t *p = create_parser(a, "test.clux", "");
   location_t loc = {
       .filename = "test.clux",
-      .begin = {.offset = "", .line = 1, .column = 1},
-      .end = {.offset = "", .line = 1, .column = 1},
+      .begin = {.offset = "", .column = 1, .line = 1},
+      .end = {.offset = "", .column = 1, .line = 1},
   };
   clux_error_t *e1 = create_error(a, &loc, "first");
   clux_error_t *e2 = create_error(a, &loc, "second");

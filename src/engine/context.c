@@ -772,8 +772,9 @@ clux_value_t *clux_context_is_none(clux_context_t *self,
       "#is_none requires an optional value, got '%s'",
       type_name ? type_name : "<unknown>");
 }
-clux_value_t *
-clux_context_take(clux_context_t *self, clux_value_t *value, location_t *loc) {
+clux_value_t *clux_context_take(clux_context_t *self,
+                                clux_value_t *value,
+                                const location_t *loc) {
   if (!value) {
     return clux_context_create_error_message(
         self, loc, "#take requires an optional value");
@@ -2016,8 +2017,9 @@ clux_value_t *clux_context_get_member(clux_context_t *self,
       "type '%s' does not support namespace access",
       kind_name ? kind_name : "<unknown>");
 }
-clux_value_t *
-clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc) {
+clux_value_t *clux_context_deref(clux_context_t *self,
+                                 clux_value_t *ptr,
+                                 const location_t *loc) {
   if (!ptr) {
     return clux_context_create_error_message(
         self, loc, "deref requires a pointer");
@@ -2148,8 +2150,9 @@ clux_value_t *clux_context_index_to_i64(clux_context_t *self,
   *out = value;
   return NULL;
 }
-clux_value_t *
-clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc) {
+clux_value_t *clux_context_ref(clux_context_t *self,
+                               clux_value_t *value,
+                               const location_t *loc) {
   if (!value) {
     return clux_context_create_error_message(self, loc, "ref requires a value");
   }
@@ -2543,8 +2546,9 @@ clux_value_t *clux_context_assign(clux_context_t *self,
   clux_value_set_tdz(target, false);
   return target;
 }
-clux_value_t *
-clux_context_clone(clux_context_t *self, clux_value_t *value, location_t *loc) {
+clux_value_t *clux_context_clone(clux_context_t *self,
+                                 clux_value_t *value,
+                                 const location_t *loc) {
   if (!value) {
     return clux_context_create_error_message(
         self, loc, "clone requires a value");

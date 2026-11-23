@@ -154,8 +154,9 @@ clux_value_t *clux_context_create_ptr(clux_context_t *self,
                                       const location_t *loc);
 /* 取指向 value 的指针：error 自传播，shadow 产出 "*<base>" 类型的 shadow。
    任意类型可用，不经过 vtable。 */
-clux_value_t *
-clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc);
+clux_value_t *clux_context_ref(clux_context_t *self,
+                               clux_value_t *value,
+                               const location_t *loc);
 /* 按 base 取 "*<base>" 指针类型：children 表 find-or-create，同一 base 恒等
    返回同一实例。 */
 clux_type_t *clux_context_get_ptr_type(clux_context_t *self, clux_type_t *base);
@@ -204,8 +205,9 @@ clux_value_t *clux_context_create_array(clux_context_t *self,
 /* 指针解引用（*p）：返回 base 类型的 view（内存共享、携带引用属性），
    指针无效报 error，shadow 指针产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成。 */
-clux_value_t *
-clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc);
+clux_value_t *clux_context_deref(clux_context_t *self,
+                                 clux_value_t *ptr,
+                                 const location_t *loc);
 /* 按载荷 base 取 "?<base>" 可选类型：children 表 find-or-create，
    同一 base 恒等返回同一实例。 */
 clux_type_t *clux_context_get_optional_type(clux_context_t *self,
@@ -231,8 +233,9 @@ clux_value_t *clux_context_is_none(clux_context_t *self,
 /* 断言取值（内置函数 #take，`.!` 语法糖编译为此调用）：some 返回
    载荷 base 类型的借引用 view，none 是运行期 error。仅 optional 类型
    支持（vtable take 槽位），其余类型返回 error。 */
-clux_value_t *
-clux_context_take(clux_context_t *self, clux_value_t *value, location_t *loc);
+clux_value_t *clux_context_take(clux_context_t *self,
+                                clux_value_t *value,
+                                const location_t *loc);
 /* 创建具名 C union 类型（白皮书 §3.8）：无 tag，所有成员共享偏移 0，
    size/align 取成员最大值（C ABI 布局）。成员表整体拷入 meta，成员名经
    strs 驻留。结构判等（成员名+类型按声明序一致即同一类型）：已存在
@@ -501,8 +504,9 @@ clux_value_t *clux_context_assign(clux_context_t *self,
                                   const location_t *loc);
 /* 通用克隆（不经 vtable）：data 是平凡位图，按类型尺寸新分配块整体拷贝。
    shadow 克隆为同类型 shadow，error 自传播。 */
-clux_value_t *
-clux_context_clone(clux_context_t *self, clux_value_t *value, location_t *loc);
+clux_value_t *clux_context_clone(clux_context_t *self,
+                                 clux_value_t *value,
+                                 const location_t *loc);
 /* 内建类型按 kind 取回：引擎内部与测试的通用通道（非逐类型接口）。
    script 层类型名与 identifier 合一——内建类型作为 type value 按名
    注册进 global scope，经 context_lookup 按名查找，与用户类型/变量
