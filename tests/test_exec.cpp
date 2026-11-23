@@ -56,6 +56,7 @@
 #include "exec/call.h"
 #include "parser/node_construct.h"
 #include "parser/node_construct_field.h"
+#include "parser/node_builtin.h"
 #include "parser/node_rest.h"
 #include "parser/node_subscript.h"
 #include "parser/node_tuple.h"
@@ -193,6 +194,25 @@ protected:
   node_t *make_group_of(node_t *expr) {
     node_t *node = create_group_node(a);
     group_node_set_expr(node, expr);
+    return node;
+  }
+
+  /* 合成 builtin 节点：name 符号覆盖 name_text 文本（exec 按 location_is
+     判名），根节点 location 同样覆盖该文本供错误定位；
+     实参由调用方经 builtin_node_add_arg 填充，delete 根节点时一并释放。 */
+  node_t *make_builtin_of(const char *name_text) {
+    node_t *name = make_node(CLUX_NODE_SYMBOL, name_text);
+    node_t *node = create_builtin_node(a);
+    builtin_node_set_name(node, name);
+    location_t loc;
+    loc.filename = "test.clux";
+    loc.begin.offset = name_text;
+    loc.begin.column = 1;
+    loc.begin.line = 1;
+    loc.end.offset = name_text + strlen(name_text);
+    loc.end.column = 1;
+    loc.end.line = 1;
+    node_set_location(node, &loc);
     return node;
   }
 
@@ -851,7 +871,7 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_INTERFACE_DECL ||
         kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE ||
         kind == CLUX_NODE_EXPR_STRUCT_DECL || kind == CLUX_NODE_STMT_STRUCT ||
-        kind == CLUX_NODE_EXPR_CONSTRUCT;
+        kind == CLUX_NODE_EXPR_CONSTRUCT || kind == CLUX_NODE_EXPR_BUILTIN;
     if (synthetic_skip) {
       continue;
     }
@@ -3015,6 +3035,534 @@ TEST_F(ExecLiteralTest, TypePrefixDoubleEvaluationIsInterned) {
   }
   EXPECT_EQ(first, second)
       << "two evaluations of *i32 must describe the same interned type";
+}
+
+/* ---------- 编译器内建 #name(arg, ...) 的 exec 冒烟 ---------- */
+
+/* 场景: #none(i32) 构造空 optional
+   预期: 结果类型 kind 为 OPTIONAL，经 #is_none 判定为 true */
+TEST_F(ExecLiteralTest, BuiltinNoneCreatesOptionalNone) {
+  node_t *node = make_builtin_of("none");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_OPTIONAL);
+  EXPECT_TRUE(read_bool(clux_context_is_none(ctx, value, nullptr)));
+  delete_node(&node);
+}
+
+/* 场景: #some(i32, 42) 后经 #take 取载荷
+   预期: some 提升 ?i32，take 返回 42 的借引用 view，读出 i32 值 42 */
+TEST_F(ExecLiteralTest, BuiltinSomeThenTakeRoundTrip) {
+  node_t *some = make_builtin_of("some");
+  builtin_node_add_arg(some, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  builtin_node_add_arg(some, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+
+  node_t *take = make_builtin_of("take");
+  builtin_node_add_arg(take, some);
+  clux_value_t *value = exec_node(ctx, take);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 42);
+  delete_node(&take);
+}
+
+/* 场景: #take 对 #none(i32) 取载荷
+   预期: none 断言失败，产出 error 值 */
+TEST_F(ExecLiteralTest, BuiltinTakeOnNoneReportsError) {
+  node_t *none = make_builtin_of("none");
+  builtin_node_add_arg(none, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+
+  node_t *take = make_builtin_of("take");
+  builtin_node_add_arg(take, none);
+  clux_value_t *value = exec_node(ctx, take);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(value));
+  delete_node(&take);
+}
+
+/* 场景: #sizeof(i32)/#alignof(i32) 编译期类型运算
+   预期: 结果为 usize 值，i32 尺寸与对齐均为 4 */
+TEST_F(ExecLiteralTest, BuiltinSizeofAlignofProduceUsize) {
+  node_t *size_node = make_builtin_of("sizeof");
+  builtin_node_add_arg(size_node,
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *size = exec_node(ctx, size_node);
+  ASSERT_NE(size, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(size)), CLUX_TYPE_USIZE);
+  EXPECT_EQ(read_usize(size), 4u);
+  delete_node(&size_node);
+
+  node_t *align_node = make_builtin_of("alignof");
+  builtin_node_add_arg(align_node,
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *align = exec_node(ctx, align_node);
+  ASSERT_NE(align, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(align)), CLUX_TYPE_USIZE);
+  EXPECT_EQ(read_usize(align), 4u);
+  delete_node(&align_node);
+}
+
+/* 场景: #typeof(42) 提取值的类型
+   预期: 结果为 type value，描述的正是 i32 interned 类型 */
+TEST_F(ExecLiteralTest, BuiltinTypeofProducesTypeValue) {
+  node_t *node = make_builtin_of("typeof");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(type_described_by(value),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  delete_node(&node);
+}
+
+/* 场景: #typeof(TDZ 变量)——实参走 shadow 计算不真实消费
+   预期: TDZ 读取按变量类型产 shadow，#typeof 成功产出 i32 类型值
+         且不触发 TDZ 消费；此后真实读取仍被 TDZ 消费校验拦截 */
+TEST_F(ExecLiteralTest, BuiltinTypeofEvaluatesOperandInShadowMode) {
+  clux_value_t *tz = clux_context_create_i32(ctx, 1, "tz_ty", NULL);
+  ASSERT_NE(tz, nullptr);
+  clux_value_set_tdz(tz, true);
+
+  node_t *node = make_builtin_of("typeof");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_ty"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(type_described_by(value),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  delete_node(&node);
+
+  /* shadow 探测不产生消费：tz_ty 仍处于 TDZ，真实读取报未初始化 */
+  node_t *read_node = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_ty");
+  clux_value_t *read = exec_operand(ctx, read_node);
+  ASSERT_NE(read, nullptr);
+  EXPECT_TRUE(clux_value_is_error(read));
+  EXPECT_STREQ(error_message_of(read), "use of a value before initialization");
+  delete_node(&read_node);
+}
+
+/* 场景: #typeof(#typeof(42))——外层实参本身含 #typeof，嵌套 shadow 计算
+   预期: 内层 typeof 在外层开启的 shadow 模式中求值成功，外层取内层产出
+         （type value）的类型，最终结果描述的是 type 类型本身 */
+TEST_F(ExecLiteralTest, BuiltinTypeofNestedShadowComputation) {
+  node_t *inner = make_builtin_of("typeof");
+  builtin_node_add_arg(inner, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  node_t *outer = make_builtin_of("typeof");
+  builtin_node_add_arg(outer, inner);
+
+  clux_value_t *value = exec_node(ctx, outer);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(clux_type_kind_unwrap(type_described_by(value)), CLUX_TYPE_TYPE)
+      << "outer typeof must describe the type of the inner type value";
+  delete_node(&outer);
+}
+
+/* 场景: 进入前已处于/不处于 shadow 模式时执行 #typeof
+   预期: save/restore 保真——外层模式为 true 时求值后仍为 true，
+         为 false 时求值后仍为 false；两次求值均产出 i32 类型 */
+TEST_F(ExecLiteralTest, BuiltinTypeofRestoresShadowModeState) {
+  clux_context_set_shadow_mode(ctx, true);
+  node_t *shadow_probe = make_builtin_of("typeof");
+  builtin_node_add_arg(shadow_probe,
+                       make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  clux_value_t *in_shadow = exec_node(ctx, shadow_probe);
+  ASSERT_NE(in_shadow, nullptr);
+  EXPECT_FALSE(clux_value_is_error(in_shadow)) << error_message_of(in_shadow);
+  EXPECT_EQ(type_described_by(in_shadow),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_TRUE(clux_context_is_shadow_mode(ctx))
+      << "typeof must restore the caller's shadow mode (true)";
+  delete_node(&shadow_probe);
+
+  clux_context_set_shadow_mode(ctx, false);
+  node_t *plain_probe = make_builtin_of("typeof");
+  builtin_node_add_arg(plain_probe, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  clux_value_t *out_shadow = exec_node(ctx, plain_probe);
+  ASSERT_NE(out_shadow, nullptr);
+  EXPECT_FALSE(clux_value_is_error(out_shadow)) << error_message_of(out_shadow);
+  EXPECT_EQ(type_described_by(out_shadow),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_FALSE(clux_context_is_shadow_mode(ctx))
+      << "typeof must restore the caller's shadow mode (false)";
+  delete_node(&plain_probe);
+}
+
+/* 场景: #typeof(TDZ 变量) 后 TDZ 标志不被清除——shadow 探测只读不消费
+   预期: 结果为 i32 类型 type value，tz 的 TDZ 标志保持 true（直接强断言，
+         区别于"真实读取仍报错"的间接证据）；随后真实读取仍被拦截 */
+TEST_F(ExecLiteralTest, BuiltinTypeofShadowProbeKeepsTdzFlag) {
+  clux_value_t *tz = clux_context_create_i32(ctx, 1, "tz_kept", NULL);
+  ASSERT_NE(tz, nullptr);
+  clux_value_set_tdz(tz, true);
+
+  node_t *node = make_builtin_of("typeof");
+  builtin_node_add_arg(node,
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_kept"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(type_described_by(value),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_TRUE(clux_value_is_tdz(tz))
+      << "shadow probe must not consume the value nor clear its TDZ flag";
+  delete_node(&node);
+
+  node_t *read_node = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_kept");
+  clux_value_t *read = exec_operand(ctx, read_node);
+  ASSERT_NE(read, nullptr);
+  EXPECT_TRUE(clux_value_is_error(read));
+  EXPECT_STREQ(error_message_of(read), "use of a value before initialization");
+  delete_node(&read_node);
+}
+
+/* 场景: #typeof(未声明标识符)——shadow 模式包裹下实参求值错误原样上抛
+   预期: "use of undeclared identifier 'nosuch'"，且错误路径同样恢复
+         shadow 模式（模式状态不被错误路径遗留污染） */
+TEST_F(ExecLiteralTest, BuiltinTypeofErrorOperandPropagatesInShadowMode) {
+  node_t *node = make_builtin_of("typeof");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nosuch"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value),
+               "use of undeclared identifier 'nosuch'");
+  EXPECT_FALSE(clux_context_is_shadow_mode(ctx))
+      << "error path must also restore the caller's shadow mode";
+  delete_node(&node);
+}
+
+/* 场景: TDZ 变量直接喂给 #take/#is_none/#some——这些内建不走 shadow 模式
+   预期: 实参经非 shadow 的真实消费通道，TDZ 拦截生效：三者均报
+         "use of a value before initialization"，
+         固化 #typeof 的 shadow 计算与其余内建真实消费的通道差异 */
+TEST_F(ExecLiteralTest, OtherBuiltinsDoNotEvaluateOperandInShadowMode) {
+  clux_value_t *tz = clux_context_create_i32(ctx, 1, "tz_real", NULL);
+  ASSERT_NE(tz, nullptr);
+  clux_value_set_tdz(tz, true);
+  ASSERT_TRUE(clux_value_is_tdz(tz));
+
+  struct {
+    const char *name;
+    bool with_base_type; /* #some 需要额外的第一类型实参 */
+  } cases[] = {
+      {"take", false},
+      {"is_none", false},
+      {"some", true},
+  };
+  for (const auto &c : cases) {
+    node_t *node = make_builtin_of(c.name);
+    if (c.with_base_type) {
+      builtin_node_add_arg(node,
+                           make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+    }
+    builtin_node_add_arg(node,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "tz_real"));
+    clux_value_t *value = exec_node(ctx, node);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value),
+                 "use of a value before initialization")
+        << c.name;
+    delete_node(&node);
+  }
+}
+
+/* 场景: #typeof(y = 7)——实参含赋值副作用，shadow 计算下副作用不落存储
+   预期: 外层 typeof 产出赋值结果的类型（i32 type value）且模式恢复；
+         实测固化：TDZ 变量的首赋值在 shadow 包裹下不落地——TDZ 标志
+         保持，真实读取仍报未初始化 */
+TEST_F(ExecLiteralTest, BuiltinTypeofOfAssignmentTakesResultType) {
+  clux_value_t *y = clux_context_create_i32(ctx, 1, "y_eff", NULL);
+  ASSERT_NE(y, nullptr);
+  clux_value_set_tdz(y, true);
+
+  node_t *outer = make_builtin_of("typeof");
+  builtin_node_add_arg(
+      outer, make_assign(CLUX_NODE_LITERAL_NUMERIC, "=", "y_eff", "7"));
+  clux_value_t *value = exec_node(ctx, outer);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(type_described_by(value),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_FALSE(clux_context_is_shadow_mode(ctx))
+      << "typeof must restore the caller's shadow mode after assign operand";
+  /* 副作用不落存储：shadow 计算下 name 解析与写入均在替身上进行，
+     真实存储的 TDZ 标志保持、首赋值不落地（区分直接执行 assign 的
+     首赋值清 TDZ 通道） */
+  EXPECT_TRUE(clux_value_is_tdz(y))
+      << "assignment side effect must not land in storage under shadow mode";
+  /* 未初始化的可观测证据：真实读取仍被 TDZ 消费校验拦截 */
+  node_t *read_node = make_node(CLUX_NODE_LITERAL_IDENTIFIER, "y_eff");
+  clux_value_t *read = exec_operand(ctx, read_node);
+  ASSERT_NE(read, nullptr);
+  EXPECT_TRUE(clux_value_is_error(read));
+  EXPECT_STREQ(error_message_of(read), "use of a value before initialization");
+  delete_node(&read_node);
+  delete_node(&outer);
+}
+
+/* 场景: 未知名内建 #foo(i32)
+   预期: 语义化错误消息带实际名字文本 */
+TEST_F(ExecLiteralTest, BuiltinUnknownNameReportsError) {
+  node_t *node = make_builtin_of("foo");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value),
+               "builtin '#foo' is not supported in execution");
+  delete_node(&node);
+}
+
+/* 场景: 实参个数为零/超限
+   预期: argc==0 报 requires a name and arguments；#none 双实参报
+         takes exactly one type argument */
+TEST_F(ExecLiteralTest, BuiltinArityMismatchReportsError) {
+  node_t *empty = make_builtin_of("take");
+  clux_value_t *empty_value = exec_node(ctx, empty);
+  ASSERT_NE(empty_value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(empty_value));
+  EXPECT_STREQ(error_message_of(empty_value),
+               "builtin '#take' requires a name and arguments");
+  delete_node(&empty);
+
+  node_t *node = make_builtin_of("none");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value),
+               "builtin '#none' takes exactly one type argument");
+  delete_node(&node);
+}
+
+/* ---------- 编译器内建 #name(arg, ...) 的正式用例 ----------
+   （上方为冒烟，此处断言 interning/错误传播/arity/复合类型完备性） */
+
+/* 场景: #none(i32) 的结果类型与引擎 optional 通道 interning
+   预期: 值类型与 clux_context_get_optional_type 产出的 interned ?i32
+         指针恒等（kind OPTIONAL），且引擎侧判定其为 none */
+TEST_F(ExecLiteralTest, BuiltinNoneTypeIsInternedOptional) {
+  node_t *node = make_builtin_of("none");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  clux_type_t *expected = clux_context_get_optional_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_EQ(clux_value_get_type(value), expected)
+      << "#none must reuse the interned ?i32 type";
+  EXPECT_EQ(clux_type_get_kind(expected), CLUX_TYPE_OPTIONAL);
+  EXPECT_TRUE(read_bool(clux_context_is_none(ctx, value, nullptr)));
+  delete_node(&node);
+}
+
+/* 场景: #some(i32, 42) 的结果类型与 present 标志
+   预期: 值类型为 interned ?i32（kind OPTIONAL），引擎侧判定非 none */
+TEST_F(ExecLiteralTest, BuiltinSomeValueIsOptionalOfBase) {
+  node_t *node = make_builtin_of("some");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  clux_type_t *expected = clux_context_get_optional_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_EQ(clux_value_get_type(value), expected)
+      << "#some must lift to the interned ?i32 type";
+  EXPECT_FALSE(read_bool(clux_context_is_none(ctx, value, nullptr)))
+      << "#some result must carry the present flag";
+  delete_node(&node);
+}
+
+/* 场景: #is_none 对 #none 与 #some 的三态判定
+   预期: 返回 bool 值（kind BOOL），none 判 true、some 判 false */
+TEST_F(ExecLiteralTest, BuiltinIsNoneReturnsBoolForNoneAndSome) {
+  struct {
+    const char *name;
+    bool expected;
+    bool with_value;
+  } cases[] = {
+      {"none", true, false},
+      {"some", false, true},
+  };
+  for (const auto &c : cases) {
+    node_t *inner = make_builtin_of(c.name);
+    builtin_node_add_arg(inner, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+    if (c.with_value) {
+      builtin_node_add_arg(inner, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+    }
+    node_t *node = make_builtin_of("is_none");
+    builtin_node_add_arg(node, inner);
+    clux_value_t *value = exec_node(ctx, node);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_BOOL)
+        << c.name;
+    EXPECT_EQ(read_bool(value), c.expected) << c.name;
+    delete_node(&node);
+  }
+}
+
+/* 场景: 类型实参位置传入非类型表达式（#none(42)/#some(42,42)/
+       #sizeof(42)/#alignof(42)）
+   预期: exec_operand_type 公共类型通道拦截，均报
+         "expected a type expression, got 'i32'"（右值类型名） */
+TEST_F(ExecLiteralTest, BuiltinNonTypeTypeArgumentReportsError) {
+  for (const char *name : {"none", "some", "sizeof", "alignof"}) {
+    node_t *node = make_builtin_of(name);
+    builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+    if (strcmp(name, "some") == 0) {
+      builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+    }
+    clux_value_t *value = exec_node(ctx, node);
+    ASSERT_NE(value, nullptr) << name;
+    EXPECT_TRUE(clux_value_is_error(value)) << name;
+    EXPECT_STREQ(error_message_of(value),
+                 "expected a type expression, got 'i32'")
+        << name;
+    delete_node(&node);
+  }
+}
+
+/* 场景: #some 第二实参为 error 值表达式（64 位超长数字探针）
+   预期: value 求值失败原样传播 "numeric literal too long"，
+         不进入 safe_cast 与构造路径 */
+TEST_F(ExecLiteralTest, BuiltinSomeValueErrorPropagatesVerbatim) {
+  node_t *node = make_builtin_of("some");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  builtin_node_add_arg(node,
+                       make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value), "numeric literal too long");
+  delete_node(&node);
+}
+
+/* 场景: #take / #typeof 实参为 error 值表达式
+   预期: 实参 error 原样传播 "numeric literal too long" */
+TEST_F(ExecLiteralTest, BuiltinOperandErrorPropagatesVerbatim) {
+  for (const char *name : {"take", "typeof"}) {
+    node_t *node = make_builtin_of(name);
+    builtin_node_add_arg(node,
+                         make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric));
+    clux_value_t *value = exec_node(ctx, node);
+    ASSERT_NE(value, nullptr) << name;
+    EXPECT_TRUE(clux_value_is_error(value)) << name;
+    EXPECT_STREQ(error_message_of(value), "numeric literal too long") << name;
+    delete_node(&node);
+  }
+}
+
+/* 场景: 已知名字双实参 arity 错误（argc 检查先于实参求值）
+   预期: 各报自身语义化 arity 错误消息 */
+TEST_F(ExecLiteralTest, BuiltinDoubleArgumentReportsPerNameArityError) {
+  struct {
+    const char *name;
+    const char *expected;
+  } cases[] = {
+      {"take", "builtin '#take' takes exactly one argument"},
+      {"is_none", "builtin '#is_none' takes exactly one argument"},
+      {"sizeof", "builtin '#sizeof' takes exactly one type argument"},
+      {"alignof", "builtin '#alignof' takes exactly one type argument"},
+      {"typeof", "builtin '#typeof' takes exactly one argument"},
+  };
+  for (const auto &c : cases) {
+    node_t *node = make_builtin_of(c.name);
+    builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+    builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_NUMERIC, "2"));
+    clux_value_t *value = exec_node(ctx, node);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value), c.expected) << c.name;
+    delete_node(&node);
+  }
+}
+
+/* 场景: #some 只有类型实参缺载荷（argc==1）
+   预期: 报 "builtin '#some' takes a type and a value" */
+TEST_F(ExecLiteralTest, BuiltinSomeMissingValueReportsArityError) {
+  node_t *node = make_builtin_of("some");
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value),
+               "builtin '#some' takes a type and a value");
+  delete_node(&node);
+}
+
+/* 场景: #sizeof(*i32) / #alignof(*i32) 对复合指针类型运算
+   预期: 结果为 usize，数值与引擎对 interned *i32 的
+         clux_type_get_size/get_align 返回一致 */
+TEST_F(ExecLiteralTest, BuiltinSizeofAlignofOnCompositeType) {
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  struct {
+    const char *name;
+    size_t expected;
+  } cases[] = {
+      {"sizeof", clux_type_get_size(ptr_i32)},
+      {"alignof", clux_type_get_align(ptr_i32)},
+  };
+  for (const auto &c : cases) {
+    node_t *node = make_builtin_of(c.name);
+    builtin_node_add_arg(
+        node,
+        make_binary_of(a,
+                       NULL,
+                       make_node(CLUX_NODE_SYMBOL, "*"),
+                       make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+    clux_value_t *value = exec_node(ctx, node);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_USIZE)
+        << c.name;
+    EXPECT_EQ(read_usize(value), c.expected) << c.name;
+    delete_node(&node);
+  }
+}
+
+/* 场景: #typeof(#none(i32)) 提取复合 optional 值的类型
+   预期: 产出 type value，描述的正是 interned ?i32 */
+TEST_F(ExecLiteralTest, BuiltinTypeofCompositeValueDescribesOptional) {
+  node_t *none = make_builtin_of("none");
+  builtin_node_add_arg(none, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *node = make_builtin_of("typeof");
+  builtin_node_add_arg(node, none);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(type_described_by(value),
+            clux_context_get_optional_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32)))
+      << "#typeof must describe the interned ?i32 payload type";
+  delete_node(&node);
+}
+
+/* 场景: builtin 节点缺失 name 符号（name location 为空）
+   预期: 报 "builtin '#<unknown>' requires a name and arguments" */
+TEST_F(ExecLiteralTest, BuiltinMissingNameReportsUnknownError) {
+  node_t *node = create_builtin_node(a);
+  location_t loc;
+  loc.filename = "test.clux";
+  loc.begin.offset = "builtin";
+  loc.begin.column = 1;
+  loc.begin.line = 1;
+  loc.end.offset = "builtin";
+  loc.end.column = 1;
+  loc.end.line = 1;
+  node_set_location(node, &loc);
+  builtin_node_add_arg(node, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value),
+               "builtin '#<unknown>' requires a name and arguments");
+  delete_node(&node);
 }
 
 /* 场景: 限定前缀 const i32 / volatile i32 与链式 const volatile i32

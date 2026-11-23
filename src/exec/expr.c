@@ -92,7 +92,7 @@ static const struct {
 
 /* 复合类型定义的公共通道：求值操作数并要求 type value，返回被描述类型；
    失败返回 NULL 且 *out_err 携带 error 值（操作数 error 优先传播）。 */
-static clux_type_t *
+clux_type_t *
 exec_operand_type(clux_context_t *ctx, node_t *node, clux_value_t **out_err) {
   clux_value_t *value = exec_operand(ctx, node);
   if (clux_value_is_error(value)) {
