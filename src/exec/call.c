@@ -6,11 +6,14 @@
 #include "engine/error.h"
 #include "engine/func.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/scope.h"
+#include "engine/struct.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include "exec/exec.h"
 #include "parser/node.h"
+#include "parser/node_binary.h"
 #include "parser/node_call.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
@@ -152,15 +155,125 @@ void exec_call_install_executor(clux_context_t *ctx) {
   }
 }
 
+/* 成员方法调用 a.b(args)（白皮书 §3.5.1）：实例调用是语法糖——
+   a 是结构体值时展开为 T::b(a.&, args)（receiver 取址作首参），a 已是
+   指针时为 T::b(a, args)（原样作首参）。方法本体从 receiver 类型的
+   method 名单经 attribute 表取 func 值（借用），receiver 之后才是声明
+   实参——签名交验/帧协议与普通调用零差异。method 名单外的名字（字
+   段/attribute）不走本糖：字段调用落通用 callee 求值路径（字段类型是
+   func 就能调），attribute 属类型命名空间，须 T::attr 显式访问。 */
+static clux_value_t *exec_member_call(clux_context_t *ctx, node_t *node) {
+  node_t *callee_node = call_node_get_callee(node);
+  node_t *receiver_node = binary_node_get_left(callee_node);
+  node_t *name_node = binary_node_get_right(callee_node);
+  const location_t *op_loc =
+      node_get_location(binary_node_get_symbol(callee_node));
+  if (!receiver_node) {
+    return clux_context_create_error_message(
+        ctx, op_loc, "member call requires a receiver");
+  }
+  if (!name_node || node_get_kind(name_node) != CLUX_NODE_LITERAL_IDENTIFIER) {
+    return clux_context_create_error_message(
+        ctx, op_loc, "member call requires a method name");
+  }
+  clux_value_t *receiver = exec_operand(ctx, receiver_node);
+  if (clux_value_is_error(receiver)) {
+    return receiver;
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name = location_get(node_get_location(name_node), allocator);
+  /* 指针接收者先 deref 产 base view（共享内存）供方法名单查找（白皮书
+     §3.5.1：a 已是指针时 T::b(a, args)——T 取 base）；argv[0] 仍用原
+     指针接收者，deref 只是查找通道，不改变前置语义。 */
+  clux_value_t *lookup = receiver;
+  if (clux_type_get_kind(clux_value_get_type(receiver)) == CLUX_TYPE_PTR) {
+    lookup = clux_context_deref(ctx, receiver, (location_t *)op_loc);
+    if (clux_value_is_error(lookup)) {
+      allocator_free(allocator, (void **)&name);
+      return lookup;
+    }
+  }
+  /* qualifier 包装不遮蔽 method 名单，先 unwrap 再查类型命名空间。 */
+  clux_type_t *receiver_type = clux_type_unwrap(clux_value_get_type(lookup));
+  if (!receiver_type) {
+    receiver_type = clux_value_get_type(lookup);
+  }
+  if (clux_type_get_kind(receiver_type) != CLUX_TYPE_STRUCT ||
+      !clux_struct_is_method(receiver_type, name)) {
+    const char *type_name = clux_type_get_name(receiver_type);
+    clux_value_t *fail =
+        clux_context_create_error_message(ctx,
+                                          op_loc,
+                                          "type '%s' has no method '%s'",
+                                          type_name ? type_name : "<unknown>",
+                                          name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  clux_value_t *method =
+      clux_context_struct_attr(ctx, receiver_type, name, op_loc);
+  if (clux_value_is_error(method)) {
+    allocator_free(allocator, (void **)&name);
+    return method;
+  }
+  allocator_free(allocator, (void **)&name);
+  /* receiver 前置为一般首参：值接收者取址（a.&），指针接收者原样——
+     形参类型交验由 invoke 的普通实参规则接管。 */
+  clux_value_t *first = receiver;
+  if (clux_type_get_kind(clux_value_get_type(receiver)) != CLUX_TYPE_PTR) {
+    first = clux_context_ref(ctx, receiver, op_loc);
+    if (clux_value_is_error(first)) {
+      return first;
+    }
+  }
+  /* C++ const 原则：receiver 与 self 形参类型恒等直过；不恒等经
+     safe_cast 吸收——*T 接收者对 *const T 形参加 const 协变放行
+     （帧内 self 为 *const T），*const T 接收者对 *T 形参被协变方向
+     拒绝（丢 const 撕毁写保护）。 */
+  clux_type_t *self_param = clux_func_get_param(clux_value_get_type(method), 0);
+  if (self_param && !clux_type_equal(clux_value_get_type(first), self_param)) {
+    clux_value_t *absorbed =
+        clux_context_safe_cast(ctx, first, self_param, op_loc);
+    if (clux_value_is_error(absorbed)) {
+      return absorbed;
+    }
+    first = absorbed;
+  }
+  size_t argc = call_node_get_arg_count(node);
+  clux_value_t *argv[argc + 1];
+  argv[0] = first;
+  for (size_t idx = 0; idx < argc; idx++) {
+    node_t *arg = call_node_get_arg(node, idx);
+    if (node_get_kind(arg) == CLUX_NODE_EXPR_REST) {
+      return clux_context_create_error_message(
+          ctx, node_get_location(arg), "spread argument is not supported yet");
+    }
+    argv[idx + 1] = exec_operand(ctx, arg);
+    if (clux_value_is_error(argv[idx + 1])) {
+      return argv[idx + 1];
+    }
+  }
+  exec_call_install_executor(ctx);
+  return clux_context_invoke(
+      ctx, method, argc + 1, argv, node_get_location(node));
+}
+
 /* 函数调用表达式 f(args)（白皮书 §2.7）：callee 求值 → 实参逐个求值
    （error 优先传播、spread/rest 实参暂不支持）→ 懒安装执行器（首次
    调用挂帧协议执行器，engine 不依赖 exec 的分层保住）→ clux_context_
-   invoke 交验签名并分派。 */
+   invoke 交验签名并分派。callee 为成员访问 a.b 时转入方法调用糖
+   （receiver 前置）；T::b / T::variant 静态形态经通用 callee 求值
+   （binary "::" 分支）自然打通。 */
 clux_value_t *exec_expr_call(clux_context_t *ctx, node_t *node) {
   node_t *callee_node = call_node_get_callee(node);
   if (!callee_node) {
     return clux_context_create_error_message(
         ctx, node_get_location(node), "function call requires a callee");
+  }
+  if (node_get_kind(callee_node) == CLUX_NODE_EXPR_BINARY &&
+      location_is(node_get_location(binary_node_get_symbol(callee_node)),
+                  ".")) {
+    return exec_member_call(ctx, node);
   }
   clux_value_t *callee = exec_operand(ctx, callee_node);
   if (clux_value_is_error(callee)) {

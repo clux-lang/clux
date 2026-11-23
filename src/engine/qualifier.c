@@ -163,6 +163,13 @@ static clux_value_t *qual_deref(clux_context_t *ctx, clux_value_t *ptr) {
   return clux_context_deref(ctx, qualified_view(ctx, ptr), NULL);
 }
 
+/* field 委托（x.f）：const/volatile 视图上建 base view 后走标准 field
+   通道——视图语义与 deref/index 一致（内存共享，引用底色不变）。 */
+static clux_value_t *
+qual_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
+  return clux_context_field(ctx, qualified_view(ctx, value), name, NULL);
+}
+
 static clux_value_t *
 qual_index(clux_context_t *ctx, clux_value_t *aggregate, clux_value_t *index) {
   return clux_context_index(ctx, qualified_view(ctx, aggregate), index, NULL);
@@ -198,6 +205,7 @@ static clux_vtable_t g_qualifier_vtable = {
     .safe_cast = qual_safe_cast,
     .cast = qual_cast,
     .deref = qual_deref,
+    .field = qual_field,
     .index = qual_index,
     .slice = qual_slice,
     .type_equal = qualifier_type_equal,

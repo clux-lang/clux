@@ -135,7 +135,12 @@ static bool ptr_type_equal(clux_type_t *self, clux_type_t *other) {
   return clux_type_equal(self_meta->base, other_meta->base);
 }
 
-/* 指针协变：*T extends *U 当且仅当 T extends U。 */
+/* 指针协变（C++ const 原则）：*S extends *B 当且仅当 base 兼容
+   （unwrap 后比较，含 struct 指针向下兼容与嵌套协变递归）且 const
+   单向——目标 base 带 const 时叠加加 const 协变（*T extends *const U
+   ⟹ T extends U，任意 *T 可 safe_cast 成 *const T）；源带 const 而
+   目标不带时拒绝（*const T 丢 const 会撕毁写保护）。volatile 是
+   提示性限定，不参与方向控制。 */
 static bool ptr_type_extends(clux_type_t *self, clux_type_t *base) {
   if (clux_type_get_kind(base) != CLUX_TYPE_PTR) {
     return false;
@@ -145,7 +150,15 @@ static bool ptr_type_extends(clux_type_t *self, clux_type_t *base) {
   if (!self_meta || !base_meta) {
     return false;
   }
-  return clux_type_extends(self_meta->base, base_meta->base);
+  /* const 只能加不能丢：源的 base 带 const 时目标的 base 也必须带。 */
+  if (clux_type_is_const(self_meta->base) &&
+      !clux_type_is_const(base_meta->base)) {
+    return false;
+  }
+  /* 底层兼容：unwrap 两侧限定后比较——目标带 const 的方向（*T →
+     *const U）由此天然放行，与两侧同 const 状态、volatile 交互一致。 */
+  return clux_type_extends(clux_type_unwrap(self_meta->base),
+                           clux_type_unwrap(base_meta->base));
 }
 
 /* *void 是类型擦除边界（白皮书 §2.1，C 风格吸收规则）：目标是指针且

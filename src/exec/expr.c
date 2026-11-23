@@ -401,6 +401,46 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
     }
     return clux_context_cast(ctx, left, type, op_loc);
   }
+  /* 成员访问 obj.field（白皮书 §3.5）：与下标同源的 view 语义——返回
+     字段类型的读写双向 view（与实例内存共享，自带引用底色），读取直接
+     用，写入由通用 assign 写穿 view，无读/写两分。分隔符与名字由
+     parser 保证（RIGHT 恒 identifier，容错分支手工 AST 校验拦截）。 */
+  if (location_is(op_loc, ".")) {
+    clux_value_t *receiver = exec_operand(ctx, left_node);
+    if (clux_value_is_error(receiver)) {
+      return receiver;
+    }
+    if (!right_node ||
+        node_get_kind(right_node) != CLUX_NODE_LITERAL_IDENTIFIER) {
+      return clux_context_create_error_message(
+          ctx, op_loc, "member access requires a member name");
+    }
+    char *name = location_get(node_get_location(right_node),
+                              clux_context_get_allocator(ctx));
+    clux_value_t *view = clux_context_field(ctx, receiver, name, op_loc);
+    allocator_free(clux_context_get_allocator(ctx), (void **)&name);
+    return view;
+  }
+  /* 类型命名空间访问 Type::member（白皮书 §3.5.1/§3.6）：LEFT 须为
+     type value，成员经引擎通道解析（struct attr/method/subtype、enum
+     variant），方法本体是 func 值借用返回（静态调用由此取值）。 */
+  if (location_is(op_loc, "::")) {
+    clux_value_t *err = NULL;
+    clux_type_t *type = exec_operand_type(ctx, left_node, &err);
+    if (!type) {
+      return err;
+    }
+    if (!right_node ||
+        node_get_kind(right_node) != CLUX_NODE_LITERAL_IDENTIFIER) {
+      return clux_context_create_error_message(
+          ctx, op_loc, "namespace access requires a member name");
+    }
+    char *name = location_get(node_get_location(right_node),
+                              clux_context_get_allocator(ctx));
+    clux_value_t *member = clux_context_get_member(ctx, type, name, op_loc);
+    allocator_free(clux_context_get_allocator(ctx), (void **)&name);
+    return member;
+  }
   /* 二元形态：文本映射引擎槽位后交 clux_context_binary 分派。 */
   for (size_t i = 0; i < sizeof(k_binary_ops) / sizeof(k_binary_ops[0]); i++) {
     if (!location_is(op_loc, k_binary_ops[i].text)) {

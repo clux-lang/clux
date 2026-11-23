@@ -1222,6 +1222,15 @@ clux_value_t *clux_context_field(clux_context_t *self,
   if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
     return value;
   }
+  /* 指针接收者自动解引用（白皮书 §3.5.1：self: *T 上 self.name 即
+     (*self).name）——deref 产 base 类型 view（引用底色不变），字段
+     访问在该 view 上继续偏移。 */
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_PTR) {
+    value = clux_context_deref(self, value, (location_t *)loc);
+    if (clux_value_is_error(value)) {
+      return value;
+    }
+  }
   clux_type_t *type = clux_value_get_type(value);
   clux_vtable_t *vt = clux_type_get_vtable(type);
   if (vt && vt->field) {
@@ -1939,6 +1948,73 @@ clux_type_t *clux_context_struct_subtype(clux_context_t *self,
     return NULL;
   }
   return found->type;
+}
+/* 类型命名空间成员访问（Type::member，白皮书 §3.5/§3.5.1/§3.6）：
+   - struct：attribute/method 本体存 attribute 表，method 也是 func 值
+     （借用返回值本体，不拷贝——method_call 的静态调用与一等函数取值
+     共用此通道）；attribute 未命中时查 subtype（封装 type value 返回）
+   - enum：variant 命中产出该 enum 类型的值——整数底层按位型截断建值，
+     str 底层取 variant 驻留的字符串常量建值
+   其余类型报语义化 error。qualifier 包装不遮蔽命名空间（先 unwrap）。 */
+clux_value_t *clux_context_get_member(clux_context_t *self,
+                                      clux_type_t *type,
+                                      const char *name,
+                                      const location_t *loc) {
+  if (!type || !name) {
+    return clux_context_create_error_message(
+        self, loc, "namespace access requires a type and a member name");
+  }
+  clux_type_t *unwrapped = clux_type_unwrap(type);
+  if (!unwrapped) {
+    unwrapped = type;
+  }
+  clux_type_kind_t kind = clux_type_get_kind(unwrapped);
+  if (kind == CLUX_TYPE_STRUCT) {
+    const clux_struct_attr_t *attr = clux_struct_find_attr(unwrapped, name);
+    if (attr) {
+      return attr->value;
+    }
+    const clux_struct_subtype_t *subtype =
+        clux_struct_find_subtype(unwrapped, name);
+    if (subtype) {
+      return clux_context_create_type_value(self, subtype->type, NULL, loc);
+    }
+    const char *type_name = clux_type_get_name(unwrapped);
+    return clux_context_create_error_message(self,
+                                             loc,
+                                             "type '%s' has no member '%s'",
+                                             type_name ? type_name
+                                                       : "<unknown>",
+                                             name);
+  }
+  if (kind == CLUX_TYPE_ENUM) {
+    const clux_enum_variant_t *variant =
+        clux_enum_find_variant(unwrapped, name);
+    if (!variant) {
+      const char *type_name = clux_type_get_name(unwrapped);
+      return clux_context_create_error_message(self,
+                                               loc,
+                                               "enum '%s' has no variant '%s'",
+                                               type_name ? type_name
+                                                         : "<unknown>",
+                                               name);
+    }
+    size_t size = clux_type_get_size(unwrapped);
+    ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+    void *raw = ptr_to_raw(data, 0);
+    if (variant->str) {
+      *(const char **)raw = variant->str;
+    } else {
+      (void)memcpy(raw, &variant->value, size);
+    }
+    return clux_context_create_value(self, unwrapped, data, NULL, loc);
+  }
+  const char *kind_name = clux_type_get_name(unwrapped);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support namespace access",
+      kind_name ? kind_name : "<unknown>");
 }
 clux_value_t *
 clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc) {

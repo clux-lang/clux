@@ -435,6 +435,15 @@ clux_type_t *clux_context_struct_subtype(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
                                          const location_t *loc);
+/* 类型命名空间成员访问（Type::member，白皮书 §3.5/§3.5.1/§3.6）：
+   struct 按 attribute 表（含 method 本体 func 值，借用返回）→ subtype
+   （封装 type value 返回）顺序解析；enum 按 variant 表产出该 enum 类型
+   的值（整数底层按位型截断、str 底层取驻留常量）。qualifier 包装不
+   遮蔽命名空间。其余类型或未知成员返回语义化 error。 */
+clux_value_t *clux_context_get_member(clux_context_t *self,
+                                      clux_type_t *type,
+                                      const char *name,
+                                      const location_t *loc);
 /* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
    越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成（无独立下标写原语）。 */

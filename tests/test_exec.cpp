@@ -2013,11 +2013,13 @@ TEST_F(ExecLiteralTest, BinaryRejectsShadowOperands) {
   delete_node(&right_node);
 }
 
-/* 场景: 未识别的二元符号（后缀形态与成员访问，本批未实现）
-   预期: 报 "unsupported binary operator '<原文>'"（含 ".&" ".*" ".!" ".?"
-         "." "::" "++"） */
+/* 场景: 未识别的二元符号（后缀形态），及 "." / "::" 容错分支
+   预期: 未识别符号（".&" ".*" ".!" ".?" "++"）报 "unsupported binary
+         operator '<原文>'"；"." 右侧非 identifier 报 member access
+         requires a member name；"::" 左侧非类型报 expected a type
+         expression（成员访问批次起 "." "::" 不再是 unsupported） */
 TEST_F(ExecLiteralTest, BinaryUnsupportedOperatorError) {
-  const char *ops[] = {".&", ".*", ".!", ".?", ".", "::", "++"};
+  const char *ops[] = {".&", ".*", ".!", ".?", "++"};
   for (const char *op : ops) {
     node_t *node = make_binary_of(a,
                                   make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
@@ -2033,6 +2035,28 @@ TEST_F(ExecLiteralTest, BinaryUnsupportedOperatorError) {
     EXPECT_STREQ(error_message_of(result), expected) << op;
     delete_node(&node);
   }
+  node_t *member_bad =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
+                     make_node(CLUX_NODE_SYMBOL, "."),
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *member_result = exec_expr_binary(ctx, member_bad);
+  ASSERT_EQ(clux_type_get_kind(clux_value_get_type(member_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(member_result),
+               "member access requires a member name");
+  delete_node(&member_bad);
+
+  node_t *scope_bad = make_binary_of(a,
+                                     make_node(CLUX_NODE_LITERAL_NUMERIC, "5"),
+                                     make_node(CLUX_NODE_SYMBOL, "::"),
+                                     make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *scope_result = exec_expr_binary(ctx, scope_bad);
+  ASSERT_EQ(clux_type_get_kind(clux_value_get_type(scope_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(scope_result),
+               "expected a type expression, got 'i32'");
+  delete_node(&scope_bad);
 }
 
 /* 场景: exec_node 按 CLUX_NODE_EXPR_BINARY 分派到 exec_expr_binary
@@ -12873,4 +12897,2215 @@ TEST_F(ExecLiteralTest, TupleSafeCastArrayGetBaseRejectsNonArrayType) {
   clux_type_t *arr_type = clux_context_get_array_type(ctx, i32, 2);
   ASSERT_NE(arr_type, nullptr);
   EXPECT_EQ(clux_array_get_base(arr_type), i32);
+}
+
+/* ---- exec binary "." / "::"：member 访问 / 方法调用糖 / 命名空间访问 ---- */
+
+/* 场景: p.x 经 binary "." 产出字段 view（引用底色）——读取直取、通用
+        assign 写穿共享内存
+   预期: 读取 view 值为构造初值 1；经 view assign 写 9 后，从原始实例
+         再读 x 得 9（view 与实例内存共享，读写不分家） */
+TEST_F(ExecLiteralTest, MemberAccessYieldsSharedFieldView) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "Point", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "y", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  clux_value_t *point = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(point, nullptr);
+  ASSERT_FALSE(clux_value_is_error(point)) << error_message_of(point);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, point, "p", NULL)));
+
+  /* 读取：p.x 经 binary "." 产 i32 view，值等于构造初值。 */
+  node_t *read_dot =
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "p"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  clux_value_t *x_view = exec_expr_binary(ctx, read_dot);
+  ASSERT_NE(x_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(x_view)) << error_message_of(x_view);
+  EXPECT_EQ(read_i32(x_view), 1);
+
+  /* 写穿：view 上 assign 写 9，从原始实例再读回 9——view 与实例共享
+     内存（引用底色），无读写两分。 */
+  clux_value_t *nine = clux_context_create_i32(ctx, 9, NULL, NULL);
+  ASSERT_NE(nine, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, x_view, nine, NULL), x_view);
+  clux_value_t *reread = exec_expr_binary(ctx, read_dot);
+  ASSERT_NE(reread, nullptr);
+  ASSERT_FALSE(clux_value_is_error(reread));
+  EXPECT_EQ(read_i32(reread), 9)
+      << "assign through the view must hit the instance memory";
+  clux_value_t *direct = clux_context_field(ctx, point, "x", NULL);
+  ASSERT_FALSE(clux_value_is_error(direct));
+  EXPECT_EQ(read_i32(direct), 9);
+  delete_node(&read_dot);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: 指针接收者 pp.y 经 "." 自动解引用（白皮书 §3.5.1：self: *T 上
+        self.name 即 (*self).name）
+   预期: PTR 接收者先 deref 产 base view 再字段偏移，读取 2；写穿后
+         原实例同步更新 */
+TEST_F(ExecLiteralTest, MemberAccessOnPointerReceiverAutoDereferences) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "P2", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "P2"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "y", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  clux_value_t *p2 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(p2, nullptr);
+  ASSERT_FALSE(clux_value_is_error(p2)) << error_message_of(p2);
+  clux_value_t *ptr = clux_context_ref(ctx, p2, NULL);
+  ASSERT_NE(ptr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(ptr)) << error_message_of(ptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ptr)), CLUX_TYPE_PTR);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, ptr, "pp", NULL)));
+
+  node_t *dot =
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "pp"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"));
+  clux_value_t *y_view = exec_expr_binary(ctx, dot);
+  ASSERT_NE(y_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(y_view)) << error_message_of(y_view);
+  EXPECT_EQ(read_i32(y_view), 2) << "the pointer receiver must auto-deref";
+
+  clux_value_t *seven = clux_context_create_i32(ctx, 7, NULL, NULL);
+  ASSERT_NE(seven, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, y_view, seven, NULL), y_view);
+  clux_value_t *direct = clux_context_field(ctx, p2, "y", NULL);
+  ASSERT_FALSE(clux_value_is_error(direct));
+  EXPECT_EQ(read_i32(direct), 7)
+      << "writing through the auto-deref view must hit the instance";
+  delete_node(&dot);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: u.get_age() 方法调用糖（白皮书 §3.5.1）——值接收者自动取址
+        前置为首参，方法体 self.age 经指针自动 deref 读回
+   预期: 返回 42（i32）；形参 self: *User 交验取址后的接收者 */
+TEST_F(ExecLiteralTest, MemberCallSugarTakesAddressOfValueReceiver) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_age_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, get_age_decl));
+  node_t *decl = make_struct_decl_of(a, "User", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *user = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(user, nullptr);
+  ASSERT_FALSE(clux_value_is_error(user)) << error_message_of(user);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, user, "u", NULL)));
+
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 42);
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: 指针接收者上的方法调用糖——receiver 已是 *User 时原样前置为
+        首参（不再二次取址）
+   预期: 返回 42；调用前后指针值恒等（原样传递） */
+TEST_F(ExecLiteralTest, MemberCallPassesPointerReceiverAsIs) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User2"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_age_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, get_age_decl));
+  node_t *decl = make_struct_decl_of(a, "User2", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User2"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *user = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(user, nullptr);
+  ASSERT_FALSE(clux_value_is_error(user)) << error_message_of(user);
+  clux_value_t *ptr = clux_context_ref(ctx, user, NULL);
+  ASSERT_NE(ptr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(ptr)) << error_message_of(ptr);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, ptr, "up", NULL)));
+
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "up"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 42);
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: T::member 命名空间访问——struct attribute 借用 / method 静态
+        取值 / enum variant 产值，及各错误分支
+   预期: attr 读回 7 且与 attribute 表中值指针恒等；method 取得 FUNC
+         值；Color::Red 产出 enum Color 值 1；未知成员/variant 与非
+         命名空间类型报语义化 error */
+TEST_F(ExecLiteralTest, NamespaceAccessResolvesAttrMethodAndEnumVariant) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "id"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "tag"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "NS"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *ping_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "ping"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, ping_decl));
+  node_t *decl = make_struct_decl_of(a, "NS", NULL, members);
+  clux_value_t *ns_type_value = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(ns_type_value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(ns_type_value))
+      << error_message_of(ns_type_value);
+  clux_type_t *ns_type = type_described_by(ns_type_value);
+  ASSERT_NE(ns_type, nullptr);
+
+  /* attr：NS::tag 借用返回 attribute 表中的值本体。 */
+  node_t *attr_dot = make_binary_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "NS"),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "tag"));
+  clux_value_t *tag = exec_expr_binary(ctx, attr_dot);
+  ASSERT_NE(tag, nullptr);
+  ASSERT_FALSE(clux_value_is_error(tag)) << error_message_of(tag);
+  EXPECT_EQ(read_i32(tag), 7);
+  EXPECT_EQ(tag, clux_struct_find_attr(ns_type, "tag")->value)
+      << "namespace access must borrow the attribute value itself";
+
+  /* method：NS::ping 静态取值产出 FUNC 值（静态调用通道）。 */
+  node_t *method_dot = make_binary_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "NS"),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "ping"));
+  clux_value_t *method = exec_expr_binary(ctx, method_dot);
+  ASSERT_NE(method, nullptr);
+  ASSERT_FALSE(clux_value_is_error(method)) << error_message_of(method);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(method)), CLUX_TYPE_FUNC);
+
+  /* enum variant：Color::Red 产出 enum Color 值，底层 u8 读回 1。 */
+  node_t *color_decl =
+      make_enum_decl_of(a, "Color", "u8", make_color_variants(a));
+  ASSERT_FALSE(clux_value_is_error(exec_expr_enum_decl(ctx, color_decl)));
+  node_t *variant_dot = make_binary_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Color"),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Red"));
+  clux_value_t *red = exec_expr_binary(ctx, variant_dot);
+  ASSERT_NE(red, nullptr);
+  ASSERT_FALSE(clux_value_is_error(red)) << error_message_of(red);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(red)), CLUX_TYPE_ENUM);
+  EXPECT_EQ(read_u8(red), 1);
+
+  struct {
+    const char *name;
+    node_t *node;
+    const char *message;
+  } cases[] = {
+      {"unknown struct member",
+       [&]() {
+         return make_binary_of(
+             a,
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "NS"),
+             make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "nope"));
+       }(),
+       "type 'NS' has no member 'nope'"},
+      {"unknown enum variant",
+       [&]() {
+         return make_binary_of(
+             a,
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Color"),
+             make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "nope"));
+       }(),
+       "enum 'Color' has no variant 'nope'"},
+      {"non-namespace type",
+       [&]() {
+         return make_binary_of(
+             a,
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+             make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+       }(),
+       "type 'i32' does not support namespace access"},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *value = exec_expr_binary(ctx, c.node);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value), c.message) << c.name;
+  }
+  for (auto &c : cases) {
+    delete_node(&c.node);
+  }
+  delete_node(&variant_dot);
+  delete_node(&method_dot);
+  delete_node(&attr_dot);
+  delete_node(&color_decl);
+  delete_node(&decl);
+}
+
+/* 场景: 方法调用糖的语义化错误——method 名单外名字 / 缺 receiver /
+        缺方法名（手工 AST 容错分支）/ spread 实参
+   预期: 各路径返回精确错误文本 */
+TEST_F(ExecLiteralTest, MemberCallRejectsNonMethodAndMalformedNodes) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_var_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "tag"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7")));
+  node_t *decl = make_struct_decl_of(a, "UM", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "UM"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *um = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(um, nullptr);
+  ASSERT_FALSE(clux_value_is_error(um)) << error_message_of(um);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, um, "um", NULL)));
+
+  /* method 名单外的名字（字段/attr）不走糖，报 has no method。 */
+  node_t *field_call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "um"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age")),
+      0,
+      NULL);
+  clux_value_t *field_result = exec_expr_call(ctx, field_call);
+  ASSERT_NE(field_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(field_result));
+  EXPECT_STREQ(error_message_of(field_result), "type 'UM' has no method 'age'");
+
+  /* 缺 receiver：binary "." 的 LEFT 为 NULL（手工 AST 容错分支）。 */
+  node_t *no_receiver_call =
+      make_call_of(a,
+                   make_binary_of(a,
+                                  NULL,
+                                  make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                                  make_static_node_of(
+                                      a, CLUX_NODE_LITERAL_IDENTIFIER, "age")),
+                   0,
+                   NULL);
+  clux_value_t *no_receiver = exec_expr_call(ctx, no_receiver_call);
+  ASSERT_NE(no_receiver, nullptr);
+  EXPECT_TRUE(clux_value_is_error(no_receiver));
+  EXPECT_STREQ(error_message_of(no_receiver),
+               "member call requires a receiver");
+
+  /* 缺方法名：RIGHT 非 identifier（手工 AST 容错分支）。 */
+  node_t *no_name_call = make_call_of(
+      a,
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "um"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      0,
+      NULL);
+  clux_value_t *no_name = exec_expr_call(ctx, no_name_call);
+  ASSERT_NE(no_name, nullptr);
+  EXPECT_TRUE(clux_value_is_error(no_name));
+  EXPECT_STREQ(error_message_of(no_name), "member call requires a method name");
+
+  delete_node(&no_name_call);
+  delete_node(&no_receiver_call);
+  delete_node(&field_call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: member 访问接收者表达式 error 优先传播；引擎 field 通道对
+        error 接收者恒等返回、对无 field vtable 的类型报语义化 error
+   预期: 外层 "." 直接上抛内层 "unsupported binary operator '.!'"；
+         clux_context_field 对 error 值原样返回；i32 接收者报
+         "type 'i32' does not support field access" */
+TEST_F(ExecLiteralTest, MemberAccessPropagatesReceiverErrorFromNestedExpr) {
+  /* 接收者是嵌套 error 表达式：(5 .! 3).x —— receiver error 先于
+     成员名检查之外的一切短路。 */
+  node_t *bad_receiver = make_binary_of(
+      a,
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, ".!"),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  clux_value_t *propagated = exec_expr_binary(ctx, bad_receiver);
+  ASSERT_NE(propagated, nullptr);
+  EXPECT_TRUE(clux_value_is_error(propagated));
+  EXPECT_STREQ(error_message_of(propagated),
+               "unsupported binary operator '.!'");
+  delete_node(&bad_receiver);
+
+  /* 引擎通道：error 接收者恒等返回（error 优先短路）。 */
+  EXPECT_EQ(clux_context_field(ctx, propagated, "x", NULL), propagated);
+
+  /* 引擎通道：i32 无 field vtable，落 fallback 报语义化 error。 */
+  clux_value_t *five = clux_context_create_i32(ctx, 5, "five", NULL);
+  ASSERT_NE(five, nullptr);
+  clux_value_t *no_field = clux_context_field(ctx, five, "x", NULL);
+  ASSERT_NE(no_field, nullptr);
+  EXPECT_TRUE(clux_value_is_error(no_field));
+  EXPECT_STREQ(error_message_of(no_field),
+               "type 'i32' does not support field access");
+}
+
+/* 场景: 指针接收者目标块尺寸不足（野指针形态）——*i32 指针经显式
+        as 转 *Big 后字段访问，deref 交验 base size 失败
+   预期: PTR 接收者 deref 失败 error 传播，报
+         "cannot dereference a value of type '*Big'" */
+TEST_F(ExecLiteralTest, MemberAccessDerefFailureOnOversizedPointerTarget) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "Big", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  clux_value_t *slot = clux_context_create_i32(ctx, 3, NULL, NULL);
+  ASSERT_NE(slot, nullptr);
+  clux_value_t *slot_ptr = clux_context_ref(ctx, slot, NULL);
+  ASSERT_NE(slot_ptr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(
+      clux_context_declare_value(ctx, slot_ptr, "slotp", NULL)));
+
+  /* (slotp as *Big).a：deref 时目标块 4 字节 < Big 8 字节，失败。 */
+  node_t *dot = make_binary_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "slotp"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "as"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"))),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"));
+  clux_value_t *result = exec_expr_binary(ctx, dot);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result),
+               "cannot dereference a value of type '*Big'");
+  delete_node(&dot);
+  delete_node(&decl);
+}
+
+/* 场景: "::" 命名空间访问缺成员名容错分支——RIGHT 非 identifier 与
+        RIGHT 缺失（手工 AST）
+   预期: 两者均报 "namespace access requires a member name" */
+TEST_F(ExecLiteralTest, NamespaceAccessRejectsMissingMemberName) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "Nsd", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *bad_name = make_binary_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Nsd"),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3"));
+  clux_value_t *name_result = exec_expr_binary(ctx, bad_name);
+  ASSERT_NE(name_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(name_result));
+  EXPECT_STREQ(error_message_of(name_result),
+               "namespace access requires a member name");
+  delete_node(&bad_name);
+
+  node_t *absent_right = make_binary_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Nsd"),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "::"),
+      NULL);
+  clux_value_t *absent_result = exec_expr_binary(ctx, absent_right);
+  ASSERT_NE(absent_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(absent_result));
+  EXPECT_STREQ(error_message_of(absent_result),
+               "namespace access requires a member name");
+  delete_node(&absent_right);
+  delete_node(&decl);
+}
+
+/* 场景: a.m(x, y) 带额外实参的方法调用糖——receiver 只前置，实参按
+        声明序追加，方法体跨参数运算
+   预期: sum(self: *Calc, a: i32, b: i32) 体 return self.base + a + b，
+         c.sum(3, 4) 返回 17 */
+TEST_F(ExecLiteralTest, MemberCallWithExtraArgumentsForwardsArguments) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "base"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Calc"))));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_binary_of(
+              a,
+              make_binary_of(
+                  a,
+                  make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+                  make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                  make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "base")),
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "+"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a")),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "+"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "b")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *sum_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "sum"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, sum_decl));
+  node_t *decl = make_struct_decl_of(a, "Calc", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Calc"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "base", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "10")));
+  clux_value_t *calc = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(calc, nullptr);
+  ASSERT_FALSE(clux_value_is_error(calc)) << error_message_of(calc);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, calc, "c", NULL)));
+
+  node_t *arg_nodes[2] = {
+      make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "4")};
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "c"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "sum")),
+      2,
+      arg_nodes);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 17);
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: 方法调用糖接收者表达式 error 优先传播（方法名单查找之前）
+   预期: (5 .! 3).anything() 直接上抛内层错误文本 */
+TEST_F(ExecLiteralTest, MemberCallPropagatesReceiverErrorBeforeLookup) {
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_binary_of(
+              a,
+              make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5"),
+              make_static_node_of(a, CLUX_NODE_SYMBOL, ".!"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "anything")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result), "unsupported binary operator '.!'");
+  delete_node(&call);
+}
+
+/* 场景: 方法调用实参 error 优先传播——实参逐个求值先于 invoke 交验
+   预期: e.m(<error 表达式>) 上抛实参自身的错误，而非签名/数量错误 */
+TEST_F(ExecLiteralTest, MemberCallPropagatesArgumentErrorBeforeInvoke) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Emb"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *m_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, m_decl));
+  node_t *decl = make_struct_decl_of(a, "Emb", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Emb"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *emb = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(emb, nullptr);
+  ASSERT_FALSE(clux_value_is_error(emb)) << error_message_of(emb);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, emb, "e", NULL)));
+
+  node_t *arg_nodes[1] = {
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, ".!"),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3"))};
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "e"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m")),
+      1,
+      arg_nodes);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result), "unsupported binary operator '.!'")
+      << "the argument error must win over invoke's arity check";
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: 指针接收者方法调用的 deref 失败传播——*U3 经 as 转 *Big2 后
+        调方法，deref（方法名单查找通道）失败，error 原样上抛
+   预期: 报 "cannot dereference a value of type '*Big2'" */
+TEST_F(ExecLiteralTest, MemberCallDerefFailureOnOversizedPointerReceiver) {
+  node_t *big_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      big_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      big_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *big_decl = make_struct_decl_of(a, "Big2", NULL, big_members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, big_decl)));
+
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "U3"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_age_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, get_age_decl));
+  node_t *decl = make_struct_decl_of(a, "U3", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "U3"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *u3 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(u3, nullptr);
+  ASSERT_FALSE(clux_value_is_error(u3)) << error_message_of(u3);
+  clux_value_t *u3_ptr = clux_context_ref(ctx, u3, NULL);
+  ASSERT_NE(u3_ptr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(
+      clux_context_declare_value(ctx, u3_ptr, "u3p", NULL)));
+
+  /* (u3p as *Big2).get_age()：deref 通道失败先于方法名单查找。 */
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_binary_of(
+              a,
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "u3p"),
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "as"),
+              make_binary_of(a,
+                             NULL,
+                             make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+                             make_static_node_of(
+                                 a, CLUX_NODE_LITERAL_IDENTIFIER, "Big2"))),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result),
+               "cannot dereference a value of type '*Big2'");
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+  delete_node(&big_decl);
+}
+
+/* 场景: invoke 签名交验接管方法糖——方法声明形参类型/数量与前置
+        receiver 不匹配时由 invoke 拒绝
+   预期: self 形参声明 *i32（非接收者类型）报 "function argument 0
+         requires type '*i32', got '*Sig'"；多传实参报
+         "function expects 1 argument, got 2" */
+TEST_F(ExecLiteralTest, MemberCallInvokeRejectsSignatureMismatch) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  /* m(self: *i32) —— 声明形参类型与前置 receiver（*Sig）不匹配。 */
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *m_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, m_decl));
+  /* n(self: *Sig) —— 正确签名，用于数量不匹配。 */
+  node_t *n_params = create_func_params_node(a);
+  func_params_node_add_param(
+      n_params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Sig"))));
+  node_t *n_body = create_stmt_block_node(a);
+  node_t *n_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      n_ret, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_block_node_add_stmt(n_body, n_ret);
+  node_t *n_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      n_params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      n_body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, n_decl));
+  node_t *decl = make_struct_decl_of(a, "Sig", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Sig"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *sig = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(sig, nullptr);
+  ASSERT_FALSE(clux_value_is_error(sig)) << error_message_of(sig);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, sig, "s", NULL)));
+
+  node_t *bad_call = make_call_of(
+      a,
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "s"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m")),
+      0,
+      NULL);
+  clux_value_t *bad = exec_expr_call(ctx, bad_call);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bad));
+  EXPECT_STREQ(error_message_of(bad), "cannot safely cast '*Sig' to '*i32'");
+  delete_node(&bad_call);
+
+  node_t *extra_args[1] = {
+      make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5")};
+  node_t *extra_call = make_call_of(
+      a,
+      make_binary_of(a,
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "s"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+                     make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "n")),
+      1,
+      extra_args);
+  clux_value_t *extra = exec_expr_call(ctx, extra_call);
+  ASSERT_NE(extra, nullptr);
+  EXPECT_TRUE(clux_value_is_error(extra));
+  EXPECT_STREQ(error_message_of(extra), "function expects 1 argument, got 2");
+  delete_node(&extra_call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: qualifier 包装接收者（const 限定实例视图）——member_call 的
+        C++ const 原则与 "." 的 qualifier vtable field 委托
+   预期: const 接收者对 *U4 self 形参被丢 const 方向拒绝（safe_cast
+         语义化错误而非 invoke 判等）；cu4.age 经 field 槽位委托返回
+         视图值 42 */
+TEST_F(ExecLiteralTest, MemberCallOnConstQualifiedReceiverUnwrapsQualifier) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "U4"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_age_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, get_age_decl));
+  node_t *decl = make_struct_decl_of(a, "U4", NULL, members);
+  clux_value_t *u4_type_value = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(u4_type_value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(u4_type_value))
+      << error_message_of(u4_type_value);
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "U4"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *u4 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(u4, nullptr);
+  ASSERT_FALSE(clux_value_is_error(u4)) << error_message_of(u4);
+
+  /* const 限定视图：共享实例内存（同 data handle），具名注册 cu4。 */
+  clux_type_t *qualified_type =
+      clux_type_get_qualified_type(clux_value_get_type(u4), CLUX_TYPE_CONST);
+  ASSERT_NE(qualified_type, nullptr);
+  clux_value_t *const_view = clux_context_create_value(
+      ctx, qualified_type, clux_value_get_data(u4), "cu4", NULL);
+  ASSERT_NE(const_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_view)) << error_message_of(const_view);
+  ASSERT_EQ(clux_type_get_kind(clux_value_get_type(const_view)),
+            CLUX_TYPE_CONST);
+
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "cu4"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  /* C++ const 原则（白皮书 §3.5.1）：unwrap 查名单成功后，receiver
+     (*const U4) 对 self 形参 (*U4) 走 safe_cast 吸收——丢 const 方向被
+     指针协变拒绝（const 实例上调用非 const 方法非法）。 */
+  ASSERT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result),
+               "cannot safely cast '*const U4' to '*U4'")
+      << "unwrap must not mask the method list; the failure is the "
+         "const-direction rejection";
+
+  node_t *dot = make_binary_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "cu4"),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"));
+  clux_value_t *age = exec_expr_binary(ctx, dot);
+  ASSERT_NE(age, nullptr);
+  /* qualifier vtable field 槽位委托：const U4 上的 "." 成员访问经
+     qualified_view 走标准 field 通道——视图语义（内存共享），返回
+     i32 42。 */
+  ASSERT_NE(age, nullptr);
+  ASSERT_FALSE(clux_value_is_error(age)) << error_message_of(age);
+  EXPECT_EQ(read_i32(age), 42);
+  delete_node(&dot);
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: member_call 实参表含 spread/rest 形态（EXPR_REST 节点）——
+        方法名单查找通过后、实参求值前的拦截分支
+   预期: 报 "spread argument is not supported yet"（暂不支持语义的
+         显式拒绝，且该检查先于实参求值与 invoke 交验） */
+TEST_F(ExecLiteralTest, MemberCallRejectsSpreadRestArgument) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Rst"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_v_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_v"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, get_v_decl));
+  node_t *decl = make_struct_decl_of(a, "Rst", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Rst"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7")));
+  clux_value_t *rst = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(rst, nullptr);
+  ASSERT_FALSE(clux_value_is_error(rst)) << error_message_of(rst);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, rst, "r", NULL)));
+
+  /* r.get_v(...args)：实参位是 EXPR_REST 节点，须在实参求值前被拦截。 */
+  node_t *rest_arg = make_static_node_of(a, CLUX_NODE_EXPR_REST, "...");
+  node_t *arg_nodes[1] = {rest_arg};
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "r"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_v")),
+      1,
+      arg_nodes);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result),
+               "spread argument is not supported yet");
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: 命名空间访问的三条引擎级分支——struct 命中 subtype 表（封装
+        type value 返回）、type/name 缺失守卫
+   预期: NS::Inner 产出描述 i32 的 type value（kind 判等验证封装本体）；
+         type 为 NULL 或 name 为 NULL 均报
+         "namespace access requires a type and a member name" */
+TEST_F(ExecLiteralTest, NamespaceAccessResolvesSubtypeAndRejectsNullInputs) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  ASSERT_NE(i32_type, nullptr);
+  clux_struct_field_t one[1] = {{"n", i32_type}};
+  clux_type_t *ns_type = clux_context_begin_struct_type(ctx, "NS", one, 1);
+  ASSERT_NE(ns_type, nullptr);
+  clux_struct_subtype_t subtypes[1] = {{"Inner", i32_type}};
+  ASSERT_TRUE(clux_context_install_struct_tables(
+      ctx, ns_type, NULL, 0, NULL, 0, subtypes, 1));
+
+  clux_value_t *inner = clux_context_get_member(ctx, ns_type, "Inner", NULL);
+  ASSERT_NE(inner, nullptr);
+  ASSERT_FALSE(clux_value_is_error(inner)) << error_message_of(inner);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(inner)), CLUX_TYPE_TYPE)
+      << "a struct subtype resolved through the namespace must come back as a "
+         "type value";
+  clux_type_t *inner_described = type_described_by(inner);
+  ASSERT_NE(inner_described, nullptr);
+  EXPECT_EQ(inner_described, i32_type)
+      << "the described type must be the installed subtype body";
+
+  clux_value_t *no_name = clux_context_get_member(ctx, ns_type, NULL, NULL);
+  ASSERT_NE(no_name, nullptr);
+  ASSERT_TRUE(clux_value_is_error(no_name));
+  EXPECT_STREQ(error_message_of(no_name),
+               "namespace access requires a type and a member name");
+
+  clux_value_t *no_type = clux_context_get_member(ctx, NULL, "Inner", NULL);
+  ASSERT_NE(no_type, nullptr);
+  ASSERT_TRUE(clux_value_is_error(no_type));
+  EXPECT_STREQ(error_message_of(no_type),
+               "namespace access requires a type and a member name");
+}
+
+/* 场景: str 底层 enum 的命名空间访问——variant 命中产出 str 驻留常量
+        构造的 enum 值（get_member 的 str 分支）
+   预期: SG::Red 产出 kind ENUM 的值，raw 载荷是指向驻留常量 "red" 的
+         char*（strcmp 内容判等，不比较指针身份） */
+TEST_F(ExecLiteralTest, NamespaceAccessStrEnumVariantProducesStrBackedValue) {
+  node_t *decl =
+      make_enum_decl_of(a, "SG", "str", make_str_variants_red_green(a));
+  clux_value_t *sg_type_value = exec_expr_enum_decl(ctx, decl);
+  ASSERT_NE(sg_type_value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(sg_type_value))
+      << error_message_of(sg_type_value);
+  clux_type_t *sg_type = type_described_by(sg_type_value);
+  ASSERT_NE(sg_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(sg_type), CLUX_TYPE_ENUM);
+
+  clux_value_t *red = clux_context_get_member(ctx, sg_type, "Red", NULL);
+  ASSERT_NE(red, nullptr);
+  ASSERT_FALSE(clux_value_is_error(red)) << error_message_of(red);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(red)), CLUX_TYPE_ENUM)
+      << "a variant resolved through the namespace must produce a value of "
+         "the enum type itself";
+  const char *payload = *(const char **)clux_value_get_raw(red, 0);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_STREQ(payload, "red")
+      << "the str-backed variant value must carry the interned constant";
+
+  clux_value_t *missing = clux_context_get_member(ctx, sg_type, "Blue", NULL);
+  ASSERT_NE(missing, nullptr);
+  ASSERT_TRUE(clux_value_is_error(missing));
+  EXPECT_STREQ(error_message_of(missing), "enum 'SG' has no variant 'Blue'");
+  delete_node(&decl);
+}
+
+/* 场景: 字段访问引擎级入参守卫——value 与 field 缺一即拒绝
+   预期: 两条均报 "field access requires a value and a field name" */
+TEST_F(ExecLiteralTest, FieldAccessRejectsNullValueAndNullFieldName) {
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+
+  clux_value_t *no_field = clux_context_field(ctx, five, NULL, NULL);
+  ASSERT_NE(no_field, nullptr);
+  ASSERT_TRUE(clux_value_is_error(no_field));
+  EXPECT_STREQ(error_message_of(no_field),
+               "field access requires a value and a field name");
+
+  clux_value_t *no_value = clux_context_field(ctx, NULL, "x", NULL);
+  ASSERT_NE(no_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(no_value));
+  EXPECT_STREQ(error_message_of(no_value),
+               "field access requires a value and a field name");
+}
+
+/* 场景: 解引用引擎级入参守卫——NULL 指针值直接拒绝
+   预期: 报 "deref requires a pointer" */
+TEST_F(ExecLiteralTest, DerefRejectsNullPointerValue) {
+  clux_value_t *result = clux_context_deref(ctx, NULL, NULL);
+  ASSERT_NE(result, nullptr);
+  ASSERT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result), "deref requires a pointer");
+}
+
+/* 场景: 指针加 const 协变（白皮书 §3.5.1）——任意 *T 支持 safe_cast 成
+        *const T（加 const 方向放行）；反向丢 const 被拒绝
+   预期: 正向吸收成功且结果类型即 *const i32（内存共享）；反向对
+         *const i32 值 safe_cast 回 *i32 报语义化错误 */
+TEST_F(ExecLiteralTest, PtrSafeCastConstCovarianceOneDirection) {
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  clux_value_t *ptr = clux_context_ref(ctx, five, NULL);
+  ASSERT_NE(ptr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(ptr)) << error_message_of(ptr);
+
+  node_t *ptr_const_node = make_binary_of(
+      a,
+      NULL,
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+      make_binary_of(
+          a,
+          NULL,
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "const"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  clux_value_t *tv = exec_expr_binary(ctx, ptr_const_node);
+  ASSERT_NE(tv, nullptr);
+  ASSERT_FALSE(clux_value_is_error(tv)) << error_message_of(tv);
+  clux_type_t *ptr_const_i32 = type_described_by(tv);
+  ASSERT_NE(ptr_const_i32, nullptr);
+
+  /* *i32 → *const i32：加 const 协变放行。 */
+  clux_value_t *absorbed =
+      clux_context_safe_cast(ctx, ptr, ptr_const_i32, NULL);
+  ASSERT_NE(absorbed, nullptr);
+  ASSERT_FALSE(clux_value_is_error(absorbed)) << error_message_of(absorbed);
+  EXPECT_EQ(clux_value_get_type(absorbed), ptr_const_i32);
+  clux_value_t *pointee = clux_context_deref(ctx, absorbed, NULL);
+  ASSERT_NE(pointee, nullptr);
+  ASSERT_FALSE(clux_value_is_error(pointee)) << error_message_of(pointee);
+  EXPECT_EQ(read_i32(pointee), 5);
+
+  /* *const i32 → *i32：丢 const 方向拒绝。 */
+  clux_value_t *reverted =
+      clux_context_safe_cast(ctx, absorbed, clux_value_get_type(ptr), NULL);
+  ASSERT_NE(reverted, nullptr);
+  ASSERT_TRUE(clux_value_is_error(reverted));
+  EXPECT_STREQ(error_message_of(reverted),
+               "cannot safely cast '*const i32' to '*i32'");
+  delete_node(&ptr_const_node);
+}
+
+/* 场景: member_call 的 C++ const 原则——self 形参声明 *const T 时，
+        const 与非 const 接收者均合法
+   预期: 非常量实例经加 const 协变吸收（帧内 self 为 *const T）、
+         const 视图恒等直过，两条调用路径均取回字段值 42 */
+TEST_F(ExecLiteralTest, MemberCallConstSelfParamAcceptsBothReceivers) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_binary_of(a,
+                             NULL,
+                             make_static_node_of(a, CLUX_NODE_SYMBOL, "const"),
+                             make_static_node_of(
+                                 a, CLUX_NODE_LITERAL_IDENTIFIER, "U5")))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_age_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, get_age_decl));
+  node_t *decl = make_struct_decl_of(a, "U5", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "U5"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *u5 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(u5, nullptr);
+  ASSERT_FALSE(clux_value_is_error(u5)) << error_message_of(u5);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, u5, "u5", NULL)));
+
+  /* 非常量接收者：ref 产 *U5，经加 const 协变吸收到 *const U5。 */
+  node_t *mut_call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "u5"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age")),
+      0,
+      NULL);
+  clux_value_t *mut_result = exec_expr_call(ctx, mut_call);
+  ASSERT_NE(mut_result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(mut_result)) << error_message_of(mut_result);
+  EXPECT_EQ(read_i32(mut_result), 42);
+  delete_node(&mut_call);
+
+  /* const 视图接收者：ref 产 *const U5，与形参恒等直过。 */
+  clux_type_t *qualified_type =
+      clux_type_get_qualified_type(clux_value_get_type(u5), CLUX_TYPE_CONST);
+  ASSERT_NE(qualified_type, nullptr);
+  clux_value_t *const_view = clux_context_create_value(
+      ctx, qualified_type, clux_value_get_data(u5), "cu5", NULL);
+  ASSERT_NE(const_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_view)) << error_message_of(const_view);
+  node_t *const_call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "cu5"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_age")),
+      0,
+      NULL);
+  clux_value_t *const_result = exec_expr_call(ctx, const_call);
+  ASSERT_NE(const_result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_result))
+      << error_message_of(const_result);
+  EXPECT_EQ(read_i32(const_result), 42);
+  delete_node(&const_call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: qualifier vtable field 槽位委托——volatile 限定视图上的 "." 成
+        员访问经 qualified_view 转发 clux_context_field（视图语义，
+        内存共享借用）
+   预期: vw1.v 读回 42；经源实例字段视图改写为 99 后重读同步见 99
+         （view 与实例共享内存），volatile 限定不遮蔽 field 通道 */
+TEST_F(ExecLiteralTest, QualifierFieldDelegateOnVolatileViewSharesMemory) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "W1", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "W1"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *w1 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(w1, nullptr);
+  ASSERT_FALSE(clux_value_is_error(w1)) << error_message_of(w1);
+
+  clux_type_t *volatile_type =
+      clux_type_get_qualified_type(clux_value_get_type(w1), CLUX_TYPE_VOLATILE);
+  ASSERT_NE(volatile_type, nullptr);
+  clux_value_t *volatile_view = clux_context_create_value(
+      ctx, volatile_type, clux_value_get_data(w1), "vw1", NULL);
+  ASSERT_NE(volatile_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(volatile_view))
+      << error_message_of(volatile_view);
+
+  node_t *dot = make_binary_of(
+      a,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "vw1"),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"));
+  clux_value_t *v = exec_expr_binary(ctx, dot);
+  ASSERT_NE(v, nullptr);
+  ASSERT_FALSE(clux_value_is_error(v)) << error_message_of(v);
+  EXPECT_EQ(read_i32(v), 42);
+
+  /* 视图内存共享：经源实例字段通道改写后，volatile 视图重读见新值。 */
+  clux_value_t *field = clux_context_field(ctx, w1, "v", NULL);
+  ASSERT_NE(field, nullptr);
+  ASSERT_FALSE(clux_value_is_error(field)) << error_message_of(field);
+  clux_value_t *ninety_nine = clux_context_create_i32(ctx, 99, NULL, NULL);
+  ASSERT_NE(ninety_nine, nullptr);
+  clux_value_t *assigned = clux_context_assign(ctx, field, ninety_nine, NULL);
+  ASSERT_NE(assigned, nullptr);
+  ASSERT_FALSE(clux_value_is_error(assigned)) << error_message_of(assigned);
+  clux_value_t *v_again = exec_expr_binary(ctx, dot);
+  ASSERT_NE(v_again, nullptr);
+  ASSERT_FALSE(clux_value_is_error(v_again)) << error_message_of(v_again);
+  EXPECT_EQ(read_i32(v_again), 99);
+  delete_node(&dot);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: const/volatile 限定视图的写保护语义——assign 通道上 const 静态
+        拒写、volatile 提示性放行（限定视图共用源 data handle）
+   预期: const i32 视图赋值报 "cannot assign to a value of type
+         'const i32'" 且源值保持 7；volatile i32 视图赋值成功且写穿
+         共享内存（源值变 9） */
+TEST_F(ExecLiteralTest, ConstViewRejectsAssignWhileVolatileViewWritesThrough) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *seven = clux_context_create_i32(ctx, 7, NULL, NULL);
+  ASSERT_NE(seven, nullptr);
+  clux_value_t *nine = clux_context_create_i32(ctx, 9, NULL, NULL);
+  ASSERT_NE(nine, nullptr);
+
+  clux_type_t *const_type =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  ASSERT_NE(const_type, nullptr);
+  clux_value_t *const_view = clux_context_create_value(
+      ctx, const_type, clux_value_get_data(seven), NULL, NULL);
+  ASSERT_NE(const_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_view)) << error_message_of(const_view);
+  clux_value_t *rejected = clux_context_assign(ctx, const_view, nine, NULL);
+  ASSERT_NE(rejected, nullptr);
+  ASSERT_TRUE(clux_value_is_error(rejected));
+  EXPECT_STREQ(error_message_of(rejected),
+               "cannot assign to a value of type 'const i32'");
+  EXPECT_EQ(read_i32(seven), 7) << "const rejection must not write memory";
+
+  clux_type_t *volatile_type =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE);
+  ASSERT_NE(volatile_type, nullptr);
+  clux_value_t *volatile_view = clux_context_create_value(
+      ctx, volatile_type, clux_value_get_data(seven), NULL, NULL);
+  ASSERT_NE(volatile_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(volatile_view))
+      << error_message_of(volatile_view);
+  clux_value_t *written = clux_context_assign(ctx, volatile_view, nine, NULL);
+  ASSERT_NE(written, nullptr);
+  ASSERT_FALSE(clux_value_is_error(written)) << error_message_of(written);
+  EXPECT_EQ(read_i32(seven), 9)
+      << "volatile view shares memory with the source value";
+}
+
+/* 场景: ptr_type_extends 方向矩阵（引擎级 clux_type_extends 直证）——
+        恒等 / 加 const / 丢 const / 无关底层 / 嵌套指针 / volatile 交互
+   预期: *T extends *const T 放行；*const T extends *T 拒绝；恒等放行；
+         底层无关拒绝；**T extends *const *T 放行且反向拒绝；volatile
+         提示性限定不参与方向控制（双向放行），叠const 后 const 主导
+         方向（*const volatile T extends *T 拒绝） */
+TEST_F(ExecLiteralTest, PtrConstCovarianceExtendsDirectionMatrix) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_type_t *volatile_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE);
+  clux_type_t *const_volatile_i32 =
+      clux_type_get_qualified_type(const_i32, CLUX_TYPE_VOLATILE);
+  ASSERT_NE(const_i32, nullptr);
+  ASSERT_NE(volatile_i32, nullptr);
+  ASSERT_NE(const_volatile_i32, nullptr);
+
+  clux_type_t *p_i32 = clux_context_get_ptr_type(ctx, i32_type);
+  clux_type_t *p_const_i32 = clux_context_get_ptr_type(ctx, const_i32);
+  clux_type_t *p_volatile_i32 = clux_context_get_ptr_type(ctx, volatile_i32);
+  clux_type_t *p_const_volatile_i32 =
+      clux_context_get_ptr_type(ctx, const_volatile_i32);
+  clux_type_t *p_const_str = clux_context_get_ptr_type(
+      ctx, clux_type_get_qualified_type(str_type, CLUX_TYPE_CONST));
+  ASSERT_NE(p_i32, nullptr);
+  ASSERT_NE(p_const_i32, nullptr);
+  ASSERT_NE(p_volatile_i32, nullptr);
+  ASSERT_NE(p_const_volatile_i32, nullptr);
+  ASSERT_NE(p_const_str, nullptr);
+
+  EXPECT_TRUE(clux_type_extends(p_i32, p_const_i32))
+      << "adding const must be allowed";
+  EXPECT_FALSE(clux_type_extends(p_const_i32, p_i32))
+      << "losing const must be rejected";
+  EXPECT_TRUE(clux_type_extends(p_const_i32, p_const_i32))
+      << "identity must extend itself";
+  EXPECT_FALSE(clux_type_extends(p_i32, p_const_str))
+      << "covariance must not bridge unrelated pointee types";
+
+  /* volatile 提示性限定不参与方向控制。 */
+  EXPECT_TRUE(clux_type_extends(p_volatile_i32, p_i32));
+  EXPECT_TRUE(clux_type_extends(p_i32, p_volatile_i32));
+  EXPECT_FALSE(clux_type_extends(p_const_volatile_i32, p_i32))
+      << "const inside the pointee must dominate direction control";
+  EXPECT_TRUE(clux_type_extends(p_i32, p_const_volatile_i32));
+
+  /* 嵌套指针递归方向控制：**T extends *const *T 放行，反向拒绝。 */
+  clux_type_t *pp_i32 = clux_context_get_ptr_type(ctx, p_i32);
+  clux_type_t *p_const_p_i32 = clux_context_get_ptr_type(
+      ctx, clux_type_get_qualified_type(p_i32, CLUX_TYPE_CONST));
+  ASSERT_NE(pp_i32, nullptr);
+  ASSERT_NE(p_const_p_i32, nullptr);
+  EXPECT_TRUE(clux_type_extends(pp_i32, p_const_p_i32));
+  EXPECT_FALSE(clux_type_extends(p_const_p_i32, pp_i32));
+}
+
+/* 场景: 指针 const 协变值级反面——底层无关的 *i32 值 safe_cast 到
+        *const str 类型
+   预期: extends 拒绝；报 "cannot safely cast '*i32' to '*const str'"
+         （safe_cast 错误消息格式为 cannot safely cast ... to ...） */
+TEST_F(ExecLiteralTest, PtrSafeCastUnrelatedPointeeRejected) {
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  clux_value_t *ptr = clux_context_ref(ctx, five, NULL);
+  ASSERT_NE(ptr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(ptr)) << error_message_of(ptr);
+
+  node_t *ptr_const_str_node = make_binary_of(
+      a,
+      NULL,
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+      make_binary_of(
+          a,
+          NULL,
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "const"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  clux_value_t *tv = exec_expr_binary(ctx, ptr_const_str_node);
+  ASSERT_NE(tv, nullptr);
+  ASSERT_FALSE(clux_value_is_error(tv)) << error_message_of(tv);
+  clux_type_t *ptr_const_str = type_described_by(tv);
+  ASSERT_NE(ptr_const_str, nullptr);
+
+  clux_value_t *refused = clux_context_safe_cast(ctx, ptr, ptr_const_str, NULL);
+  ASSERT_NE(refused, nullptr);
+  ASSERT_TRUE(clux_value_is_error(refused));
+  EXPECT_STREQ(error_message_of(refused),
+               "cannot safely cast '*i32' to '*const str'");
+  delete_node(&ptr_const_str_node);
+}
+
+/* 场景: 指针 const 协变与 struct 指针向下兼容的组合方向——*D extends
+        *B 不受影响、*D extends *const B 组合放行、*const D extends *B
+        因丢 const 拒绝
+   预期: 类型级三方向精确判别；值级 *D7 引用 safe_cast 到 *const B7
+         吸收成功且结果类型即 *const B7；*const D7 视图 safe_cast 到
+         *B7 报 "cannot safely cast '*const D7' to '*B7'" */
+TEST_F(ExecLiteralTest, PtrConstCovarianceComposesWithStructDowncast) {
+  node_t *base_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      base_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *base_decl = make_struct_decl_of(a, "B7", NULL, base_members);
+  clux_value_t *b7_type_value = exec_expr_struct_decl(ctx, base_decl);
+  ASSERT_NE(b7_type_value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(b7_type_value))
+      << error_message_of(b7_type_value);
+  clux_type_t *b7 = type_described_by(b7_type_value);
+  ASSERT_NE(b7, nullptr);
+
+  node_t *derived_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      derived_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      derived_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "w"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *derived_decl = make_struct_decl_of(a, "D7", NULL, derived_members);
+  clux_value_t *d7_type_value = exec_expr_struct_decl(ctx, derived_decl);
+  ASSERT_NE(d7_type_value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(d7_type_value))
+      << error_message_of(d7_type_value);
+  clux_type_t *d7 = type_described_by(d7_type_value);
+  ASSERT_NE(d7, nullptr);
+
+  clux_type_t *p_d7 = clux_context_get_ptr_type(ctx, d7);
+  clux_type_t *p_b7 = clux_context_get_ptr_type(ctx, b7);
+  clux_type_t *p_const_b7 = clux_context_get_ptr_type(
+      ctx, clux_type_get_qualified_type(b7, CLUX_TYPE_CONST));
+  clux_type_t *p_const_d7 = clux_context_get_ptr_type(
+      ctx, clux_type_get_qualified_type(d7, CLUX_TYPE_CONST));
+  ASSERT_NE(p_d7, nullptr);
+  ASSERT_NE(p_b7, nullptr);
+  ASSERT_NE(p_const_b7, nullptr);
+  ASSERT_NE(p_const_d7, nullptr);
+
+  EXPECT_TRUE(clux_type_extends(p_d7, p_b7))
+      << "struct pointer downcast must remain allowed";
+  EXPECT_TRUE(clux_type_extends(p_d7, p_const_b7))
+      << "downcast composed with const addition must stay allowed";
+  EXPECT_FALSE(clux_type_extends(p_const_d7, p_b7))
+      << "losing const must be rejected even when downcasting";
+
+  /* 值级正向：*D7 引用向 *const B7 组合吸收。 */
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "D7"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7")));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "w", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "8")));
+  clux_value_t *d7_value = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(d7_value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(d7_value)) << error_message_of(d7_value);
+  clux_value_t *p_ref = clux_context_ref(ctx, d7_value, NULL);
+  ASSERT_NE(p_ref, nullptr);
+  ASSERT_FALSE(clux_value_is_error(p_ref)) << error_message_of(p_ref);
+  clux_value_t *absorbed = clux_context_safe_cast(ctx, p_ref, p_const_b7, NULL);
+  ASSERT_NE(absorbed, nullptr);
+  ASSERT_FALSE(clux_value_is_error(absorbed)) << error_message_of(absorbed);
+  EXPECT_EQ(clux_value_get_type(absorbed), p_const_b7)
+      << "absorption must produce the exact *const B7 type";
+
+  /* 值级反面：*const D7 视图向下兼容被丢 const 方向拒绝。 */
+  clux_value_t *const_ref = clux_context_create_value(
+      ctx, p_const_d7, clux_value_get_data(p_ref), NULL, NULL);
+  ASSERT_NE(const_ref, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_ref)) << error_message_of(const_ref);
+  clux_value_t *refused = clux_context_safe_cast(ctx, const_ref, p_b7, NULL);
+  ASSERT_NE(refused, nullptr);
+  ASSERT_TRUE(clux_value_is_error(refused));
+  EXPECT_STREQ(error_message_of(refused),
+               "cannot safely cast '*const D7' to '*B7'");
+  delete_node(&ctor);
+  delete_node(&derived_decl);
+  delete_node(&base_decl);
+}
+
+/* 场景: member_call 的 safe_cast 吸收副产品——*D 接收者对 *B self 形参
+        经 struct 指针向下兼容放行（字段前缀兼容，与指针向下兼容任务
+        自洽）
+   预期: D8 实例的 get() 调用成功：receiver ref 产 *D8，safe_cast 吸收
+         到 *B8 后帧内 self.v 读回 42 */
+TEST_F(ExecLiteralTest, MemberCallDerivedReceiverAbsorbsToBaseSelfParam) {
+  node_t *base_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      base_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *base_decl = make_struct_decl_of(a, "B8", NULL, base_members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, base_decl)));
+
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "B8"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  node_t *derived_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      derived_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      derived_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "w"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(derived_members,
+                                 make_stmt_func_of(a, get_decl));
+  node_t *derived_decl = make_struct_decl_of(a, "D8", NULL, derived_members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, derived_decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "D8"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "w", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "43")));
+  clux_value_t *d8 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(d8, nullptr);
+  ASSERT_FALSE(clux_value_is_error(d8)) << error_message_of(d8);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, d8, "d8", NULL)));
+
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "d8"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 42)
+      << "receiver absorbed to *B8 self must read back d8.v";
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&derived_decl);
+  delete_node(&base_decl);
+}
+
+/* 场景: volatile 限定视图接收者的 member_call——ref 产 *volatile T，
+        对 *T self 形参经协变吸收（volatile 提示性限定不参与方向控制）
+   预期: 调用成功读回 42——const 才主导方向（const 接收者对 *T 形参被
+         拒，见 MemberCallOnConstQualifiedReceiverUnwrapsQualifier），
+         volatile 接收者双向放行 */
+TEST_F(ExecLiteralTest, MemberCallVolatileReceiverAbsorbsToMutableSelfParam) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "V8"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v")));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *get_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  struct_members_node_add_member(members, make_stmt_func_of(a, get_decl));
+  node_t *decl = make_struct_decl_of(a, "V8", NULL, members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "V8"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *v8 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(v8, nullptr);
+  ASSERT_FALSE(clux_value_is_error(v8)) << error_message_of(v8);
+
+  clux_type_t *volatile_type =
+      clux_type_get_qualified_type(clux_value_get_type(v8), CLUX_TYPE_VOLATILE);
+  ASSERT_NE(volatile_type, nullptr);
+  clux_value_t *volatile_view = clux_context_create_value(
+      ctx, volatile_type, clux_value_get_data(v8), "vv8", NULL);
+  ASSERT_NE(volatile_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(volatile_view))
+      << error_message_of(volatile_view);
+
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "vv8"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "."),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "get")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 42)
+      << "volatile receiver must absorb to *V8 self and read back v";
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&decl);
+}
+
+/* 场景: func_invoke 严格判等回归保护——member_call 的 safe_cast 吸收不
+        蔓延到普通函数调用通道（func_invoke 维持 type_equal 判等不变）
+   预期: f9(p: *i32) 传 *const i32 指针被拒绝，报 "function argument 0
+         requires type '*i32', got '*const i32'"；传 *i32 指针正常返回 0 */
+TEST_F(ExecLiteralTest, FuncInvokeStaysStrictAgainstConstPointerArgument) {
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "p"),
+          make_binary_of(
+              a,
+              NULL,
+              make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+              make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"))));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f9"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_func_decl(ctx, decl)))
+      << "function value must be built and registered as f9";
+
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  clux_value_t *p = clux_context_ref(ctx, five, NULL);
+  ASSERT_NE(p, nullptr);
+  ASSERT_FALSE(clux_value_is_error(p)) << error_message_of(p);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, p, "cp9", NULL)));
+  clux_type_t *p_const_i32 = clux_context_get_ptr_type(
+      ctx, clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST));
+  ASSERT_NE(p_const_i32, nullptr);
+  clux_value_t *cp = clux_context_create_value(
+      ctx, p_const_i32, clux_value_get_data(p), "ccp9", NULL);
+  ASSERT_NE(cp, nullptr);
+  ASSERT_FALSE(clux_value_is_error(cp)) << error_message_of(cp);
+
+  /* 正向对照：*i32 实参走 func_invoke 严格判等同型放行。 */
+  node_t *good_args[1] = {
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "cp9")};
+  node_t *good_call =
+      make_call_of(a,
+                   make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f9"),
+                   1,
+                   good_args);
+  clux_value_t *good = exec_expr_call(ctx, good_call);
+  ASSERT_NE(good, nullptr);
+  ASSERT_FALSE(clux_value_is_error(good)) << error_message_of(good);
+  EXPECT_EQ(read_i32(good), 0) << "f9 body returns 0 for a same-type argument";
+  delete_node(&good_call);
+
+  /* 反面：*const i32 实参不因 member_call 的协变放宽而放行。 */
+  node_t *bad_args[1] = {
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "ccp9")};
+  node_t *bad_call =
+      make_call_of(a,
+                   make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f9"),
+                   1,
+                   bad_args);
+  clux_value_t *bad = exec_expr_call(ctx, bad_call);
+  ASSERT_NE(bad, nullptr);
+  ASSERT_TRUE(clux_value_is_error(bad));
+  EXPECT_STREQ(error_message_of(bad),
+               "function argument 0 requires type '*i32', got '*const i32'");
+  delete_node(&bad_call);
+  delete_node(&decl);
+}
+
+/* 场景: 限定类型层同 kind 比较——intern 化之下同 base 同 kind 恒同对象被
+        上层短路，本用例覆盖 kind 相同、base 不同的比较通道（qualifier
+        type_equal/extends 的 meta 递归路径）
+   预期: const i32 与 const i64 判等 false；同 kind extends 比较走 base
+         meta 递归后 false；加限定仍是收紧（const i32 extends i32 成立） */
+TEST_F(ExecLiteralTest, QualifiedSameKindCompareWalksBaseMetas) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64_type = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_type_t *const_i64 =
+      clux_type_get_qualified_type(i64_type, CLUX_TYPE_CONST);
+  ASSERT_NE(const_i32, nullptr);
+  ASSERT_NE(const_i64, nullptr);
+  ASSERT_NE(const_i32, const_i64)
+      << "different bases must intern to distinct qualified types";
+
+  EXPECT_FALSE(clux_type_equal(const_i32, const_i64))
+      << "same-kind qualified equality must recurse into base metas";
+  EXPECT_FALSE(clux_type_extends(const_i32, const_i64))
+      << "same-kind qualified extends must recurse into base metas";
+  EXPECT_TRUE(clux_type_extends(const_i32, i32_type))
+      << "qualification is a tightening: const i32 extends i32";
+  EXPECT_FALSE(clux_type_extends(i32_type, const_i32))
+      << "the tightening is one-directional";
+}
+
+/* 场景: 限定视图上的前缀运算（qualifier vtable 前缀槽位委托）——负号经
+        qualified_view 建共享视图后走标准前缀通道
+   预期: const i32 视图取负后结果为 7（-(-7)），源值不被写（视图只读） */
+TEST_F(ExecLiteralTest, QualifiedPrefixNegatesThroughSharedView) {
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *neg_seven = clux_context_create_i32(ctx, -7, NULL, NULL);
+  ASSERT_NE(neg_seven, nullptr);
+  clux_type_t *const_type =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  ASSERT_NE(const_type, nullptr);
+  clux_value_t *const_view = clux_context_create_value(
+      ctx, const_type, clux_value_get_data(neg_seven), NULL, NULL);
+  ASSERT_NE(const_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_view)) << error_message_of(const_view);
+
+  clux_value_t *result =
+      clux_context_prefix(ctx, CLUX_OP_NEGATIVE, const_view, NULL);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 7)
+      << "negation through the qualified view must yield -(-7)";
+  EXPECT_EQ(read_i32(neg_seven), -7) << "prefix must not write the source";
+}
+
+/* 场景: qualifier vtable 其余委托槽位——cast（显式 as）/ deref（限定包裹
+        的指针解引用）/ index（限定数组视图下标）均经 qualified_view 转发
+        标准通道
+   预期: const i32 视图 as 到 i32 成功读回 5；*i32 指针再包 const 限定后
+         deref 读回 5（视图共享 handle）；const [3]i32 视图下标 1 读回 11 */
+TEST_F(ExecLiteralTest, QualifiedCastDerefIndexDelegateMatrix) {
+  /* cast 槽位：const i32 视图显式 as 到 i32。 */
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(five, nullptr);
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_value_t *const_view = clux_context_create_value(
+      ctx, const_i32, clux_value_get_data(five), NULL, NULL);
+  ASSERT_NE(const_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_view)) << error_message_of(const_view);
+  clux_value_t *casted = clux_context_cast(ctx, const_view, i32_type, NULL);
+  ASSERT_NE(casted, nullptr);
+  ASSERT_FALSE(clux_value_is_error(casted)) << error_message_of(casted);
+  EXPECT_EQ(read_i32(casted), 5) << "explicit as must keep the value";
+
+  /* deref 槽位：指针值再包 const 限定，解引用经视图转发读回 5。 */
+  clux_value_t *ptr = clux_context_ref(ctx, five, NULL);
+  ASSERT_NE(ptr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(ptr)) << error_message_of(ptr);
+  clux_type_t *const_ptr =
+      clux_type_get_qualified_type(clux_value_get_type(ptr), CLUX_TYPE_CONST);
+  ASSERT_NE(const_ptr, nullptr);
+  clux_value_t *const_ptr_view = clux_context_create_value(
+      ctx, const_ptr, clux_value_get_data(ptr), NULL, NULL);
+  ASSERT_NE(const_ptr_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_ptr_view))
+      << error_message_of(const_ptr_view);
+  clux_value_t *derefed = clux_context_deref(ctx, const_ptr_view, NULL);
+  ASSERT_NE(derefed, nullptr);
+  ASSERT_FALSE(clux_value_is_error(derefed)) << error_message_of(derefed);
+  EXPECT_EQ(read_i32(derefed), 5)
+      << "deref through the qualified pointer must read the pointee";
+
+  /* index 槽位：const [3]i32 视图下标取项（元素 10/11/12）。 */
+  clux_value_t *arr = make_i32_array("cov_arr", 3);
+  ASSERT_NE(arr, nullptr);
+  clux_type_t *const_arr =
+      clux_type_get_qualified_type(clux_value_get_type(arr), CLUX_TYPE_CONST);
+  ASSERT_NE(const_arr, nullptr);
+  clux_value_t *const_arr_view = clux_context_create_value(
+      ctx, const_arr, clux_value_get_data(arr), NULL, NULL);
+  ASSERT_NE(const_arr_view, nullptr);
+  ASSERT_FALSE(clux_value_is_error(const_arr_view))
+      << error_message_of(const_arr_view);
+  clux_value_t *item = clux_context_index(
+      ctx, const_arr_view, clux_context_create_usize(ctx, 1, NULL, NULL), NULL);
+  ASSERT_NE(item, nullptr);
+  ASSERT_FALSE(clux_value_is_error(item)) << error_message_of(item);
+  EXPECT_EQ(read_i32(item), 11)
+      << "index through the qualified array view must read element 1";
+}
+
+/* 场景: ptr_safe_cast 恒等直过通道——鸭子相等（字段表一致）的两个 struct
+        产生两个不同的 *A9 / *B9 指针类型对象，extends 与 equal 均成立但
+        source != target，safe_cast 走"判等成立原值直过"分支
+   预期: *A9 值 safe_cast 到 *B9 返回原值对象（恒等吸收，不新建值） */
+TEST_F(ExecLiteralTest, DuckTypedStructPointerSafeCastReturnsIdenticalValue) {
+  node_t *members_a = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members_a,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl_a = make_struct_decl_of(a, "A9", NULL, members_a);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl_a)));
+
+  node_t *members_b = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members_b,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "v"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl_b = make_struct_decl_of(a, "B9", NULL, members_b);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, decl_b)));
+
+  node_t *ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "A9"));
+  construct_node_add_elem(
+      ctor,
+      make_construct_field_of(
+          a, "v", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "42")));
+  clux_value_t *a9 = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(a9, nullptr);
+  ASSERT_FALSE(clux_value_is_error(a9)) << error_message_of(a9);
+
+  clux_value_t *pa = clux_context_ref(ctx, a9, NULL);
+  ASSERT_NE(pa, nullptr);
+  ASSERT_FALSE(clux_value_is_error(pa)) << error_message_of(pa);
+
+  /* B9 指针类型经 AST 类型表达式描述后取其 type 值。 */
+  node_t *b9_ptr_node = make_binary_of(
+      a,
+      NULL,
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "*"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "B9"));
+  clux_value_t *b9_ptr_tv = exec_expr_binary(ctx, b9_ptr_node);
+  ASSERT_NE(b9_ptr_tv, nullptr);
+  ASSERT_FALSE(clux_value_is_error(b9_ptr_tv)) << error_message_of(b9_ptr_tv);
+  clux_type_t *p_b9 = type_described_by(b9_ptr_tv);
+  ASSERT_NE(p_b9, nullptr);
+
+  clux_value_t *absorbed = clux_context_safe_cast(ctx, pa, p_b9, NULL);
+  ASSERT_NE(absorbed, nullptr);
+  ASSERT_FALSE(clux_value_is_error(absorbed)) << error_message_of(absorbed);
+  EXPECT_EQ(absorbed, pa)
+      << "duck-typed equal pointer types must absorb as the identical value";
+  delete_node(&b9_ptr_node);
+  delete_node(&ctor);
+  delete_node(&decl_b);
+  delete_node(&decl_a);
 }
