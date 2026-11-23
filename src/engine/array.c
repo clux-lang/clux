@@ -31,6 +31,14 @@ size_t clux_array_get_length(clux_type_t *type) {
   return meta ? meta->len : 0;
 }
 
+clux_type_t *clux_array_get_base(clux_type_t *type) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_ARRAY) {
+    return NULL;
+  }
+  clux_array_meta_t *meta = array_meta(type);
+  return meta ? meta->base : NULL;
+}
+
 static bool array_kind(clux_type_kind_t kind) {
   switch (kind) {
   case CLUX_TYPE_ARRAY:

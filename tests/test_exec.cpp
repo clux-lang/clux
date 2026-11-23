@@ -44,6 +44,7 @@
 #include "parser/node_union.h"
 #include "parser/node_enum_decl.h"
 #include "parser/node_enum_variant.h"
+#include "engine/array.h"
 #include "engine/enum.h"
 #include "parser/node_field.h"
 #include "parser/node_interface_decl.h"
@@ -11618,8 +11619,7 @@ TEST_F(ExecLiteralTest, ConstructStructExhaustiveFieldChecks) {
           a, "y", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
   node_t *override_ctor = make_construct_of(
       a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point3"));
-  construct_node_add_elem(override_ctor,
-                          make_spread_elem_of(a, vec2_override));
+  construct_node_add_elem(override_ctor, make_spread_elem_of(a, vec2_override));
   construct_node_add_elem(
       override_ctor,
       make_construct_field_of(
@@ -11649,8 +11649,7 @@ TEST_F(ExecLiteralTest, ConstructStructExhaustiveFieldChecks) {
           make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
   node_t *sp_user_decl =
       make_struct_decl_of(a, "SpUser", NULL, sp_user_members);
-  ASSERT_FALSE(
-      clux_value_is_error(exec_expr_struct_decl(ctx, sp_user_decl)));
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, sp_user_decl)));
   node_t *sp_user = make_construct_of(
       a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "SpUser"));
   construct_node_add_elem(
@@ -12435,8 +12434,7 @@ TEST_F(ExecLiteralTest, ConstructErrorPropagationAndNullElemTolerance) {
           make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"),
           make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
   node_t *point_decl = make_struct_decl_of(a, "Point", NULL, members);
-  ASSERT_FALSE(
-      clux_value_is_error(exec_expr_struct_decl(ctx, point_decl)));
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, point_decl)));
 
   node_t *src_members = create_struct_members_node(a);
   struct_members_node_add_member(
@@ -12656,4 +12654,223 @@ TEST_F(ExecLiteralTest, ConstructErrorPropagationAndNullElemTolerance) {
   for (auto &c : cases) {
     delete_node(&c.ctor);
   }
+}
+
+/* 场景: 匿名 .{ 1, 2 } 自然 tuple 经 safe_cast 内存兼容落到 [2]i32
+   预期: 个数等于数组长度且逐元素与基类型 type_equal 时共享 data 建
+         数组 view，下标读回 1/2；个数或元素类型不匹配报语义化 error */
+TEST_F(ExecLiteralTest, TupleSafeCastToMemoryCompatibleArray) {
+  node_t *anon = make_construct_of(a, NULL);
+  construct_node_add_elem(
+      anon, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  construct_node_add_elem(
+      anon, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *tuple = exec_expr_construct(ctx, anon);
+  ASSERT_NE(tuple, nullptr);
+  ASSERT_FALSE(clux_value_is_error(tuple)) << error_message_of(tuple);
+  clux_type_t *arr_type = clux_context_get_array_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), 2);
+  clux_value_t *arr = clux_context_safe_cast(ctx, tuple, arr_type, NULL);
+  ASSERT_NE(arr, nullptr);
+  ASSERT_FALSE(clux_value_is_error(arr)) << error_message_of(arr);
+  EXPECT_EQ(clux_value_get_type(arr), arr_type);
+  clux_value_t *idx0 = clux_context_create_i32(ctx, 0, NULL, NULL);
+  clux_value_t *idx1 = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *first = clux_context_index(ctx, arr, idx0, NULL);
+  clux_value_t *second = clux_context_index(ctx, arr, idx1, NULL);
+  ASSERT_FALSE(clux_value_is_error(first));
+  ASSERT_FALSE(clux_value_is_error(second));
+  EXPECT_EQ(read_i32(first), 1);
+  EXPECT_EQ(read_i32(second), 2);
+
+  /* 个数不匹配：2 元素 tuple 落 [3]i32 报错。 */
+  clux_type_t *long_arr = clux_context_get_array_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), 3);
+  clux_value_t *bad_len = clux_context_safe_cast(ctx, tuple, long_arr, NULL);
+  ASSERT_TRUE(clux_value_is_error(bad_len));
+  EXPECT_STREQ(error_message_of(bad_len),
+               "cannot safely cast '<i32, i32>' to '[3]i32'");
+
+  /* 元素类型不匹配：i32 元素 tuple 落 [2]i64 报错。 */
+  clux_type_t *wide_arr = clux_context_get_array_type(
+      ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I64), 2);
+  clux_value_t *bad_elem = clux_context_safe_cast(ctx, tuple, wide_arr, NULL);
+  ASSERT_TRUE(clux_value_is_error(bad_elem));
+  EXPECT_STREQ(error_message_of(bad_elem),
+               "cannot safely cast '<i32, i32>' to '[2]i64'");
+  delete_node(&anon);
+}
+
+/* 场景: 空 tuple safe_cast 到 [0]i32（count 0 == length 0 边界，size 0 兜底）
+   预期: 空 tuple 与零长数组内存布局一致，产出 [0]i32 数组类型 view */
+TEST_F(ExecLiteralTest, TupleSafeCastEmptyTupleToZeroLengthArray) {
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  node_t *anon = make_construct_of(a, NULL);
+  clux_value_t *empty = exec_expr_construct(ctx, anon);
+  ASSERT_NE(empty, nullptr);
+  ASSERT_FALSE(clux_value_is_error(empty)) << error_message_of(empty);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty)), CLUX_TYPE_TUPLE);
+
+  clux_type_t *empty_arr = clux_context_get_array_type(ctx, i32, 0);
+  clux_value_t *casted = clux_context_safe_cast(ctx, empty, empty_arr, NULL);
+  ASSERT_NE(casted, nullptr);
+  ASSERT_FALSE(clux_value_is_error(casted)) << error_message_of(casted);
+  EXPECT_EQ(clux_value_get_type(casted), empty_arr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(casted)), CLUX_TYPE_ARRAY);
+  delete_node(&anon);
+}
+
+/* 场景: shadow tuple 值 safe_cast 到内存兼容 [2]i32（shadow 传播路径）
+   预期: shadow 值产出 shadow(target)——类型切换为 [2]i32 且保持 shadow
+         标记；个数不匹配的 shadow tuple 仍报语义化 error */
+TEST_F(ExecLiteralTest, TupleSafeCastShadowTupleYieldsTargetShadow) {
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *elems[] = {i32, i32};
+  clux_type_t *tuple_type = clux_context_get_tuple_type(ctx, elems, 2);
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32, 2);
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, tuple_type);
+  ASSERT_NE(shadow, nullptr);
+  ASSERT_TRUE(clux_value_is_shadow(shadow));
+
+  clux_value_t *casted = clux_context_safe_cast(ctx, shadow, arr_type, NULL);
+  ASSERT_NE(casted, nullptr);
+  ASSERT_FALSE(clux_value_is_error(casted)) << error_message_of(casted);
+  EXPECT_TRUE(clux_value_is_shadow(casted));
+  EXPECT_EQ(clux_value_get_type(casted), arr_type);
+
+  /* 个数不匹配：shadow tuple 落 [3]i32 报错，不产出 shadow。 */
+  clux_type_t *long_arr = clux_context_get_array_type(ctx, i32, 3);
+  clux_value_t *bad_len = clux_context_safe_cast(ctx, shadow, long_arr, NULL);
+  ASSERT_NE(bad_len, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bad_len));
+  EXPECT_FALSE(clux_value_is_shadow(bad_len));
+  EXPECT_STREQ(error_message_of(bad_len),
+               "cannot safely cast '<i32, i32>' to '[3]i32'");
+}
+
+/* 场景: ERROR 源值直通——safe_cast 入口不消费/不加工 error 值
+   预期: 元素求值失败的构造产出 error 原样传播，safe_cast 返回同一
+         error 值（错误消息不变） */
+TEST_F(ExecLiteralTest, TupleSafeCastErrorSourcePassesThrough) {
+  node_t *ctor = make_construct_of(a, NULL);
+  construct_node_add_elem(
+      ctor,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_value"));
+  clux_value_t *err = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(err));
+  EXPECT_STREQ(error_message_of(err),
+               "use of undeclared identifier 'missing_value'");
+
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32, 2);
+  clux_value_t *result = clux_context_safe_cast(ctx, err, arr_type, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result, err) << "error source must pass through unchanged";
+  EXPECT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'missing_value'");
+  delete_node(&ctor);
+}
+
+/* 场景: safe_cast 到自身类型恒等快速通道（source == target 零开销放行）
+   预期: 返回原值本身（指针恒等），不经 vtable 兼容判定 */
+TEST_F(ExecLiteralTest, TupleSafeCastSameTypeIdentityFastPath) {
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *elems[] = {i32, i32};
+  clux_type_t *tuple_type = clux_context_get_tuple_type(ctx, elems, 2);
+  clux_value_t *tuple = clux_context_create_tuple(ctx, tuple_type, NULL, NULL);
+  ASSERT_NE(tuple, nullptr);
+  ASSERT_FALSE(clux_value_is_error(tuple)) << error_message_of(tuple);
+
+  clux_value_t *result = clux_context_safe_cast(ctx, tuple, tuple_type, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result, tuple) << "same-type safe cast must return the identity";
+  EXPECT_EQ(clux_value_get_type(result), tuple_type);
+}
+
+/* 场景: 混合元素类型 tuple（<i32, i64>）落 [2]i32（逐元素 type_equal 分支）
+   预期: 第二元素 i64 与基类型 i32 不 type_equal，报语义化 error */
+TEST_F(ExecLiteralTest, TupleSafeCastMixedElementTupleToArrayFails) {
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64 = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *mixed_elems[] = {i32, i64};
+  clux_type_t *mixed_type = clux_context_get_tuple_type(ctx, mixed_elems, 2);
+  clux_value_t *mixed = clux_context_create_tuple(ctx, mixed_type, NULL, NULL);
+  ASSERT_NE(mixed, nullptr);
+  ASSERT_FALSE(clux_value_is_error(mixed)) << error_message_of(mixed);
+
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32, 2);
+  clux_value_t *result = clux_context_safe_cast(ctx, mixed, arr_type, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result),
+               "cannot safely cast '<i32, i64>' to '[2]i32'");
+}
+
+/* 场景: tuple → 异名 tuple 目标结构不等价（个数不同 / 元素类型不同）
+   预期: tuple_type_equal 判否，报 cannot safely cast；同结构目标因类型
+         去重恒等实例被快速通道放行（见 TupleSafeCastSameTypeIdentity
+         FastPath），结构不等价路径在此覆盖 */
+TEST_F(ExecLiteralTest, TupleSafeCastToStructuralUnequalTupleFails) {
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *i64 = clux_context_builtin_type(ctx, CLUX_TYPE_I64);
+  clux_type_t *pair_elems[] = {i32, i32};
+  clux_type_t *pair_type = clux_context_get_tuple_type(ctx, pair_elems, 2);
+  clux_value_t *pair = clux_context_create_tuple(ctx, pair_type, NULL, NULL);
+  ASSERT_NE(pair, nullptr);
+  ASSERT_FALSE(clux_value_is_error(pair)) << error_message_of(pair);
+
+  /* 个数不同：2 元素 tuple 落 3 元素 tuple 类型报错。 */
+  clux_type_t *triple_elems[] = {i32, i32, i32};
+  clux_type_t *triple_type = clux_context_get_tuple_type(ctx, triple_elems, 3);
+  clux_value_t *wrong_count =
+      clux_context_safe_cast(ctx, pair, triple_type, NULL);
+  ASSERT_NE(wrong_count, nullptr);
+  EXPECT_TRUE(clux_value_is_error(wrong_count));
+  EXPECT_STREQ(error_message_of(wrong_count),
+               "cannot safely cast '<i32, i32>' to '<i32, i32, i32>'");
+
+  /* 元素类型不同：个数一致但第二元素 i64 != i32 报错。 */
+  clux_type_t *mixed_elems[] = {i32, i64};
+  clux_type_t *mixed_type = clux_context_get_tuple_type(ctx, mixed_elems, 2);
+  clux_value_t *wrong_elem =
+      clux_context_safe_cast(ctx, pair, mixed_type, NULL);
+  ASSERT_NE(wrong_elem, nullptr);
+  EXPECT_TRUE(clux_value_is_error(wrong_elem));
+  EXPECT_STREQ(error_message_of(wrong_elem),
+               "cannot safely cast '<i32, i32>' to '<i32, i64>'");
+}
+
+/* 场景: safe_cast 目标既非 TUPLE 也非 ARRAY（如基元 i32）
+   预期: 无兼容通道，报 cannot safely cast 语义化 error */
+TEST_F(ExecLiteralTest, TupleSafeCastToNonTupleNonArrayTargetFails) {
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *elems[] = {i32, i32};
+  clux_type_t *tuple_type = clux_context_get_tuple_type(ctx, elems, 2);
+  clux_value_t *tuple = clux_context_create_tuple(ctx, tuple_type, NULL, NULL);
+  ASSERT_NE(tuple, nullptr);
+  ASSERT_FALSE(clux_value_is_error(tuple)) << error_message_of(tuple);
+
+  clux_value_t *result = clux_context_safe_cast(ctx, tuple, i32, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(result));
+  EXPECT_STREQ(error_message_of(result),
+               "cannot safely cast '<i32, i32>' to 'i32'");
+}
+
+/* 场景: clux_array_get_base 访问器对非数组类型的防御分支
+   预期: NULL 入参与非 ARRAY 类型（i32 / tuple 类型）均返回 NULL，
+         ARRAY 类型返回基类型 */
+TEST_F(ExecLiteralTest, TupleSafeCastArrayGetBaseRejectsNonArrayType) {
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *elems[] = {i32, i32};
+  clux_type_t *tuple_type = clux_context_get_tuple_type(ctx, elems, 2);
+  EXPECT_EQ(clux_array_get_base(NULL), nullptr);
+  EXPECT_EQ(clux_array_get_base(i32), nullptr);
+  EXPECT_EQ(clux_array_get_base(tuple_type), nullptr);
+
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32, 2);
+  ASSERT_NE(arr_type, nullptr);
+  EXPECT_EQ(clux_array_get_base(arr_type), i32);
 }

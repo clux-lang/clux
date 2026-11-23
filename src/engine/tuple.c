@@ -1,4 +1,5 @@
 #include "engine/tuple.h"
+#include "engine/array.h"
 #include "engine/context.h"
 #include "engine/interface.h"
 #include "engine/type.h"
@@ -123,10 +124,61 @@ static bool tuple_type_equal(clux_type_t *self, clux_type_t *other) {
   return true;
 }
 
+/* 内存兼容的 safe_cast（构造的补充，白皮书 §5.10）：
+   - tuple → [N]T 数组：元素个数等于数组长度且逐元素与基类型 type_equal
+     ——同型平铺下两侧布局一致（size 相等兜底校验），共享 data 建数组
+     类型 view。匿名位置构造 .{ 1, 2 } 产出的自然 tuple 由此隐式落到
+     [2]i32 接收方。
+   - tuple → 异名实例 tuple：元素序列结构等价（type_equal 判等）即
+     吸收，布局公式由元素序列决定，天然内存一致。
+   其余目标报语义化 error。 */
+static clux_value_t *
+tuple_safe_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
+  clux_type_t *source = clux_value_get_type(value);
+  if (clux_type_get_kind(source) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  bool compatible = false;
+  if (clux_type_get_kind(target) == CLUX_TYPE_TUPLE) {
+    compatible = tuple_type_equal(source, target);
+  } else if (clux_type_get_kind(target) == CLUX_TYPE_ARRAY) {
+    clux_type_t *base = clux_array_get_base(target);
+    clux_tuple_meta_t *meta = tuple_meta(source);
+    compatible = base && meta && meta->count == clux_array_get_length(target);
+    for (size_t idx = 0; compatible && idx < meta->count; idx++) {
+      if (!clux_type_equal(meta->elems[idx], base)) {
+        compatible = false;
+      }
+    }
+    /* 兜底校验：平铺布局一致要求两侧 size 相等（防御 size 非对齐
+       倍数的病态类型破坏内联块兼容）。 */
+    if (compatible &&
+        clux_type_get_size(source) != clux_type_get_size(target)) {
+      compatible = false;
+    }
+  }
+  if (compatible) {
+    if (clux_value_is_shadow(value)) {
+      return clux_context_create_shadow_value(ctx, target);
+    }
+    return clux_context_create_value(
+        ctx, target, clux_value_get_data(value), NULL, NULL);
+  }
+  const char *source_name = clux_type_get_name(source);
+  const char *target_name = clux_type_get_name(target);
+  return clux_context_create_error_message(
+      ctx,
+      NULL,
+      "cannot safely cast '%s' to '%s'",
+      source_name ? source_name : "<unknown>",
+      target_name ? target_name : "<unknown>");
+}
+
 static clux_vtable_t g_tuple_vtable = {
     .eq = tuple_eq,
     .ne = tuple_ne,
     .index = tuple_index,
+    .safe_cast = tuple_safe_cast,
     .type_equal = tuple_type_equal,
 };
 
