@@ -679,6 +679,19 @@ clux_type_t *clux_context_get_tuple_type(clux_context_t *self,
   (void)vec_push(self->named_types, type);
   return type;
 }
+clux_value_t *clux_context_create_tuple(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const char *name,
+                                        const location_t *loc) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_TUPLE) {
+    return clux_context_create_error_message(
+        self, loc, "tuple value creation requires a tuple type");
+  }
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
 clux_value_t *clux_context_create_array(clux_context_t *self,
                                         clux_type_t *type,
                                         const char *name,
@@ -2306,6 +2319,12 @@ clux_value_t *clux_context_safe_cast(clux_context_t *self,
         self, loc, "safe cast requires a value and a target type");
   }
   clux_type_t *source = clux_value_get_type(value);
+  /* 同类型快速通道：safe_cast 到自身类型恒等放行——str 等无 safe_cast
+     vtable 条目的类型在同型写入（构造/赋值）时不经 vtable 即可吸收；
+     判等与兼容运算仍走各类型 vtable，不受影响。 */
+  if (source == target) {
+    return value;
+  }
   clux_vtable_t *vt = clux_type_get_vtable(source);
   if (vt && vt->safe_cast) {
     return vt->safe_cast(self, value, target);

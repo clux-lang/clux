@@ -188,6 +188,13 @@ clux_type_t *clux_context_get_array_type(clux_context_t *self,
 clux_type_t *clux_context_get_tuple_type(clux_context_t *self,
                                          clux_type_t **elems,
                                          size_t count);
+/* 创建元组值：元素类型序列结构去重取类型后作值类型，data 是全部元素
+   按布局平铺的连续内联块（零初始化，逐元素经 index view + assign 写入）。
+   type 须是 CLUX_TYPE_TUPLE。 */
+clux_value_t *clux_context_create_tuple(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const char *name,
+                                        const location_t *loc);
 /* 创建数组值：N 个元素的连续内联块零初始化。type 须是
    CLUX_TYPE_ARRAY（由调用方保证）。 */
 clux_value_t *clux_context_create_array(clux_context_t *self,

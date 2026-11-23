@@ -53,6 +53,9 @@
 #include "engine/struct.h"
 #include "engine/scope.h"
 #include "exec/call.h"
+#include "parser/node_construct.h"
+#include "parser/node_construct_field.h"
+#include "parser/node_rest.h"
 #include "parser/node_subscript.h"
 #include "parser/node_tuple.h"
 #include "parser/node_ternary.h"
@@ -846,7 +849,8 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_ENUM_DECL || kind == CLUX_NODE_STMT_ENUM ||
         kind == CLUX_NODE_EXPR_INTERFACE_DECL ||
         kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE ||
-        kind == CLUX_NODE_EXPR_STRUCT_DECL || kind == CLUX_NODE_STMT_STRUCT;
+        kind == CLUX_NODE_EXPR_STRUCT_DECL || kind == CLUX_NODE_STMT_STRUCT ||
+        kind == CLUX_NODE_EXPR_CONSTRUCT;
     if (synthetic_skip) {
       continue;
     }
@@ -11438,4 +11442,1218 @@ TEST_F(ExecLiteralTest, StructContextTwoPhaseBeginAndInstallValidationPaths) {
   EXPECT_FALSE(clux_context_install_struct_tables(
       ctx, target, NULL, 0, NULL, 0, NULL, 0))
       << "a second install (even an empty one) must be rejected";
+}
+
+/* ---- exec_expr_construct：构造表达式（白皮书 §5.10）---- */
+
+/* 合成 .name = value 具名构造字段（value 结点由调用方构造并持有）。 */
+static node_t *make_construct_field_of(allocator_t *allocator,
+                                       const char *name_text,
+                                       node_t *value_node) {
+  node_t *node = create_construct_field_node(allocator);
+  construct_field_node_set_name(
+      node,
+      make_static_node_of(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  construct_field_node_set_value(node, value_node);
+  return node;
+}
+
+/* 合成 .name = <缺 value> 容错构造字段（覆盖 value 槽缺失分支）。 */
+static node_t *make_construct_field_without_value(allocator_t *allocator,
+                                                  const char *name_text) {
+  node_t *node = create_construct_field_node(allocator);
+  construct_field_node_set_name(
+      node,
+      make_static_node_of(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  return node;
+}
+
+/* 合成 ...<expr> spread 展开元素（value_node 为 NULL 时构造缺 expr 容错
+   路径）。 */
+static node_t *make_spread_elem_of(allocator_t *allocator, node_t *value_node) {
+  node_t *node = create_rest_node(allocator);
+  if (value_node) {
+    rest_node_set_expr(node, value_node);
+  }
+  return node;
+}
+
+/* 合成 .<type?>{ ... } 构造表达式（type_node 为 NULL 时是匿名构造），
+   元素由调用方经 construct_node_add_elem 追加。 */
+static node_t *make_construct_of(allocator_t *allocator, node_t *type_node) {
+  node_t *node = create_construct_node(allocator);
+  if (type_node) {
+    construct_node_set_type(node, type_node);
+  }
+  return node;
+}
+
+/* 场景: .Point{ .x = 1, .y = 2 } 穷尽构造 + spread 合并 + 全错误分支
+   预期: 快乐路径字段读回 x=1/y=2；缺字段报 missing field 'y'；未知字段
+         报 has no field 'z'；重复字段报 duplicate field 'x'；混用报
+         cannot be mixed；.i32{ 1 } 报 does not support construction；
+         spread 源/字段名不合规与缺 value 均报语义化 error；字段值 error
+         原样传播；type 槽求值失败（undeclared/非 type）原样传播 */
+TEST_F(ExecLiteralTest, ConstructStructExhaustiveFieldChecks) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "Point", NULL, members);
+  clux_value_t *declared = exec_expr_struct_decl(ctx, decl);
+  ASSERT_FALSE(clux_value_is_error(declared));
+
+  node_t *ok = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+  construct_node_add_elem(
+      ok,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      ok,
+      make_construct_field_of(
+          a, "y", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  clux_value_t *point = exec_expr_construct(ctx, ok);
+  ASSERT_NE(point, nullptr);
+  EXPECT_FALSE(clux_value_is_error(point)) << error_message_of(point);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(point)), CLUX_TYPE_STRUCT);
+  clux_value_t *x = clux_context_field(ctx, point, "x", NULL);
+  clux_value_t *y = clux_context_field(ctx, point, "y", NULL);
+  ASSERT_FALSE(clux_value_is_error(x));
+  ASSERT_FALSE(clux_value_is_error(y));
+  EXPECT_EQ(read_i32(x), 1);
+  EXPECT_EQ(read_i32(y), 2);
+
+  /* spread 快乐路径：Vec2{ x, y } 展开补 x/y，显式 .z 补第三字段，
+     spread 展开的字段计入穷尽覆盖表。 */
+  node_t *vec2_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      vec2_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      vec2_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *vec2_decl = make_struct_decl_of(a, "Vec2", NULL, vec2_members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, vec2_decl)));
+
+  node_t *point3_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      point3_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      point3_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      point3_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "z"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *point3_decl = make_struct_decl_of(a, "Point3", NULL, point3_members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, point3_decl)));
+
+  node_t *vec2 = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Vec2"));
+  construct_node_add_elem(
+      vec2,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      vec2,
+      make_construct_field_of(
+          a, "y", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  node_t *spread_ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point3"));
+  construct_node_add_elem(spread_ctor, make_spread_elem_of(a, vec2));
+  construct_node_add_elem(
+      spread_ctor,
+      make_construct_field_of(
+          a, "z", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3")));
+  clux_value_t *spread_point = exec_expr_construct(ctx, spread_ctor);
+  ASSERT_NE(spread_point, nullptr);
+  ASSERT_FALSE(clux_value_is_error(spread_point))
+      << error_message_of(spread_point);
+  clux_value_t *sx = clux_context_field(ctx, spread_point, "x", NULL);
+  clux_value_t *sy = clux_context_field(ctx, spread_point, "y", NULL);
+  clux_value_t *sz = clux_context_field(ctx, spread_point, "z", NULL);
+  ASSERT_FALSE(clux_value_is_error(sx));
+  EXPECT_EQ(read_i32(sx), 1) << "the spread source must fill field 'x'";
+  EXPECT_EQ(read_i32(sy), 2) << "the spread source must fill field 'y'";
+  EXPECT_EQ(read_i32(sz), 3) << "the explicit field must fill field 'z'";
+
+  /* spread 合并的后写覆盖语义（白皮书 §5.10）：spread 展开后显式同名字段
+     覆盖重写——覆盖是合法构造，两个显式同名字段才是 duplicate。 */
+  /* override 用独立源树：vec2 已挂接进 spread_ctor，同一子树再挂第二个父
+     会在两根 delete_node 级联时 double free，这里重建一份等价的 Vec2 源。 */
+  node_t *vec2_override = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Vec2"));
+  construct_node_add_elem(
+      vec2_override,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      vec2_override,
+      make_construct_field_of(
+          a, "y", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  node_t *override_ctor = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point3"));
+  construct_node_add_elem(override_ctor,
+                          make_spread_elem_of(a, vec2_override));
+  construct_node_add_elem(
+      override_ctor,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "9")));
+  construct_node_add_elem(
+      override_ctor,
+      make_construct_field_of(
+          a, "z", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3")));
+  clux_value_t *overridden = exec_expr_construct(ctx, override_ctor);
+  ASSERT_NE(overridden, nullptr);
+  ASSERT_FALSE(clux_value_is_error(overridden)) << error_message_of(overridden);
+  clux_value_t *ox = clux_context_field(ctx, overridden, "x", NULL);
+  clux_value_t *oy = clux_context_field(ctx, overridden, "y", NULL);
+  ASSERT_FALSE(clux_value_is_error(ox));
+  ASSERT_FALSE(clux_value_is_error(oy));
+  EXPECT_EQ(read_i32(ox), 9) << "the explicit field must override the spread";
+  EXPECT_EQ(read_i32(oy), 2) << "the non-overridden spread field survives";
+
+  /* spread 错误分支用例所需的源值：SpUser{ age = 1 }（其字段 age 不在
+     Point3 字段表中）。 */
+  node_t *sp_user_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      sp_user_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *sp_user_decl =
+      make_struct_decl_of(a, "SpUser", NULL, sp_user_members);
+  ASSERT_FALSE(
+      clux_value_is_error(exec_expr_struct_decl(ctx, sp_user_decl)));
+  node_t *sp_user = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "SpUser"));
+  construct_node_add_elem(
+      sp_user,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+
+  struct {
+    const char *name;
+    node_t *ctor;
+    const char *message;
+  } cases[] = {
+      {"missing field",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         return n;
+       }(),
+       "missing field 'y' in construction of 'Point'"},
+      {"unknown field",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "z",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "y",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "type 'Point' has no field 'z'"},
+      {"duplicate field",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "y",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3")));
+         return n;
+       }(),
+       "duplicate field 'x' in construction of 'Point'"},
+      {"mixed elements",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "9"));
+         return n;
+       }(),
+       "named and positional elements cannot be mixed in construction"},
+      {"scalar construction",
+       make_construct_of(
+           a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")),
+       "type 'i32' does not support construction"},
+      {"spread with an unknown target field",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point3"));
+         construct_node_add_elem(n, make_spread_elem_of(a, sp_user));
+         return n;
+       }(),
+       "type 'Point3' has no field 'age'"},
+      {"spread of a non-struct value",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_spread_elem_of(
+                 a, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         return n;
+       }(),
+       "spread of non-struct type 'i32' is not supported in construction"},
+      {"spread without a value",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(n, make_spread_elem_of(a, NULL));
+         return n;
+       }(),
+       "spread element requires a value"},
+      {"construct field without a value",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(n, make_construct_field_without_value(a, "x"));
+         return n;
+       }(),
+       "construction field requires a name and a value"},
+      {"field value error propagation",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(
+                     a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_value")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "y",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_value'"},
+      {"undeclared type slot",
+       [&]() {
+         node_t *n = make_construct_of(
+             a,
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "GhostType"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         return n;
+       }(),
+       "use of undeclared identifier 'GhostType'"},
+      {"non-type type slot",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         return n;
+       }(),
+       "expected a type expression, got 'i32'"},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *value = exec_expr_construct(ctx, c.ctor);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value), c.message) << c.name;
+  }
+  /* 独立 AST 根逐个释放：elems/type/成员子树经 set/add 挂接随根级联；
+     vec2/vec2_override 分别挂接进 spread_ctor/override_ctor，sp_user 挂进
+     cases 元素，均随其所属根释放，无 double free。 */
+  delete_node(&decl);
+  delete_node(&vec2_decl);
+  delete_node(&point3_decl);
+  delete_node(&sp_user_decl);
+  delete_node(&ok);
+  delete_node(&spread_ctor);
+  delete_node(&override_ctor);
+  for (auto &c : cases) {
+    delete_node(&c.ctor);
+  }
+}
+
+/* 场景: .Shape{ .circle = 5 } tag union / cunion 单成员构造 + 全错误分支
+   预期: 成员经 union_set_member 激活后写入（is_member 回报 true 且值可读）；
+         双字段、位置元素、零成员、未知成员报语义化 error；cunion 共享块
+         直写同构；字段值 error 原样传播；缺 value 报语义化 error */
+TEST_F(ExecLiteralTest, ConstructUnionAndCunionSingleMember) {
+  node_t *fields = create_fields_node(a);
+  fields_node_add_field(fields, make_union_field_of(a, "circle", "i32"));
+  fields_node_add_field(fields, make_union_field_of(a, "rect", "i32"));
+  node_t *decl = make_union_decl_of(a, NULL, "Shape", NULL, fields);
+  clux_value_t *declared = exec_expr_union(ctx, decl);
+  ASSERT_FALSE(clux_value_is_error(declared));
+
+  node_t *ok = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+  construct_node_add_elem(
+      ok,
+      make_construct_field_of(
+          a, "circle", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5")));
+  clux_value_t *shape = exec_expr_construct(ctx, ok);
+  ASSERT_NE(shape, nullptr);
+  EXPECT_FALSE(clux_value_is_error(shape)) << error_message_of(shape);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(shape)), CLUX_TYPE_UNION);
+  clux_value_t *is_circle = clux_context_is_member(ctx, shape, "circle", NULL);
+  ASSERT_FALSE(clux_value_is_error(is_circle));
+  EXPECT_TRUE(*(bool *)clux_value_get_raw(is_circle, 0));
+  clux_value_t *circle = clux_context_field(ctx, shape, "circle", NULL);
+  ASSERT_FALSE(clux_value_is_error(circle));
+  EXPECT_EQ(read_i32(circle), 5);
+
+  node_t *two = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+  construct_node_add_elem(
+      two,
+      make_construct_field_of(
+          a, "circle", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      two,
+      make_construct_field_of(
+          a, "rect", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  clux_value_t *two_err = exec_expr_construct(ctx, two);
+  ASSERT_TRUE(clux_value_is_error(two_err));
+  EXPECT_STREQ(error_message_of(two_err),
+               "tag union construction takes exactly one named member");
+
+  node_t *unknown = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+  construct_node_add_elem(
+      unknown,
+      make_construct_field_of(
+          a, "oval", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *unknown_err = exec_expr_construct(ctx, unknown);
+  ASSERT_TRUE(clux_value_is_error(unknown_err));
+  EXPECT_STREQ(error_message_of(unknown_err),
+               "tag union 'Shape' has no member 'oval'");
+
+  node_t *cfields = create_fields_node(a);
+  fields_node_add_field(cfields, make_union_field_of(a, "a", "i32"));
+  fields_node_add_field(cfields, make_union_field_of(a, "b", "i32"));
+  node_t *cdecl = make_union_decl_of(a, "cunion", "Pair", NULL, cfields);
+  clux_value_t *cdeclared = exec_expr_union(ctx, cdecl);
+  ASSERT_FALSE(clux_value_is_error(cdeclared));
+
+  node_t *cok = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Pair"));
+  construct_node_add_elem(
+      cok,
+      make_construct_field_of(
+          a, "b", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7")));
+  clux_value_t *pair = exec_expr_construct(ctx, cok);
+  ASSERT_NE(pair, nullptr);
+  EXPECT_FALSE(clux_value_is_error(pair)) << error_message_of(pair);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(pair)), CLUX_TYPE_CUNION);
+  clux_value_t *b = clux_context_field(ctx, pair, "b", NULL);
+  ASSERT_FALSE(clux_value_is_error(b));
+  EXPECT_EQ(read_i32(b), 7);
+
+  struct {
+    const char *name;
+    node_t *ctor;
+    const char *message;
+  } cases[] = {
+      {"union positional element",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         return n;
+       }(),
+       "tag union construction takes exactly one named member"},
+      {"union with no member",
+       [&]() {
+         return make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+       }(),
+       "tag union construction takes one named member"},
+      {"union field without a value",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+         construct_node_add_elem(
+             n, make_construct_field_without_value(a, "circle"));
+         return n;
+       }(),
+       "construction field requires a name and a value"},
+      {"union field value error propagation",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "circle",
+                 make_static_node_of(
+                     a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_union_value")));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_union_value'"},
+      {"cunion with two members",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Pair"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "a",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "b",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "cunion construction takes exactly one named member"},
+      {"cunion with an unknown member",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Pair"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "zzz",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         return n;
+       }(),
+       "cunion 'Pair' has no member 'zzz'"},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *value = exec_expr_construct(ctx, c.ctor);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value), c.message) << c.name;
+  }
+  /* 独立 AST 根释放：decl/cdecl 为声明根，字段/元素子树已挂接级联。 */
+  delete_node(&decl);
+  delete_node(&ok);
+  delete_node(&two);
+  delete_node(&unknown);
+  delete_node(&cdecl);
+  delete_node(&cok);
+  for (auto &c : cases) {
+    delete_node(&c.ctor);
+  }
+}
+
+/* 场景: .[2]i32{ 1, 2 } 数组 / 具名 <i32, i32>{ 4, 5 } / 匿名 .{ 1, 2 }
+   预期: 数组与具名/匿名 tuple 逐位写入后下标读回；元素不足/溢出报
+         requires N elements, got M；位置构造中出现具名字段报混用、
+         出现 spread 报 not supported yet */
+TEST_F(ExecLiteralTest, ConstructArrayAndAnonymousTuplePositional) {
+  node_t *array_ok = make_construct_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "[]"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  construct_node_add_elem(
+      array_ok, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  construct_node_add_elem(
+      array_ok, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *arr = exec_expr_construct(ctx, array_ok);
+  ASSERT_NE(arr, nullptr);
+  EXPECT_FALSE(clux_value_is_error(arr)) << error_message_of(arr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(arr)), CLUX_TYPE_ARRAY);
+  clux_value_t *idx1 = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *second = clux_context_index(ctx, arr, idx1, NULL);
+  ASSERT_FALSE(clux_value_is_error(second));
+  EXPECT_EQ(read_i32(second), 2);
+
+  node_t *array_short = make_construct_of(
+      a,
+      make_binary_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"),
+          make_static_node_of(a, CLUX_NODE_SYMBOL, "[]"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  construct_node_add_elem(
+      array_short, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *short_err = exec_expr_construct(ctx, array_short);
+  ASSERT_TRUE(clux_value_is_error(short_err));
+  EXPECT_STREQ(error_message_of(short_err),
+               "array construction requires 2 elements, got 1");
+
+  node_t *anon = make_construct_of(a, NULL);
+  construct_node_add_elem(
+      anon, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  construct_node_add_elem(
+      anon, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *tuple = exec_expr_construct(ctx, anon);
+  ASSERT_NE(tuple, nullptr);
+  EXPECT_FALSE(clux_value_is_error(tuple)) << error_message_of(tuple);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tuple)), CLUX_TYPE_TUPLE);
+  clux_value_t *idx0 = clux_context_create_i32(ctx, 0, NULL, NULL);
+  clux_value_t *first = clux_context_index(ctx, tuple, idx0, NULL);
+  ASSERT_FALSE(clux_value_is_error(first));
+  EXPECT_EQ(read_i32(first), 1);
+
+  /* 具名 tuple 构造 <i32, i32>{ 4, 5 }：type 槽是 tuple 类型表达式。 */
+  node_t *tuple_type = create_tuple_node(a);
+  tuple_node_add_elem(
+      tuple_type, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  tuple_node_add_elem(
+      tuple_type, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *named_tuple = make_construct_of(a, tuple_type);
+  construct_node_add_elem(
+      named_tuple, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "4"));
+  construct_node_add_elem(
+      named_tuple, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *named = exec_expr_construct(ctx, named_tuple);
+  ASSERT_NE(named, nullptr);
+  EXPECT_FALSE(clux_value_is_error(named)) << error_message_of(named);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(named)), CLUX_TYPE_TUPLE);
+  clux_value_t *named_first = clux_context_index(ctx, named, idx0, NULL);
+  clux_value_t *named_second = clux_context_index(ctx, named, idx1, NULL);
+  ASSERT_FALSE(clux_value_is_error(named_first));
+  ASSERT_FALSE(clux_value_is_error(named_second));
+  EXPECT_EQ(read_i32(named_first), 4);
+  EXPECT_EQ(read_i32(named_second), 5);
+
+  struct {
+    const char *name;
+    node_t *ctor;
+    const char *message;
+  } cases[] = {
+      {"array with extra elements",
+       [&]() {
+         node_t *n = make_construct_of(
+             a,
+             make_binary_of(
+                 a,
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"),
+                 make_static_node_of(a, CLUX_NODE_SYMBOL, "[]"),
+                 make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3"));
+         return n;
+       }(),
+       "array construction requires 2 elements, got 3"},
+      {"array with a named field",
+       [&]() {
+         node_t *n = make_construct_of(
+             a,
+             make_binary_of(
+                 a,
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"),
+                 make_static_node_of(a, CLUX_NODE_SYMBOL, "[]"),
+                 make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "named and positional elements cannot be mixed in construction"},
+      {"array with a spread element",
+       [&]() {
+         node_t *inner = make_construct_of(
+             a,
+             make_binary_of(
+                 a,
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+                 make_static_node_of(a, CLUX_NODE_SYMBOL, "[]"),
+                 make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+         construct_node_add_elem(
+             inner, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         node_t *n = make_construct_of(
+             a,
+             make_binary_of(
+                 a,
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"),
+                 make_static_node_of(a, CLUX_NODE_SYMBOL, "[]"),
+                 make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         construct_node_add_elem(n, make_spread_elem_of(a, inner));
+         return n;
+       }(),
+       "array construction does not support spread elements yet"},
+      {"named tuple with extra elements",
+       [&]() {
+         node_t *tt = create_tuple_node(a);
+         tuple_node_add_elem(
+             tt, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+         tuple_node_add_elem(
+             tt, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+         node_t *n = make_construct_of(a, tt);
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3"));
+         return n;
+       }(),
+       "tuple construction requires 2 elements, got 3"},
+      {"named tuple with a spread element",
+       [&]() {
+         node_t *tt = create_tuple_node(a);
+         tuple_node_add_elem(
+             tt, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+         tuple_node_add_elem(
+             tt, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+         node_t *n = make_construct_of(a, tt);
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         construct_node_add_elem(
+             n,
+             make_spread_elem_of(
+                 a, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "tuple construction does not support spread elements yet"},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *value = exec_expr_construct(ctx, c.ctor);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value), c.message) << c.name;
+  }
+  /* 独立 AST 根释放：tuple_type 经 construct_node_set_type 挂为 type 槽，
+     随 named_tuple 级联释放；cases 内的 inner/tt 均挂在各自 ctor 根上。 */
+  delete_node(&array_ok);
+  delete_node(&array_short);
+  delete_node(&anon);
+  delete_node(&named_tuple);
+  for (auto &c : cases) {
+    delete_node(&c.ctor);
+  }
+}
+
+/* 场景: 匿名 .{ .age = 1, ...inner } 产出匿名 struct + spread 按名合并
+   （后写覆盖先展开）+ safe_cast 鸭子类型转换到接收方 User + 匿名全分支
+   预期: 匿名构造先独立产出匿名 struct 值；字段表一致时 safe_cast 吸收为
+         User 类型；spread 展开的同名字段被后写覆盖；连续两个 spread 的
+         同名字段后者覆盖前者；显式重名报 duplicate；混用/spread 非法 /
+         缺 value 报语义化 error；匿名空构造产出空 tuple */
+TEST_F(ExecLiteralTest, ConstructAnonymousStructSpreadAndDuckCast) {
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "age"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl = make_struct_decl_of(a, "User", NULL, members);
+  clux_value_t *declared = exec_expr_struct_decl(ctx, decl);
+  ASSERT_FALSE(clux_value_is_error(declared));
+  clux_type_t *user_type = type_described_by(declared);
+  ASSERT_NE(user_type, nullptr);
+
+  node_t *anon = make_construct_of(a, NULL);
+  construct_node_add_elem(
+      anon,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *anon_user = exec_expr_construct(ctx, anon);
+  ASSERT_NE(anon_user, nullptr);
+  EXPECT_FALSE(clux_value_is_error(anon_user)) << error_message_of(anon_user);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(anon_user)),
+            CLUX_TYPE_STRUCT);
+  clux_value_t *ducked =
+      clux_context_safe_cast(ctx, anon_user, user_type, NULL);
+  ASSERT_FALSE(clux_value_is_error(ducked)) << error_message_of(ducked);
+  EXPECT_EQ(clux_value_get_type(ducked), user_type);
+  clux_value_t *ducked_age = clux_context_field(ctx, ducked, "age", NULL);
+  ASSERT_FALSE(clux_value_is_error(ducked_age));
+  EXPECT_EQ(read_i32(ducked_age), 1)
+      << "the duck-cast view must carry the constructed field value";
+
+  /* spread：...(.User{ .age = 3 }) 展开，后写 .age = 9 覆盖。 */
+  node_t *inner = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User"));
+  construct_node_add_elem(
+      inner,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "3")));
+  node_t *spread = make_construct_of(a, NULL);
+  node_t *rest = create_rest_node(a);
+  rest_node_set_expr(rest, inner);
+  construct_node_add_elem(spread, rest);
+  construct_node_add_elem(
+      spread,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "9")));
+  clux_value_t *merged = exec_expr_construct(ctx, spread);
+  ASSERT_NE(merged, nullptr);
+  EXPECT_FALSE(clux_value_is_error(merged)) << error_message_of(merged);
+  clux_value_t *age = clux_context_field(ctx, merged, "age", NULL);
+  ASSERT_FALSE(clux_value_is_error(age));
+  EXPECT_EQ(read_i32(age), 9) << "the later explicit field must override the "
+                                 "spread one";
+
+  /* 双 spread 同名：后一个 spread 展开的 age 覆盖前一个；显式异名字段
+     .other 保证走匿名 struct 分支（纯 spread 无具名字段会落入 tuple 分支）。 */
+  node_t *first_src = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User"));
+  construct_node_add_elem(
+      first_src,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "4")));
+  node_t *second_src = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "User"));
+  construct_node_add_elem(
+      second_src,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "6")));
+  node_t *twice = make_construct_of(a, NULL);
+  construct_node_add_elem(twice, make_spread_elem_of(a, first_src));
+  construct_node_add_elem(twice, make_spread_elem_of(a, second_src));
+  construct_node_add_elem(
+      twice,
+      make_construct_field_of(
+          a, "other", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+  clux_value_t *twice_merged = exec_expr_construct(ctx, twice);
+  ASSERT_NE(twice_merged, nullptr);
+  EXPECT_FALSE(clux_value_is_error(twice_merged))
+      << error_message_of(twice_merged);
+  clux_value_t *twice_age = clux_context_field(ctx, twice_merged, "age", NULL);
+  ASSERT_FALSE(clux_value_is_error(twice_age));
+  EXPECT_EQ(read_i32(twice_age), 6)
+      << "the later spread must override the earlier spread field";
+  clux_value_t *twice_other =
+      clux_context_field(ctx, twice_merged, "other", NULL);
+  ASSERT_FALSE(clux_value_is_error(twice_other));
+  EXPECT_EQ(read_i32(twice_other), 0);
+
+  /* 匿名空构造 .{ }：位置零元素 → 空 tuple（unit）。 */
+  node_t *empty_ctor = make_construct_of(a, NULL);
+  clux_value_t *empty = exec_expr_construct(ctx, empty_ctor);
+  ASSERT_NE(empty, nullptr);
+  EXPECT_FALSE(clux_value_is_error(empty)) << error_message_of(empty);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty)), CLUX_TYPE_TUPLE);
+
+  node_t *dup = make_construct_of(a, NULL);
+  construct_node_add_elem(
+      dup,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      dup,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  clux_value_t *dup_err = exec_expr_construct(ctx, dup);
+  ASSERT_TRUE(clux_value_is_error(dup_err));
+  EXPECT_STREQ(error_message_of(dup_err),
+               "duplicate field 'age' in construction");
+
+  struct {
+    const char *name;
+    node_t *ctor;
+    const char *message;
+  } cases[] = {
+      {"anonymous mixed elements",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "age",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+         return n;
+       }(),
+       "named and positional elements cannot be mixed in construction"},
+      {"anonymous spread of a non-struct value",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         /* 显式具名字段保证落入匿名 struct 分支（纯 spread 会进入 tuple 分支） */
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "other",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+         construct_node_add_elem(
+             n,
+             make_spread_elem_of(
+                 a, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         return n;
+       }(),
+       "spread of non-struct type 'i32' is not supported in construction"},
+      {"anonymous spread without a value",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         /* 显式具名字段保证落入匿名 struct 分支（纯 spread 会进入 tuple 分支） */
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "other",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+         construct_node_add_elem(n, make_spread_elem_of(a, NULL));
+         return n;
+       }(),
+       "spread element requires a value"},
+      {"anonymous field without a value",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         construct_node_add_elem(n,
+                                 make_construct_field_without_value(a, "age"));
+         return n;
+       }(),
+       "construction field requires a name and a value"},
+      {"anonymous positional mixed with a spread element",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         construct_node_add_elem(
+             n,
+             make_spread_elem_of(
+                 a, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       /* spread 产出具名字段集（具名语义），与位置元素混用即报 mixed。 */
+       "named and positional elements cannot be mixed in construction"},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *value = exec_expr_construct(ctx, c.ctor);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value), c.message) << c.name;
+  }
+  /* 独立 AST 根释放：inner 经 rest 挂进 spread，first_src/second_src 挂进
+     twice，均随所属根级联；anon/spread/twice 独立成根。 */
+  delete_node(&decl);
+  delete_node(&anon);
+  delete_node(&spread);
+  delete_node(&twice);
+  delete_node(&empty_ctor);
+  delete_node(&dup);
+  for (auto &c : cases) {
+    delete_node(&c.ctor);
+  }
+}
+
+/* 覆盖率补漏（Step 3）：未覆盖的 error 传播分支与 NULL 元素槽容忍路径。
+   - construct_write_view 的 safe_cast 失败（字段类型不匹配）
+   - construct_spread_struct 的求值 error / spread 字段类型不匹配
+   - construct_anonymous 的 spread/字段求值 error、tuple 缺元素与求值 error
+   - construct_positional_fill 的求值 error（数组与具名 tuple）
+   - 各构造分支对 NULL 元素槽的跳过（node_add_child 允许空槽） */
+TEST_F(ExecLiteralTest, ConstructErrorPropagationAndNullElemTolerance) {
+  /* 声明 Point{ x: i32, y: i32 } 与 SrcS{ x: str }（spread 类型不匹配用） */
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "y"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *point_decl = make_struct_decl_of(a, "Point", NULL, members);
+  ASSERT_FALSE(
+      clux_value_is_error(exec_expr_struct_decl(ctx, point_decl)));
+
+  node_t *src_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      src_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "f64")));
+  node_t *src_decl = make_struct_decl_of(a, "SrcS", NULL, src_members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, src_decl)));
+
+  node_t *src_value = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "SrcS"));
+  construct_node_add_elem(
+      src_value,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1.5f64")));
+
+  /* NULL 元素槽应被跳过，构造仍然成功穷尽 */
+  node_t *with_null = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+  construct_node_add_elem(with_null, NULL);
+  construct_node_add_elem(
+      with_null,
+      make_construct_field_of(
+          a, "x", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  construct_node_add_elem(
+      with_null,
+      make_construct_field_of(
+          a, "y", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+  clux_value_t *null_ok = exec_expr_construct(ctx, with_null);
+  ASSERT_NE(null_ok, nullptr);
+  ASSERT_FALSE(clux_value_is_error(null_ok)) << error_message_of(null_ok);
+  clux_value_t *nx = clux_context_field(ctx, null_ok, "x", NULL);
+  clux_value_t *ny = clux_context_field(ctx, null_ok, "y", NULL);
+  ASSERT_FALSE(clux_value_is_error(nx));
+  ASSERT_FALSE(clux_value_is_error(ny));
+  EXPECT_EQ(read_i32(nx), 1);
+  EXPECT_EQ(read_i32(ny), 2);
+
+  /* 匿名 struct 同样跳过 NULL 元素槽 */
+  node_t *anon_null = make_construct_of(a, NULL);
+  construct_node_add_elem(anon_null, NULL);
+  construct_node_add_elem(
+      anon_null,
+      make_construct_field_of(
+          a, "age", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7")));
+  clux_value_t *anon_null_ok = exec_expr_construct(ctx, anon_null);
+  ASSERT_NE(anon_null_ok, nullptr);
+  ASSERT_FALSE(clux_value_is_error(anon_null_ok))
+      << error_message_of(anon_null_ok);
+  clux_value_t *anon_age = clux_context_field(ctx, anon_null_ok, "age", NULL);
+  ASSERT_FALSE(clux_value_is_error(anon_age));
+  EXPECT_EQ(read_i32(anon_age), 7);
+
+  struct {
+    const char *name;
+    node_t *ctor;
+    const char *message;
+  } cases[] = {
+      {"named struct field type mismatch",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_STRING, "\"hi\"")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "y",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "type 'str' cannot be safely cast to 'i32'"},
+      {"named struct spread operand evaluation error",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(
+             n,
+             make_spread_elem_of(
+                 a,
+                 make_static_node_of(
+                     a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_spread")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "x",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "y",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_spread'"},
+      {"named struct spread field type mismatch",
+       [&]() {
+         node_t *n = make_construct_of(
+             a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Point"));
+         construct_node_add_elem(n, make_spread_elem_of(a, src_value));
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "y",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2")));
+         return n;
+       }(),
+       "cannot safely cast 'f64' to 'i32'"},
+      {"anonymous named field evaluation error",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "age",
+                 make_static_node_of(
+                     a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_value")));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_value'"},
+      {"anonymous spread evaluation error",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         construct_node_add_elem(
+             n,
+             make_construct_field_of(
+                 a,
+                 "other",
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0")));
+         construct_node_add_elem(
+             n,
+             make_spread_elem_of(
+                 a,
+                 make_static_node_of(
+                     a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_spread")));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_spread'"},
+      {"anonymous tuple with a null element slot",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         construct_node_add_elem(n, NULL);
+         return n;
+       }(),
+       "tuple construction element 0 is missing"},
+      {"anonymous tuple element evaluation error",
+       [&]() {
+         node_t *n = make_construct_of(a, NULL);
+         construct_node_add_elem(
+             n,
+             make_static_node_of(
+                 a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_value"));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_value'"},
+      {"array element evaluation error",
+       [&]() {
+         node_t *n = make_construct_of(
+             a,
+             make_binary_of(
+                 a,
+                 make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2"),
+                 make_static_node_of(a, CLUX_NODE_SYMBOL, "[]"),
+                 make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+         construct_node_add_elem(
+             n,
+             make_static_node_of(
+                 a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_value"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_value'"},
+      {"named tuple element evaluation error",
+       [&]() {
+         node_t *tuple_type = create_tuple_node(a);
+         tuple_node_add_elem(
+             tuple_type,
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+         tuple_node_add_elem(
+             tuple_type,
+             make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+         node_t *n = make_construct_of(a, tuple_type);
+         construct_node_add_elem(
+             n,
+             make_static_node_of(
+                 a, CLUX_NODE_LITERAL_IDENTIFIER, "missing_value"));
+         construct_node_add_elem(
+             n, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+         return n;
+       }(),
+       "use of undeclared identifier 'missing_value'"},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *value = exec_expr_construct(ctx, c.ctor);
+    ASSERT_NE(value, nullptr) << c.name;
+    EXPECT_TRUE(clux_value_is_error(value)) << c.name;
+    EXPECT_STREQ(error_message_of(value), c.message) << c.name;
+  }
+  /* 独立 AST 根释放：src_value 挂进 cases 中 spread 类型不匹配用例的 ctor
+     根，随 cases 循环释放；point_decl/src_decl 为声明根。 */
+  delete_node(&point_decl);
+  delete_node(&src_decl);
+  delete_node(&with_null);
+  delete_node(&anon_null);
+  for (auto &c : cases) {
+    delete_node(&c.ctor);
+  }
 }

@@ -36,6 +36,9 @@ clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node);
    批次一并处理）。 */
 clux_value_t *exec_expr_struct_decl_value(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node);
+/* 构造表达式 .<type?>{ elem, ... }（白皮书 §5.10）：构造必穷尽，具名按
+   类型分流，匿名产出匿名 struct/tuple（经 safe_cast 鸭子类型转换到接收方）。 */
+clux_value_t *exec_expr_construct(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_assign(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_ternary(clux_context_t *ctx, node_t *node);
 #ifdef __cplusplus

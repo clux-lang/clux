@@ -1,4 +1,5 @@
 #include "exec/expr.h"
+#include <stdio.h>
 #include "core/allocator.h"
 #include "core/location.h"
 #include "engine/context.h"
@@ -6,8 +7,11 @@
 #include "engine/interface.h"
 #include "engine/qualifier.h"
 #include "engine/scope.h"
+#include "engine/struct.h"
+#include "engine/tuple.h"
 #include "engine/type.h"
 #include "engine/value.h"
+#include "engine/array.h"
 #include "engine/cunion.h"
 #include "engine/enum.h"
 #include "engine/interface_type.h"
@@ -16,6 +20,8 @@
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
+#include "parser/node_construct.h"
+#include "parser/node_construct_field.h"
 #include "parser/node_enum_decl.h"
 #include "parser/node_enum_variant.h"
 #include "parser/node_field.h"
@@ -31,6 +37,7 @@
 #include "parser/node_struct_decl.h"
 #include "parser/node_struct_member.h"
 #include "parser/node_subscript.h"
+#include "parser/node_rest.h"
 #include "parser/node_ternary.h"
 #include "parser/node_tuple.h"
 #include "parser/node_union.h"
@@ -1783,6 +1790,695 @@ clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node) {
   }
   return clux_context_create_type_value(
       ctx, type, NULL, node_get_location(node));
+}
+
+/* —— 构造表达式（白皮书 §5.10）——
+   构造必穷尽：类型系统没有默认零值，省略字段是错误。具名构造按类型分流
+   （struct 具名字段穷尽 / union+cunion 恰好一个成员 / 数组+元组位置元素）；
+   匿名构造产出匿名类型（具名字段 → 匿名 struct，位置元素 → 匿名 tuple），
+   在赋值/实参/返回位置经鸭子类型（safe_cast）隐式转换到接收方。 */
+
+/* view 写入：safe_cast 吸收协变（继承/指针擦除）后经通用 assign 写穿。
+   错误自传播（error 是硬错误值）。 */
+static clux_value_t *construct_write_view(clux_context_t *ctx,
+                                          clux_value_t *view,
+                                          clux_value_t *value,
+                                          const location_t *loc) {
+  clux_value_t *cast =
+      clux_context_safe_cast(ctx, value, clux_value_get_type(view), loc);
+  if (clux_value_is_error(cast)) {
+    return cast;
+  }
+  return clux_context_assign(ctx, view, cast, loc);
+}
+
+/* 按名查 struct 字段下标（线性扫描），未找到返回 (size_t)-1。 */
+static size_t struct_field_index(clux_type_t *type, const char *name) {
+  size_t count = clux_struct_field_count(type);
+  for (size_t idx = 0; idx < count; idx++) {
+    if (strcmp(clux_struct_get_field(type, idx)->name, name) == 0) {
+      return idx;
+    }
+  }
+  return (size_t)-1;
+}
+
+/* 构造字段覆盖状态：0=未写，1=spread 展开覆盖，2=显式字段写入。 */
+#define CONSTRUCT_FIELD_UNSET 0
+#define CONSTRUCT_FIELD_SPREAD 1
+#define CONSTRUCT_FIELD_EXPLICIT 2
+/* spread 展开 ...value → 按名合并进目标 struct（后写覆盖先展开）：
+   展开值须为 struct，字段名须存在于目标类型。返回 NULL 表示展开
+   成功，非 NULL 为待上抛的 error 值。 */
+static clux_value_t *construct_spread_struct(clux_context_t *ctx,
+                                             node_t *elem,
+                                             clux_value_t *target,
+                                             unsigned char *covered,
+                                             clux_type_t *type,
+                                             const location_t *loc) {
+  node_t *operand = rest_node_get_expr(elem);
+  if (!operand) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(elem), "spread element requires a value");
+  }
+  clux_value_t *spread = exec_operand(ctx, operand);
+  if (clux_value_is_error(spread)) {
+    return spread;
+  }
+  clux_type_t *src_type = clux_value_get_type(spread);
+  if (clux_type_get_kind(src_type) != CLUX_TYPE_STRUCT) {
+    const char *src_name = clux_type_get_name(src_type);
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(elem),
+        "spread of non-struct type '%s' is not supported in construction",
+        src_name ? src_name : "<unknown>");
+  }
+  size_t src_count = clux_struct_field_count(src_type);
+  for (size_t fidx = 0; fidx < src_count; fidx++) {
+    const char *name = clux_struct_get_field(src_type, fidx)->name;
+    size_t midx = struct_field_index(type, name);
+    if (midx == (size_t)-1) {
+      const char *type_name = clux_type_get_name(type);
+      return clux_context_create_error_message(ctx,
+                                               node_get_location(elem),
+                                               "type '%s' has no field '%s'",
+                                               type_name ? type_name
+                                                         : "<unknown>",
+                                               name);
+    }
+    clux_value_t *src_view = clux_context_field(ctx, spread, name, loc);
+    if (clux_value_is_error(src_view)) {
+      return src_view;
+    }
+    clux_value_t *dst_view = clux_context_field(ctx, target, name, loc);
+    if (clux_value_is_error(dst_view)) {
+      return dst_view;
+    }
+    clux_value_t *written = construct_write_view(ctx, dst_view, src_view, loc);
+    if (clux_value_is_error(written)) {
+      return written;
+    }
+    covered[midx] = CONSTRUCT_FIELD_SPREAD;
+  }
+  return NULL;
+}
+
+/* 具名 struct 构造：字段顺序任意、构造必穷尽（缺字段报语义化 error）；
+   spread 合并按名展开（后写覆盖先展开），spread 之后显式同名字段覆盖
+   重写，两个显式同名字段才是 duplicate。 */
+static clux_value_t *
+construct_struct(clux_context_t *ctx, node_t *node, clux_type_t *type) {
+  const location_t *loc = node_get_location(node);
+  size_t field_count = clux_struct_field_count(type);
+  unsigned char covered[field_count ? field_count : 1];
+  memset(covered, 0, sizeof(covered));
+  clux_value_t *target = clux_context_create_struct(ctx, type, NULL, loc);
+  if (clux_value_is_error(target)) {
+    return target;
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const char *type_name = clux_type_get_name(type);
+  type_name = type_name ? type_name : "<anonymous>";
+  size_t elem_count = construct_node_get_elem_count(node);
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    node_t *elem = construct_node_get_elem(node, idx);
+    if (!elem) {
+      continue;
+    }
+    if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
+      clux_value_t *fail =
+          construct_spread_struct(ctx, elem, target, covered, type, loc);
+      if (fail) {
+        return fail;
+      }
+      continue;
+    }
+
+    if (node_get_kind(elem) != CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "named and positional elements cannot be mixed in construction");
+    }
+    node_t *name_node = construct_field_node_get_name(elem);
+    node_t *value_node = construct_field_node_get_value(elem);
+    if (!name_node || !value_node) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "construction field requires a name and a value");
+    }
+    char *name = location_get(node_get_location(name_node), allocator);
+    size_t midx = struct_field_index(type, name);
+    if (midx == (size_t)-1) {
+      clux_value_t *fail =
+          clux_context_create_error_message(ctx,
+                                            node_get_location(elem),
+                                            "type '%s' has no field '%s'",
+                                            type_name,
+                                            name);
+      allocator_free(allocator, (void **)&name);
+      return fail;
+    }
+    if (covered[midx] == CONSTRUCT_FIELD_EXPLICIT) {
+      clux_value_t *fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "duplicate field '%s' in construction of '%s'",
+          name,
+          type_name);
+      allocator_free(allocator, (void **)&name);
+      return fail;
+    }
+    clux_value_t *value = exec_operand(ctx, value_node);
+    if (clux_value_is_error(value)) {
+      allocator_free(allocator, (void **)&name);
+      return value;
+    }
+    clux_value_t *view = clux_context_field(ctx, target, name, loc);
+    if (clux_value_is_error(view)) {
+      allocator_free(allocator, (void **)&name);
+      return view;
+    }
+    clux_value_t *written = construct_write_view(ctx, view, value, loc);
+    allocator_free(allocator, (void **)&name);
+    if (clux_value_is_error(written)) {
+      return written;
+    }
+    covered[midx] = CONSTRUCT_FIELD_EXPLICIT;
+  }
+  for (size_t fidx = 0; fidx < field_count; fidx++) {
+    if (!covered[fidx]) {
+      return clux_context_create_error_message(
+          ctx,
+          loc,
+          "missing field '%s' in construction of '%s'",
+          clux_struct_get_field(type, fidx)->name,
+          type_name);
+    }
+  }
+  return target;
+}
+
+/* 成员未找到的语义化 error（union/cunion 共用）。 */
+static clux_value_t *construct_member_not_found(clux_context_t *ctx,
+                                                clux_type_t *type,
+                                                const char *name,
+                                                const location_t *loc) {
+  const char *type_name = clux_type_get_name(type);
+  const char *kind_text =
+      clux_type_get_kind(type) == CLUX_TYPE_UNION ? "tag union" : "cunion";
+  return clux_context_create_error_message(ctx,
+                                           loc,
+                                           "%s '%s' has no member '%s'",
+                                           kind_text,
+                                           type_name ? type_name
+                                                     : "<anonymous>",
+                                           name);
+}
+
+/* 单成员构造（tag union / cunion）：恰好一个具名字段，字段名即 member
+   选择。tag union 经 union_set_member 激活成员后写字段 view；cunion 直接
+   写共享块。多成员与位置元素报语义化 error。 */
+static clux_value_t *
+construct_union_like(clux_context_t *ctx, node_t *node, clux_type_t *type) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  const char *kind_text =
+      clux_type_get_kind(type) == CLUX_TYPE_UNION ? "tag union" : "cunion";
+  size_t elem_count = construct_node_get_elem_count(node);
+  node_t *field_elem = NULL;
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    node_t *elem = construct_node_get_elem(node, idx);
+    if (!elem) {
+      continue;
+    }
+    if (node_get_kind(elem) != CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "%s construction takes exactly one named member",
+          kind_text);
+    }
+    if (field_elem) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "%s construction takes exactly one named member",
+          kind_text);
+    }
+    field_elem = elem;
+  }
+  if (!field_elem) {
+    return clux_context_create_error_message(
+        ctx, loc, "%s construction takes one named member", kind_text);
+  }
+  node_t *name_node = construct_field_node_get_name(field_elem);
+  node_t *value_node = construct_field_node_get_value(field_elem);
+  if (!name_node || !value_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(field_elem),
+        "construction field requires a name and a value");
+  }
+  char *name = location_get(node_get_location(name_node), allocator);
+  bool tag = clux_type_get_kind(type) == CLUX_TYPE_UNION;
+  clux_type_t *member_type = NULL;
+  if (tag) {
+    const clux_union_member_t *member = clux_union_find_member(type, name);
+    if (!member) {
+      clux_value_t *fail = construct_member_not_found(ctx, type, name, loc);
+      allocator_free(allocator, (void **)&name);
+      return fail;
+    }
+    member_type = member->type;
+  } else {
+    const clux_cunion_member_t *member = clux_cunion_find_member(type, name);
+    if (!member) {
+      clux_value_t *fail = construct_member_not_found(ctx, type, name, loc);
+      allocator_free(allocator, (void **)&name);
+      return fail;
+    }
+    member_type = member->type;
+  }
+  clux_value_t *value = exec_operand(ctx, value_node);
+  if (clux_value_is_error(value)) {
+    allocator_free(allocator, (void **)&name);
+    return value;
+  }
+  clux_value_t *union_value =
+      tag ? clux_context_create_union(ctx, type, NULL, loc)
+          : clux_context_create_cunion(ctx, type, NULL, loc);
+  if (clux_value_is_error(union_value)) {
+    allocator_free(allocator, (void **)&name);
+    return union_value;
+  }
+  if (tag) {
+    clux_value_t *set =
+        clux_context_union_set_member(ctx, union_value, name, loc);
+    if (clux_value_is_error(set)) {
+      allocator_free(allocator, (void **)&name);
+      return set;
+    }
+  }
+  clux_value_t *view = clux_context_field(ctx, union_value, name, loc);
+  if (clux_value_is_error(view)) {
+    allocator_free(allocator, (void **)&name);
+    return view;
+  }
+  clux_value_t *cast = clux_context_safe_cast(ctx, value, member_type, loc);
+  allocator_free(allocator, (void **)&name);
+  if (clux_value_is_error(cast)) {
+    return cast;
+  }
+  clux_value_t *written = clux_context_assign(ctx, view, cast, loc);
+  if (clux_value_is_error(written)) {
+    return written;
+  }
+  return union_value;
+}
+
+/* 位置元素预检（数组/元组构造，白皮书 §5.10）：混用报错，spread 展开
+   暂不支持，个数必须与类型长度一致（构造必穷尽——少即缺元素，多即溢出）。
+   返回 NULL 表示预检通过，非 NULL 为待上抛 error。 */
+static clux_value_t *construct_positional_check(clux_context_t *ctx,
+                                                node_t *node,
+                                                size_t expected,
+                                                const char *what) {
+  size_t elem_count = construct_node_get_elem_count(node);
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    node_t *elem = construct_node_get_elem(node, idx);
+    if (!elem) {
+      continue;
+    }
+    if (node_get_kind(elem) == CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "named and positional elements cannot be mixed in construction");
+    }
+    if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "%s construction does not support spread elements yet",
+          what);
+    }
+  }
+  if (elem_count != expected) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "%s construction requires %zu elements, got %zu",
+        what,
+        expected,
+        elem_count);
+  }
+  return NULL;
+}
+
+/* 位置元素写入：按序 index 取 view + assign 写穿（i32 下标值逐个创建，
+   数量有界——与构造元素个数一致）。返回 NULL 表示写入成功。 */
+static clux_value_t *construct_positional_fill(clux_context_t *ctx,
+                                               node_t *node,
+                                               clux_value_t *aggregate,
+                                               size_t count) {
+  const location_t *loc = node_get_location(node);
+  for (size_t idx = 0; idx < count; idx++) {
+    clux_value_t *value = exec_operand(ctx, construct_node_get_elem(node, idx));
+    if (clux_value_is_error(value)) {
+      return value;
+    }
+    clux_value_t *index = clux_context_create_i32(ctx, (int32_t)idx, NULL, loc);
+    if (clux_value_is_error(index)) {
+      return index;
+    }
+    clux_value_t *view = clux_context_index(ctx, aggregate, index, loc);
+    if (clux_value_is_error(view)) {
+      return view;
+    }
+    clux_value_t *written = construct_write_view(ctx, view, value, loc);
+    if (clux_value_is_error(written)) {
+      return written;
+    }
+  }
+  return NULL;
+}
+
+/* 具名数组构造 [N]T{ e0, e1, ... }：元素个数 == N，逐位写入。 */
+static clux_value_t *
+construct_array(clux_context_t *ctx, node_t *node, clux_type_t *type) {
+  size_t len = clux_array_get_length(type);
+  clux_value_t *fail = construct_positional_check(ctx, node, len, "array");
+  if (fail) {
+    return fail;
+  }
+  const location_t *loc = node_get_location(node);
+  clux_value_t *array = clux_context_create_array(ctx, type, NULL, loc);
+  if (clux_value_is_error(array)) {
+    return array;
+  }
+  fail = construct_positional_fill(ctx, node, array, len);
+  if (fail) {
+    return fail;
+  }
+  return array;
+}
+
+/* 具名元组构造 <T, U, ...>{ e0, e1, ... }：元素个数 == 元素类型数。 */
+static clux_value_t *
+construct_tuple_value(clux_context_t *ctx, node_t *node, clux_type_t *type) {
+  size_t count = clux_tuple_elem_count(type);
+  clux_value_t *fail = construct_positional_check(ctx, node, count, "tuple");
+  if (fail) {
+    return fail;
+  }
+  const location_t *loc = node_get_location(node);
+  clux_value_t *tuple = clux_context_create_tuple(ctx, type, NULL, loc);
+  if (clux_value_is_error(tuple)) {
+    return tuple;
+  }
+  fail = construct_positional_fill(ctx, node, tuple, count);
+  if (fail) {
+    return fail;
+  }
+  return tuple;
+}
+
+/* 匿名构造条目：spread 展开的字段名借用展开值类型的驻留串（owned_name
+   为 false，不参与本地释放）；value 归 scope 所有，条目只持借用引用。 */
+typedef struct {
+  const char *name;
+  bool owned_name;
+  clux_value_t *value;
+} construct_anon_entry_t;
+
+static void construct_anon_cleanup(allocator_t *allocator,
+                                   construct_anon_entry_t *entries,
+                                   size_t used) {
+  for (size_t idx = 0; idx < used; idx++) {
+    if (entries[idx].owned_name) {
+      allocator_free(allocator, (void **)&entries[idx].name);
+    }
+  }
+}
+
+/* 匿名构造（白皮书 §5.10）：具名字段产出匿名 struct（先按元素序求值，
+   字段表由元素给出，经 begin_struct_type 建型后逐字段写入），位置元素
+   产出匿名 tuple。混用是错误；spread 限 struct 按名合并（后写覆盖先展开）；
+   显式重名字段是错误。 */
+static clux_value_t *construct_anonymous(clux_context_t *ctx, node_t *node) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  size_t elem_count = construct_node_get_elem_count(node);
+  bool has_named = false;
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    node_t *elem = construct_node_get_elem(node, idx);
+    if (elem && (node_get_kind(elem) == CLUX_NODE_EXPR_CONSTRUCT_FIELD ||
+                 /* spread 产出具名字段集——具名语义（struct 分支），纯 spread
+            的匿名构造 .{ ...src } 产出匿名 struct 而非 tuple。 */
+                 node_get_kind(elem) == CLUX_NODE_EXPR_REST)) {
+      has_named = true;
+      break;
+    }
+  }
+  if (has_named) {
+    /* pass 1：按元素序求值（spread 求值为待展开 struct 值），统计字段
+       上界；混用在此一并报错。 */
+    clux_value_t *elem_values[elem_count ? elem_count : 1];
+    size_t entry_cap = 0;
+    for (size_t idx = 0; idx < elem_count; idx++) {
+      node_t *elem = construct_node_get_elem(node, idx);
+      elem_values[idx] = NULL;
+      if (!elem) {
+        continue;
+      }
+      if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
+        node_t *operand = rest_node_get_expr(elem);
+        if (!operand) {
+          return clux_context_create_error_message(
+              ctx, node_get_location(elem), "spread element requires a value");
+        }
+        clux_value_t *spread = exec_operand(ctx, operand);
+        if (clux_value_is_error(spread)) {
+          return spread;
+        }
+        clux_type_t *src_type = clux_value_get_type(spread);
+        if (clux_type_get_kind(src_type) != CLUX_TYPE_STRUCT) {
+          const char *src_name = clux_type_get_name(src_type);
+          return clux_context_create_error_message(
+              ctx,
+              node_get_location(elem),
+              "spread of non-struct type '%s' is not supported in "
+              "construction",
+              src_name ? src_name : "<unknown>");
+        }
+        elem_values[idx] = spread;
+        entry_cap += clux_struct_field_count(src_type);
+        continue;
+      }
+      if (node_get_kind(elem) != CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+        return clux_context_create_error_message(
+            ctx,
+            node_get_location(elem),
+            "named and positional elements cannot be mixed in construction");
+      }
+      node_t *value_node = construct_field_node_get_value(elem);
+      node_t *name_node = construct_field_node_get_name(elem);
+      if (!name_node || !value_node) {
+        return clux_context_create_error_message(
+            ctx,
+            node_get_location(elem),
+            "construction field requires a name and a value");
+      }
+      clux_value_t *value = exec_operand(ctx, value_node);
+      if (clux_value_is_error(value)) {
+        return value;
+      }
+      elem_values[idx] = value;
+      entry_cap++;
+    }
+    /* pass 2：组装条目表（spread 展开的字段读取为待合并 view，显式字段
+       查重拒绝——覆盖语义只保留给 spread 合并）。 */
+    construct_anon_entry_t entries[entry_cap ? entry_cap : 1];
+    size_t used = 0;
+    for (size_t idx = 0; idx < elem_count; idx++) {
+      node_t *elem = construct_node_get_elem(node, idx);
+      if (!elem) {
+        continue;
+      }
+      if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
+        clux_type_t *src_type = clux_value_get_type(elem_values[idx]);
+        size_t src_count = clux_struct_field_count(src_type);
+        for (size_t fidx = 0; fidx < src_count; fidx++) {
+          const char *name = clux_struct_get_field(src_type, fidx)->name;
+          size_t eidx = 0;
+          for (; eidx < used; eidx++) {
+            if (strcmp(entries[eidx].name, name) == 0) {
+              break;
+            }
+          }
+          clux_value_t *view =
+              clux_context_field(ctx, elem_values[idx], name, loc);
+          if (clux_value_is_error(view)) {
+            construct_anon_cleanup(allocator, entries, used);
+            return view;
+          }
+          if (eidx < used) {
+            entries[eidx].value = view;
+            continue;
+          }
+          entries[used].name = name;
+          entries[used].owned_name = false;
+          entries[used].value = view;
+          used++;
+        }
+        continue;
+      }
+      node_t *name_node = construct_field_node_get_name(elem);
+      char *name = location_get(node_get_location(name_node), allocator);
+      size_t eidx = 0;
+      for (; eidx < used; eidx++) {
+        if (strcmp(entries[eidx].name, name) == 0) {
+          break;
+        }
+      }
+      if (eidx < used && entries[eidx].owned_name) {
+        clux_value_t *fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(elem),
+            "duplicate field '%s' in construction",
+            name);
+        allocator_free(allocator, (void **)&name);
+        construct_anon_cleanup(allocator, entries, used);
+        return fail;
+      }
+      if (eidx < used) {
+        /* spread 展开的同名字段被后写的显式字段覆盖（名字仍借用自
+           spread 源，owned_name 保持 false）。 */
+        allocator_free(allocator, (void **)&name);
+        entries[eidx].value = elem_values[idx];
+        continue;
+      }
+      entries[used].name = name;
+      entries[used].owned_name = true;
+      entries[used].value = elem_values[idx];
+      used++;
+    }
+    /* 建型（字段表由条目给出，匿名不去重）：begin_struct_type 要求类型
+       具名，匿名 struct 用计数器生成唯一占位名——safe_cast 鸭子转换只看
+       字段表（#27），占位名不参与类型相容。 */
+    char anon_name[64];
+    static size_t anon_struct_counter = 0;
+    (void)snprintf(
+        anon_name, sizeof(anon_name), "<anonymous-%zu>", anon_struct_counter++);
+    clux_struct_field_t fields[used ? used : 1];
+    for (size_t eidx = 0; eidx < used; eidx++) {
+      fields[eidx].name = entries[eidx].name;
+      fields[eidx].type = clux_value_get_type(entries[eidx].value);
+    }
+    clux_type_t *type =
+        clux_context_begin_struct_type(ctx, anon_name, fields, used);
+    if (!type) {
+      construct_anon_cleanup(allocator, entries, used);
+      return clux_context_create_error_message(
+          ctx, loc, "anonymous struct construction failed");
+    }
+    clux_value_t *target = clux_context_create_struct(ctx, type, NULL, loc);
+    if (clux_value_is_error(target)) {
+      construct_anon_cleanup(allocator, entries, used);
+      return target;
+    }
+    for (size_t eidx = 0; eidx < used; eidx++) {
+      clux_value_t *view =
+          clux_context_field(ctx, target, entries[eidx].name, loc);
+      if (clux_value_is_error(view)) {
+        construct_anon_cleanup(allocator, entries, used);
+        return view;
+      }
+      clux_value_t *written =
+          construct_write_view(ctx, view, entries[eidx].value, loc);
+      if (clux_value_is_error(written)) {
+        construct_anon_cleanup(allocator, entries, used);
+        return written;
+      }
+    }
+    construct_anon_cleanup(allocator, entries, used);
+    return target;
+  }
+  /* 匿名 tuple：位置元素逐个求值 → 元素类型序列建型 → 逐位写入。 */
+  clux_value_t *values[elem_count ? elem_count : 1];
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    node_t *elem = construct_node_get_elem(node, idx);
+    if (!elem) {
+      return clux_context_create_error_message(
+          ctx, loc, "tuple construction element %zu is missing", idx);
+    }
+    if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "tuple construction does not support spread elements yet");
+    }
+    clux_value_t *value = exec_operand(ctx, elem);
+    if (clux_value_is_error(value)) {
+      return value;
+    }
+    values[idx] = value;
+  }
+  clux_type_t *elem_types[elem_count ? elem_count : 1];
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    elem_types[idx] = clux_value_get_type(values[idx]);
+  }
+  clux_type_t *type = clux_context_get_tuple_type(ctx, elem_types, elem_count);
+  if (!type) {
+    return clux_context_create_error_message(
+        ctx, loc, "tuple type creation failed");
+  }
+  clux_value_t *tuple = clux_context_create_tuple(ctx, type, NULL, loc);
+  if (clux_value_is_error(tuple)) {
+    return tuple;
+  }
+  clux_value_t *fail = construct_positional_fill(ctx, node, tuple, elem_count);
+  if (fail) {
+    return fail;
+  }
+  return tuple;
+}
+
+/* 构造表达式 .<type?>{ elem, ... }：TYPE 槽为 NULL 时是匿名构造；
+   具名构造按类型分流（struct 穷尽字段 / tag union、cunion 恰一成员 /
+   数组、元组位置元素），不支持构造的类型报语义化 error。 */
+clux_value_t *exec_expr_construct(clux_context_t *ctx, node_t *node) {
+  node_t *type_node = construct_node_get_type(node);
+  if (!type_node) {
+    return construct_anonymous(ctx, node);
+  }
+  clux_value_t *err = NULL;
+  clux_type_t *type = exec_operand_type(ctx, type_node, &err);
+  if (!type) {
+    return err;
+  }
+  switch (clux_type_get_kind(type)) {
+  case CLUX_TYPE_STRUCT:
+    return construct_struct(ctx, node, type);
+  case CLUX_TYPE_UNION:
+  case CLUX_TYPE_CUNION:
+    return construct_union_like(ctx, node, type);
+  case CLUX_TYPE_ARRAY:
+    return construct_array(ctx, node, type);
+  case CLUX_TYPE_TUPLE:
+    return construct_tuple_value(ctx, node, type);
+  default: {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "type '%s' does not support construction",
+        type_name ? type_name : "<unknown>");
+  }
+  }
 }
 
 /* &&= / ||= 短路复合赋值：左值已是结果时跳过右值求值直接返回目标；

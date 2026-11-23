@@ -23,6 +23,14 @@ static bool is_error_value(clux_value_t *value) {
   return clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR;
 }
 
+size_t clux_array_get_length(clux_type_t *type) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_ARRAY) {
+    return 0;
+  }
+  clux_array_meta_t *meta = array_meta(type);
+  return meta ? meta->len : 0;
+}
+
 static bool array_kind(clux_type_kind_t kind) {
   switch (kind) {
   case CLUX_TYPE_ARRAY:
