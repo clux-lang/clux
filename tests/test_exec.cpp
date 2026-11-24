@@ -11664,11 +11664,10 @@ TEST_F(ExecLiteralTest, GenericInstantiationArgumentErrorPaths) {
   delete_node(&decl);
 }
 
-/* 场景: 参数表预扫两条拒绝路径——约束参数（T extends i32）与
-        参数包结点（非 GENERIC_PARAM 的 rest 成员）
-   预期: 分别报 "generic constraints are not supported yet" 与
-         "generic parameter pack is not supported yet" */
-TEST_F(ExecLiteralTest, GenericInstantiationRejectsConstraintAndPack) {
+/* 场景: func cf_g[T extends i32](): i32 —— 类型模式约束（白皮书 §6.5）
+   预期: 约束在绑定后按派生关系判定：i32 实参满足（恒等）产出 FUNC
+         实例；str 实参违反报语义化错误 */
+TEST_F(ExecLiteralTest, GenericConstraintTypePatternChecks) {
   node_t *constrained = create_generic_params_node(a);
   generic_params_node_add_param(
       constrained,
@@ -11688,18 +11687,31 @@ TEST_F(ExecLiteralTest, GenericInstantiationRejectsConstraintAndPack) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
             CLUX_TYPE_FUNC_TEMPLATE);
 
-  node_t *constrained_sub =
+  node_t *ok_sub =
       make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "cf_g"),
                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
-  clux_value_t *constrained_result = exec_expr_subscript(ctx, constrained_sub);
-  ASSERT_NE(constrained_result, nullptr);
-  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(constrained_result)),
-            CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(constrained_result),
-               "generic constraints are not supported yet");
-  delete_node(&constrained_sub);
-  delete_node(&decl);
+  clux_value_t *ok_result = exec_expr_subscript(ctx, ok_sub);
+  ASSERT_NE(ok_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ok_result)), CLUX_TYPE_FUNC)
+      << "a satisfied type-pattern constraint must produce an instance";
+  delete_node(&ok_sub);
 
+  node_t *bad_sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "cf_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str"));
+  clux_value_t *bad_result = exec_expr_subscript(ctx, bad_sub);
+  ASSERT_NE(bad_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_result),
+               "type 'str' does not satisfy constraint 'i32'");
+  delete_node(&bad_sub);
+  delete_node(&decl);
+}
+
+/* 场景: 参数包 [T, ...] 模板实例化
+   预期: 预扫快速失败 "generic parameter pack is not supported yet" */
+TEST_F(ExecLiteralTest, GenericInstantiationRejectsParameterPack) {
   node_t *packed = create_generic_params_node(a);
   generic_params_node_add_param(
       packed, make_generic_param_of(a, "T", NULL, NULL, NULL));
@@ -11729,6 +11741,785 @@ TEST_F(ExecLiteralTest, GenericInstantiationRejectsConstraintAndPack) {
                "generic parameter pack is not supported yet");
   delete_node(&packed_sub);
   delete_node(&packed_decl);
+}
+
+/* 场景: interface IW_g { write(data: i32): void; } +
+        struct File_g { func write(data: i32): void {} } +
+        func gw_g[W extends IW_g](w: W): i32 —— 接口约束结构判定（§6.5）
+   预期: File_g 提供全部成员（名字 + func 签名一致）即满足约束（无需
+         implements），实例化产出 FUNC 实例 */
+TEST_F(ExecLiteralTest, GenericConstraintInterfaceSatisfiedStructurally) {
+  node_t *iface = make_interface_decl_of(
+      a, "IW_g", NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *iface_value = exec_expr_interface_decl(ctx, iface);
+  ASSERT_NE(iface_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(iface_value));
+
+  /* pad 字段满足引擎"至少一个字段"门禁（接口判定只看 attribute 表的
+     方法成员，字段数不参与）。 */
+  node_t *members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "pad"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *method_params = create_func_params_node(a);
+  func_params_node_add_param(
+      method_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "data"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(
+      members,
+      make_stmt_func_of(
+          a,
+          make_func_decl_of(a,
+                            NULL,
+                            NULL,
+                            method_params,
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+                            create_stmt_block_node(a))));
+  node_t *decl = make_struct_decl_of(a, "File_g", NULL, members);
+  clux_value_t *file_value = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(file_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(file_value));
+
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(
+          a, "W", NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "IW_g"), NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "w"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "W")));
+  node_t *gw =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "gw_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *gw_tmpl = exec_expr_func_decl(ctx, gw);
+  ASSERT_NE(gw_tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(gw_tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "gw_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "File_g"));
+  clux_value_t *result = exec_expr_subscript(ctx, sub);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_FUNC)
+      << "a struct satisfying the interface constraint must instantiate";
+  delete_node(&sub);
+  delete_node(&gw);
+  delete_node(&decl);
+  delete_node(&iface);
+}
+
+/* 场景: struct Miss_g（无 write）与 struct BadSig_g（write 签名不符）对
+        IW2_g 约束的实例化
+   预期: 分别报第一个缺失成员与签名不符成员（§6.5：报第一个失败成员） */
+TEST_F(ExecLiteralTest, GenericConstraintInterfaceReportsFirstViolation) {
+  node_t *iface = make_interface_decl_of(
+      a, "IW2_g", NULL, make_interface_members_of(a, "write", false, NULL));
+  clux_value_t *iface_value = exec_expr_interface_decl(ctx, iface);
+  ASSERT_NE(iface_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(iface_value));
+
+  /* 缺失成员：struct 仅一个无关字段 */
+  node_t *miss_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      miss_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "pad"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *miss_decl = make_struct_decl_of(a, "Miss_g", NULL, miss_members);
+  clux_value_t *miss_value = exec_expr_struct_decl(ctx, miss_decl);
+  ASSERT_NE(miss_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(miss_value));
+
+  /* 签名不符：write(data: str): void（pad 字段过引擎字段门禁） */
+  node_t *bad_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      bad_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "pad"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *bad_params = create_func_params_node(a);
+  func_params_node_add_param(
+      bad_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "data"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str")));
+  struct_members_node_add_member(
+      bad_members,
+      make_stmt_func_of(
+          a,
+          make_func_decl_of(a,
+                            NULL,
+                            NULL,
+                            bad_params,
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+                            create_stmt_block_node(a))));
+  node_t *bad_decl = make_struct_decl_of(a, "BadSig_g", NULL, bad_members);
+  clux_value_t *bad_value = exec_expr_struct_decl(ctx, bad_decl);
+  ASSERT_NE(bad_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(bad_value));
+
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(a,
+                            "W",
+                            NULL,
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "IW2_g"),
+                            NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "w"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "W")));
+  node_t *gw =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "gw2_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *gw_tmpl = exec_expr_func_decl(ctx, gw);
+  ASSERT_NE(gw_tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(gw_tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *miss_sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "gw2_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Miss_g"));
+  clux_value_t *miss_result = exec_expr_subscript(ctx, miss_sub);
+  ASSERT_NE(miss_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(miss_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(miss_result),
+               "type 'Miss_g' does not satisfy interface constraint 'IW2_g': "
+               "missing member 'write'");
+  delete_node(&miss_sub);
+
+  node_t *bad_sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "gw2_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "BadSig_g"));
+  clux_value_t *bad_result = exec_expr_subscript(ctx, bad_sub);
+  ASSERT_NE(bad_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_result),
+               "type 'BadSig_g' does not satisfy interface constraint 'IW2_g': "
+               "member 'write' signature mismatch");
+  delete_node(&bad_sub);
+  delete_node(&gw);
+  delete_node(&bad_decl);
+  delete_node(&miss_decl);
+  delete_node(&iface);
+}
+
+/* 场景: func pair_g[T](a: T, b: T): T { return a; } 调用 pair_g(7, 8)
+        —— 调用点推导（白皮书 §6.7），仅函数调用触发
+   预期: T 从实参类型推断为 i32（两次出现判等不冲突），实例化后按普通
+         调用执行产出 clone 出帧的 i32 7 */
+TEST_F(ExecLiteralTest, GenericInferenceFromCallArguments) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pair_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"),
+                        body);
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *args[] = {make_node(CLUX_NODE_LITERAL_NUMERIC, "7"),
+                    make_node(CLUX_NODE_LITERAL_NUMERIC, "8")};
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pair_g"), 2, args);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 7);
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: cflt_g(7, 2.5) —— 同一类型参数两次出现推得不判等类型
+   预期: 报推断冲突 "cannot infer generic parameter 'T': conflicting
+         argument types" */
+TEST_F(ExecLiteralTest, GenericInferenceConflictReportsError) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "cflt_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"),
+                        create_stmt_block_node(a));
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *args[] = {make_node(CLUX_NODE_LITERAL_NUMERIC, "7"),
+                    make_node(CLUX_NODE_LITERAL_BOOLEAN, "true")};
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "cflt_g"), 2, args);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "cannot infer generic parameter 'T': conflicting "
+               "argument types");
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: func dm_g[T = i32](): i32 { return 3; } 调用 dm_g()
+        —— T 无法从实参推断（无实参）走默认值回退（§6.2 + §6.7）
+   预期: 默认值 i32 补齐绑定，调用产出 i32 3 */
+TEST_F(ExecLiteralTest, GenericInferenceFallsBackToDefault) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(
+          a, "T", NULL, NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_NUMERIC, "3"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "dm_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"),
+                        body);
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "dm_g"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 3);
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: func ng_g[T](x: i32): i32 调用 ng_g(5) —— 函数形参类型不含
+        类型参数（具体 i32），T 无从推断且无默认值
+   预期: 报 "missing generic argument 'T'" */
+TEST_F(ExecLiteralTest, GenericInferenceCannotInferWithoutDefault) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ng_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "5");
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ng_g"), 1, &arg);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "missing generic argument 'T'");
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: func nte_g[T extends 3](): i32 —— 约束表达式求值为非 type value
+        （数字字面量 3），显式实例化 nte_g[i32]
+   预期: 约束检查在进入类型判定前先拒绝非类型表达式，报 "generic
+         constraint must be a type expression"（§6.5） */
+TEST_F(ExecLiteralTest, GenericConstraintRequiresTypeExpression) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(
+          a, "T", NULL, make_node(CLUX_NODE_LITERAL_NUMERIC, "3"), NULL));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nte_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nte_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *result = exec_expr_subscript(ctx, sub);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "generic constraint must be a type expression");
+  delete_node(&sub);
+  delete_node(&decl);
+}
+
+/* 场景: func ntv_g[N: i32](x: i32): i32（comptime 值参数带 i32 恒等约束）
+        与 func ntb_g[N: i32]（约束 str），显式实例化 ntv_g[5] / ntb_g[5]
+   预期: 值参数绑定 i32 值 5 后，约束对象取绑定值的类型 i32（而非 type
+         value）：恒等约束满足产出 FUNC 实例；str 约束按派生关系判定
+         失败报违反（§6.5：值参数取绑定值类型分支） */
+TEST_F(ExecLiteralTest, GenericConstraintOnValueParamUsesBoundValueType) {
+  node_t *ok_generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      ok_generics,
+      make_generic_param_of(a,
+                            "N",
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                            NULL));
+  node_t *ok_params = create_func_params_node(a);
+  func_params_node_add_param(
+      ok_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *ok_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        ok_generics,
+                        ok_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ntv_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *ok_tmpl = exec_expr_func_decl(ctx, ok_decl);
+  ASSERT_NE(ok_tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ok_tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *bad_generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      bad_generics,
+      make_generic_param_of(a,
+                            "N",
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str"),
+                            NULL));
+  node_t *bad_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        bad_generics,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ntb_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *bad_tmpl = exec_expr_func_decl(ctx, bad_decl);
+  ASSERT_NE(bad_tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *ok_sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ntv_g"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *ok_result = exec_expr_subscript(ctx, ok_sub);
+  ASSERT_NE(ok_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ok_result)), CLUX_TYPE_FUNC)
+      << "an i32 value argument must satisfy the identity i32 constraint";
+  delete_node(&ok_sub);
+
+  node_t *bad_sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ntb_g"),
+                        make_node(CLUX_NODE_LITERAL_NUMERIC, "5"));
+  clux_value_t *bad_result = exec_expr_subscript(ctx, bad_sub);
+  ASSERT_NE(bad_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_result),
+               "type 'i32' does not satisfy constraint 'str'");
+  delete_node(&bad_sub);
+  delete_node(&ok_decl);
+  delete_node(&bad_decl);
+}
+
+/* 场景: func fb_g[T extends i32, U extends T](u: U): i32 —— U 的约束引用
+        先行绑定的 T（F-bounded 子集），显式实例化 fb_g[i32, i32] 与
+        fb_g[i32, str]
+   预期: 约束在含更早参数绑定的实例化环境内求值：U=i32 时约束 T 解析到
+         绑定 i32 满足产出 FUNC；U=str 按派生关系违反报违反（T 解析到
+         绑定而非模块作用域） */
+TEST_F(ExecLiteralTest, GenericConstraintSeesEarlierParamBinding) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(
+          a, "T", NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"), NULL));
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(
+          a, "U", NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"), NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "U")));
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fb_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *ok_sub = make_subscript("fb_g[i32, i32]");
+  subscript_node_set_base(ok_sub,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fb_g"));
+  subscript_node_add_arg(ok_sub,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  subscript_node_add_arg(ok_sub,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *ok_result = exec_expr_subscript(ctx, ok_sub);
+  ASSERT_NE(ok_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ok_result)), CLUX_TYPE_FUNC)
+      << "U=i32 must satisfy the T-resolved constraint after T binds to i32";
+  delete_node(&ok_sub);
+
+  node_t *bad_sub = make_subscript("fb_g[i32, str]");
+  subscript_node_set_base(bad_sub,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fb_g"));
+  subscript_node_add_arg(bad_sub,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  subscript_node_add_arg(bad_sub,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str"));
+  clux_value_t *bad_result = exec_expr_subscript(ctx, bad_sub);
+  ASSERT_NE(bad_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_result),
+               "type 'str' does not satisfy constraint 'i32'");
+  delete_node(&bad_sub);
+  delete_node(&decl);
+}
+
+/* 场景: func ic_g[T extends i32](x: T): T { return x; } 调用 ic_g(5) 与
+        ic_g("hi") —— 调用点推导（§6.7）产出的绑定仍过约束检查（§6.5）
+   预期: 从 5 推得 T=i32 满足约束，调用产出 i32 5；从 "hi" 推得 T=str
+         违反 i32 约束，报违反 */
+TEST_F(ExecLiteralTest, GenericInferredInstanceStillChecksConstraint) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(
+          a, "T", NULL, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"), NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ic_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"),
+                        body);
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *ok_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "5");
+  node_t *ok_call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ic_g"), 1, &ok_arg);
+  clux_value_t *ok_result = exec_expr_call(ctx, ok_call);
+  ASSERT_NE(ok_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(ok_result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(ok_result), 5);
+  delete_node(&ok_call);
+
+  node_t *bad_arg = make_node(CLUX_NODE_LITERAL_STRING, "\"hi\"");
+  node_t *bad_call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "ic_g"), 1, &bad_arg);
+  clux_value_t *bad_result = exec_expr_call(ctx, bad_call);
+  ASSERT_NE(bad_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_result),
+               "type 'str' does not satisfy constraint 'i32'");
+  delete_node(&bad_call);
+  delete_node(&decl);
+}
+
+/* 场景: func two_g[T, U](a: T, b: U): T { return a; } 调用 two_g(7, true)
+        —— 两个类型参数各自从不同形参独立推断
+   预期: T=i32、U=bool 同时推断成功；U 无默认值，若未推断会报 missing
+         generic argument 'U'，返回值断言传递性验证双参数均绑定 */
+TEST_F(ExecLiteralTest, GenericInferenceMultipleTypeParamsFromDistinctParams) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  generic_params_node_add_param(
+      generics, make_generic_param_of(a, "U", NULL, NULL, NULL));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "U")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "two_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"),
+                        body);
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *args[] = {make_node(CLUX_NODE_LITERAL_NUMERIC, "7"),
+                    make_node(CLUX_NODE_LITERAL_BOOLEAN, "true")};
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "two_g"), 2, args);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 7);
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: func vpd_g[N: i32 = 3](x: i32): i32 { return N; } 调用 vpd_g(9)
+        —— 值参数（comptime TYPE 槽非空）不参与运行期推断，走默认值（§6.7）
+   预期: N 不从实参推断，取默认 3 绑定后模板体重执行可见，调用产出
+         i32 3（返回 N 而非 x=9，区分默认绑定与形参传值） */
+TEST_F(ExecLiteralTest, GenericInferenceValueParamFallsBackToDefault) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics,
+      make_generic_param_of(a,
+                            "N",
+                            make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                            NULL,
+                            make_node(CLUX_NODE_LITERAL_NUMERIC, "3")));
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "N"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "vpd_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "9");
+  node_t *call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "vpd_g"), 1, &arg);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(result), 3)
+      << "the comptime value param must bind its default 3, not the "
+         "argument 9";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: func few_g[T](a: T, b: T): i32 { return 0; } 调用 few_g(7)（实参
+        少于形参）与 func many_g[T](a: T): i32 { return 0; } 调用
+        many_g(7, 8, 9)（实参多于形参）—— 推断循环按 min(实参, 形参)
+        配对，实例产出后实参数量交普通 invoke 校验
+   预期: 推断只配对存在的位置（T 均从首个实参绑为 i32），实例化成功后
+         由引擎 invoke 报数量错误（1 参时单数形态） */
+TEST_F(ExecLiteralTest, GenericInferenceArgCountMismatchReportedByInvoke) {
+  node_t *few_generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      few_generics, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  node_t *few_params = create_func_params_node(a);
+  func_params_node_add_param(
+      few_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  func_params_node_add_param(
+      few_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  node_t *few_body = create_stmt_block_node(a);
+  node_t *few_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(few_ret,
+                             make_node(CLUX_NODE_LITERAL_NUMERIC, "0"));
+  stmt_block_node_add_stmt(few_body, few_ret);
+  node_t *few_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        few_generics,
+                        few_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "few_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        few_body);
+  clux_value_t *few_tmpl = exec_expr_func_decl(ctx, few_decl);
+  ASSERT_NE(few_tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(few_tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *few_arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "7");
+  node_t *few_call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "few_g"), 1, &few_arg);
+  clux_value_t *few_result = exec_expr_call(ctx, few_call);
+  ASSERT_NE(few_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(few_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(few_result),
+               "function expects 2 arguments, got 1");
+  delete_node(&few_call);
+
+  node_t *many_generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      many_generics, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  node_t *many_params = create_func_params_node(a);
+  func_params_node_add_param(
+      many_params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  node_t *many_body = create_stmt_block_node(a);
+  node_t *many_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(many_ret,
+                             make_node(CLUX_NODE_LITERAL_NUMERIC, "0"));
+  stmt_block_node_add_stmt(many_body, many_ret);
+  node_t *many_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        many_generics,
+                        many_params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "many_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        many_body);
+  clux_value_t *many_tmpl = exec_expr_func_decl(ctx, many_decl);
+  ASSERT_NE(many_tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(many_tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *many_args[] = {make_node(CLUX_NODE_LITERAL_NUMERIC, "7"),
+                         make_node(CLUX_NODE_LITERAL_NUMERIC, "8"),
+                         make_node(CLUX_NODE_LITERAL_NUMERIC, "9")};
+  node_t *many_call = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "many_g"), 3, many_args);
+  clux_value_t *many_result = exec_expr_call(ctx, many_call);
+  ASSERT_NE(many_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(many_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(many_result),
+               "function expects 1 argument, got 3");
+  delete_node(&many_call);
+  delete_node(&few_decl);
+  delete_node(&many_decl);
 }
 
 /* 场景: type Rec_g[T] = Rec_g[i32]; → Rec_g[i32] 自递归实例化

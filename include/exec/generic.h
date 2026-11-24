@@ -9,12 +9,21 @@ extern "C" {
    exec_expr_subscript 检测 BASE 求值为模板值（type_template /
    func_template）时转入此处；取回模板 AST 的参数表逐参绑定——
    实参在实例化点作用域求值，绑定值（含 §6.2 默认值）clone 进实例化
-   scope 按参名 declare，模板 AST 在绑定环境内重执行产出实例值，最后
-   按块出口协议把实例值 clone 出实例化 scope。调用点推导（§6.7）与
-   约束检查（§6.5）、参数包（§6.4）本批不支持。 */
+   scope 按参名 declare，约束（§6.5）在绑定该参数之后检查，模板 AST
+   在绑定环境内重执行产出实例值，最后按块出口协议把实例值 clone 出
+   实例化 scope。参数包（§6.4）本批不支持。 */
 clux_value_t *exec_generic_instantiate(clux_context_t *ctx,
                                        clux_value_t *template_value,
                                        node_t *subscript);
+/* 调用点推导（白皮书 §6.7）：只有函数调用触发——func 模板 callee 未
+   写类型实参时，从实参类型推断类型参数绑定（形参类型为裸标识符且
+   等于类型参数名），推断不出/值参数走默认值回退。返回推断实例化出
+   的 func 值（调用方随后按普通函数 invoke）。 */
+clux_value_t *exec_generic_infer_instance(clux_context_t *ctx,
+                                          clux_value_t *template_value,
+                                          size_t argc,
+                                          clux_value_t *argv[],
+                                          const location_t *loc);
 #ifdef __cplusplus
 }
 #endif

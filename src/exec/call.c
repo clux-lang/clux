@@ -12,6 +12,7 @@
 #include "engine/type.h"
 #include "engine/value.h"
 #include "exec/exec.h"
+#include "exec/generic.h"
 #include "parser/node.h"
 #include "parser/node_binary.h"
 #include "parser/node_call.h"
@@ -131,8 +132,8 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
   if (fail) {
     return frame_exit(ctx, frame, caller, fail);
   }
-  node_t *body = is_defer ? stmt_defer_node_get_body(decl)
-                          : func_decl_node_get_body(decl);
+  node_t *body =
+      is_defer ? stmt_defer_node_get_body(decl) : func_decl_node_get_body(decl);
   if (!body) {
     fail = clux_context_create_error_message(
         ctx,
@@ -287,11 +288,12 @@ static clux_value_t *exec_member_call(clux_context_t *ctx, node_t *node) {
 }
 
 /* 函数调用表达式 f(args)（白皮书 §2.7）：callee 求值 → 实参逐个求值
-   （error 优先传播、spread/rest 实参暂不支持）→ 懒安装执行器（首次
-   调用挂帧协议执行器，engine 不依赖 exec 的分层保住）→ clux_context_
-   invoke 交验签名并分派。callee 为成员访问 a.b 时转入方法调用糖
-   （receiver 前置）；T::b / T::variant 静态形态经通用 callee 求值
-   （binary "::" 分支）自然打通。 */
+   （error 优先传播、spread/rest 实参暂不支持）→ func 模板 callee 先走
+   调用点推导（§6.7）产出实例 → 懒安装执行器（首次调用挂帧协议执行
+   器，engine 不依赖 exec 的分层保住）→ clux_context_invoke 交验签名
+   并分派。callee 为成员访问 a.b 时转入方法调用糖（receiver 前置）；
+   T::b / T::variant 静态形态经通用 callee 求值（binary "::" 分支）自然
+   打通。 */
 clux_value_t *exec_expr_call(clux_context_t *ctx, node_t *node) {
   node_t *callee_node = call_node_get_callee(node);
   if (!callee_node) {
@@ -319,6 +321,22 @@ clux_value_t *exec_expr_call(clux_context_t *ctx, node_t *node) {
     if (clux_value_is_error(argv[idx])) {
       return argv[idx];
     }
+  }
+  /* 调用点推导（白皮书 §6.7）：只有函数调用触发推断——callee 是 func
+     模板时从实参类型推断类型参数绑定，产出 func 实例后再走普通 invoke。
+     推断不出/值参数由实例化核心走默认值回退（无默认值报 missing）。 */
+  if (clux_type_get_kind(clux_value_get_type(callee)) ==
+      CLUX_TYPE_FUNC_TEMPLATE) {
+    clux_value_t *instance = exec_generic_infer_instance(
+        ctx, callee, argc, argc ? argv : NULL, node_get_location(node));
+    if (!instance || clux_value_is_error(instance)) {
+      return instance ? instance
+                      : clux_context_create_error_message(
+                            ctx,
+                            node_get_location(node),
+                            "generic inference failed");
+    }
+    callee = instance;
   }
   exec_call_install_executor(ctx);
   return clux_context_invoke(
