@@ -20,6 +20,9 @@
 
 另有 [port 包](port-packages.md)（`export extern` 与 `clux.mod` 的 `native` 段）。
 
+实现设计文档（非规范正文）：[sema 整体设计](sema-design.md)（纯 AST 产物 +
+语义回填，dev 分支权威设计）。
+
 语言一致性用例集在仓库根目录 `conformance/`：每个 `.cx` 对应一章，用语言自身的
 `test` 块自声明该章的规范要求（见 `conformance/README.md`）。它是规范的**可执行
 对照**，本身不是规范正文。
