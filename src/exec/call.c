@@ -18,6 +18,7 @@
 #include "parser/node_call.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
+#include "parser/node_rest.h"
 #include "parser/node_stmt_defer.h"
 
 /* 帧出口协议（栈帧协议核心的收尾半程）：帧内产出的值（error / return
@@ -90,13 +91,86 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
       create_clux_scope(allocator, clux_context_get_global_scope(ctx));
   clux_scope_t *caller = clux_context_swap_scope(ctx, frame);
   /* 形参绑定：copy 语义——实参克隆进帧后按 AST 形参名具名化
-     （func_invoke 已交验个数与类型，argc == 形参个数）。 */
+     （func_invoke 已交验个数与类型，argc == 展开后形参个数）。rest 形参
+     （白皮书 §6.4 参数包的帧侧投影）：从当前实参位起剩余实参克隆后打包
+     为 tuple 值（类型 = 展开后参数表该区段构成的 TUPLE），有名（
+     args: ...Ts 形态）按形参名声明——体内 args 即整个实参组；裸 rest
+     只消费不绑定。rest 必为最后形参（类型构造已校验），打包后即止。 */
   node_t *params_node = is_defer ? NULL : func_decl_node_get_params(decl);
+  clux_type_t *func_type = clux_value_get_type(func);
   clux_value_t *fail = NULL;
-  for (size_t idx = 0; idx < argc && !fail; idx++) {
+  for (size_t idx = 0, pidx = 0; idx < argc && !fail;) {
     node_t *param =
-        params_node ? func_params_node_get_param(params_node, idx) : NULL;
-    node_t *name_node = param && node_get_kind(param) == CLUX_NODE_FUNC_PARAM
+        params_node ? func_params_node_get_param(params_node, pidx) : NULL;
+    if (!param) {
+      fail = clux_context_create_error_message(
+          ctx, decl_loc, "parameter %zu requires a name", idx);
+      break;
+    }
+    node_t *rest = node_get_kind(param) == CLUX_NODE_EXPR_REST
+                       ? param
+                       : (node_get_kind(param) == CLUX_NODE_FUNC_PARAM
+                              ? func_param_node_get_type(param)
+                              : NULL);
+    if (rest && node_get_kind(rest) == CLUX_NODE_EXPR_REST) {
+      size_t pack_count = argc - idx;
+      clux_type_t *pack_elems[pack_count ? pack_count : 1];
+      for (size_t aidx = 0; aidx < pack_count; aidx++) {
+        pack_elems[aidx] = clux_func_get_param(func_type, idx + aidx);
+      }
+      clux_type_t *pack_type = clux_context_get_tuple_type(
+          ctx, pack_count ? pack_elems : NULL, pack_count);
+      clux_value_t *packed =
+          clux_context_create_tuple(ctx, pack_type, NULL, decl_loc);
+      if (!packed || clux_value_is_error(packed)) {
+        fail = packed ? packed
+                      : clux_context_create_error_message(
+                            ctx, decl_loc, "parameter pack binding failed");
+        break;
+      }
+      for (size_t aidx = 0; aidx < pack_count && !fail; aidx++) {
+        clux_value_t *copy = clux_context_clone(ctx, argv[idx + aidx], NULL);
+        if (!copy || clux_value_is_error(copy)) {
+          fail = copy ? copy
+                      : clux_context_create_error_message(
+                            ctx, decl_loc, "parameter pack binding failed");
+          break;
+        }
+        clux_value_t *index =
+            clux_context_create_i32(ctx, (int32_t)aidx, NULL, decl_loc);
+        clux_value_t *view =
+            index && !clux_value_is_error(index)
+                ? clux_context_index(ctx, packed, index, decl_loc)
+                : index;
+        if (!view || clux_value_is_error(view)) {
+          fail = view ? view
+                      : clux_context_create_error_message(
+                            ctx, decl_loc, "parameter pack binding failed");
+          break;
+        }
+        clux_value_t *written = clux_context_assign(ctx, view, copy, decl_loc);
+        if (!written || clux_value_is_error(written)) {
+          fail = written ? written
+                         : clux_context_create_error_message(
+                               ctx, decl_loc, "parameter pack binding failed");
+          break;
+        }
+      }
+      if (!fail && node_get_kind(param) == CLUX_NODE_FUNC_PARAM) {
+        node_t *name_node = func_param_node_get_name(param);
+        if (name_node) {
+          char *name = location_get(node_get_location(name_node), allocator);
+          clux_value_t *bound =
+              clux_context_declare_value(ctx, packed, name, decl_loc);
+          allocator_free(allocator, (void **)&name);
+          if (clux_value_is_error(bound)) {
+            fail = bound;
+          }
+        }
+      }
+      break;
+    }
+    node_t *name_node = node_get_kind(param) == CLUX_NODE_FUNC_PARAM
                             ? func_param_node_get_name(param)
                             : NULL;
     if (!name_node) {
@@ -111,10 +185,12 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
     if (clux_value_is_error(bound)) {
       fail = bound;
     }
+    idx++;
+    pidx++;
   }
   /* 捕获绑定：函数值存储的读写 view 按捕获名具名化进帧，体内对捕获
      名字的赋值经 view 写穿函数值存储。 */
-  clux_type_t *type = clux_value_get_type(func);
+  clux_type_t *type = func_type;
   for (size_t idx = 0; idx < clux_func_capture_count(type) && !fail; idx++) {
     const clux_func_capture_t *capture = clux_func_get_capture(type, idx);
     clux_value_t *view =

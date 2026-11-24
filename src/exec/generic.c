@@ -19,6 +19,7 @@
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
 #include "parser/node_generic_param.h"
+#include "parser/node_rest.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_struct_decl.h"
 #include "parser/node_subscript.h"
@@ -31,7 +32,20 @@
    - struct 模板 → 匿名重执行的 struct 实例（exec_expr_struct_decl_instance）
    - type 别名模板 → VALUE 表达式重求值
    实例值按块出口协议 clone 出实例化 scope（模板 AST 是声明，不执行
-   defer，无信号出口）。§6.10 同组合同实例由结构判等天然达成。 */
+   defer，无信号出口）。§6.10 同组合同实例由结构判等天然达成。
+   参数包（白皮书 §6.4）：参数表尾部的 ...Args 绑定为**一个 type
+   value，描述 TUPLE 类型**（元素即包内各实参类型；空包绑 <>）——
+   与普通类型参数统一进捕获表，同组实参经结构判等天然去重。 */
+
+/* 参数包名（rest 节点 EXPR 槽的文本，...Args 取 "Args"）。
+   返回调用方 allocator_free 的堆字符串；无名容错返回 NULL。 */
+char *exec_rest_pack_name(allocator_t *allocator, node_t *rest) {
+  node_t *expr = rest_node_get_expr(rest);
+  if (!expr) {
+    return NULL;
+  }
+  return location_get(node_get_location(expr), allocator);
+}
 
 /* 模板 AST 取参数表节点：三个泛型声明入口的 GENERICS 槽。 */
 static node_t *template_params_node(node_t *ast) {
@@ -50,12 +64,16 @@ static node_t *template_params_node(node_t *ast) {
 /* 单参绑定：校验实参形态并 clone 进实例化 scope 按参名具名化。
    - 类型参数（TYPE 槽为 NULL）：实参必须是 type value；
    - 值参数（TYPE 槽非空，§6.3 comptime）：声明类型在绑定环境内求值
-     （可引用更早参数），实参类型与之判等。
+     （可引用更早参数），实参类型与之判等；
+   - 参数包（EXPR_REST 节点，§6.4）：同类型参数形态——实参须为
+     type value（描述 TUPLE 类型，由实例化/推断通道折叠产出）。
    raw 归调用方/默认值求值作用域，绑定值是 clone 本体。 */
 static clux_value_t *
 bind_generic_param(clux_context_t *ctx, node_t *param, clux_value_t *raw) {
-  node_t *name_node = generic_param_node_get_name(param);
-  node_t *type_node = generic_param_node_get_type(param);
+  bool is_pack = node_get_kind(param) == CLUX_NODE_EXPR_REST;
+  node_t *name_node =
+      is_pack ? rest_node_get_expr(param) : generic_param_node_get_name(param);
+  node_t *type_node = is_pack ? NULL : generic_param_node_get_type(param);
   const location_t *loc = node_get_location(param);
   if (!name_node) {
     return clux_context_create_error_message(
@@ -227,8 +245,31 @@ static clux_value_t *instantiate_with_args(clux_context_t *ctx,
   clux_value_t *fail = NULL;
   for (size_t idx = 0; idx < param_count && !fail; idx++) {
     node_t *param = generic_params_node_get_param(params_node, idx);
+    if (!param) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "generic parameter %zu is missing", idx);
+      break;
+    }
+    bool is_pack = node_get_kind(param) == CLUX_NODE_EXPR_REST;
     clux_value_t *raw = NULL;
-    if (idx < arg_count && args[idx]) {
+    if (is_pack) {
+      /* 参数包（§6.4）：无默认值/约束槽；未给即空包（<>）。 */
+      raw = (idx < arg_count && args[idx])
+                ? args[idx]
+                : clux_context_create_type_value(
+                      ctx,
+                      clux_context_get_tuple_type(ctx, NULL, 0),
+                      NULL,
+                      node_get_location(param));
+      if (!raw || clux_value_is_error(raw)) {
+        fail = raw ? raw
+                   : clux_context_create_error_message(
+                         ctx,
+                         node_get_location(param),
+                         "empty parameter pack binding failed");
+        break;
+      }
+    } else if (idx < arg_count && args[idx]) {
       raw = args[idx]; /* 借用：实参归实例化点作用域 */
     } else {
       node_t *default_node = generic_param_node_get_default(param);
@@ -260,8 +301,10 @@ static clux_value_t *instantiate_with_args(clux_context_t *ctx,
                          ctx, loc, "generic parameter binding failed");
       break;
     }
-    /* 约束在绑定之后检查（F-bounded 引用正在绑定的参数）。 */
-    node_t *constraint = generic_param_node_get_constraint(param);
+    /* 约束在绑定之后检查（F-bounded 引用正在绑定的参数）。
+       包无约束槽（expr child 即名字）。 */
+    node_t *constraint =
+        is_pack ? NULL : generic_param_node_get_constraint(param);
     if (constraint) {
       clux_value_t *violation =
           check_generic_constraint(ctx, bound, constraint);
@@ -341,21 +384,32 @@ clux_value_t *exec_generic_instantiate(clux_context_t *ctx,
   size_t param_count =
       params_node ? generic_params_node_get_param_count(params_node) : 0;
   size_t arg_count = subscript_node_get_arg_count(subscript);
-  if (arg_count > param_count) {
+  /* 参数包扫描（§6.4）：包只允许在参数表最后，多余实参全部归包。 */
+  bool has_pack = false;
+  for (size_t idx = 0; idx < param_count; idx++) {
+    node_t *param = generic_params_node_get_param(params_node, idx);
+    if (!param) {
+      return clux_context_create_error_message(
+          ctx, loc, "generic parameter %zu is missing", idx);
+    }
+    if (node_get_kind(param) == CLUX_NODE_EXPR_REST) {
+      if (idx + 1 != param_count) {
+        return clux_context_create_error_message(
+            ctx,
+            node_get_location(param),
+            "generic parameter pack must be the last parameter");
+      }
+      has_pack = true;
+    }
+  }
+  size_t positional = has_pack ? param_count - 1 : param_count;
+  if (arg_count > positional && !has_pack) {
     return clux_context_create_error_message(ctx,
                                              loc,
                                              "generic instantiation takes at "
                                              "most %zu arguments, got %zu",
-                                             param_count,
+                                             positional,
                                              arg_count);
-  }
-  /* 参数包本批不支持：先扫参数表快速失败，不绑定一半再回滚。 */
-  for (size_t idx = 0; idx < param_count; idx++) {
-    node_t *param = generic_params_node_get_param(params_node, idx);
-    if (!param || node_get_kind(param) != CLUX_NODE_GENERIC_PARAM) {
-      return clux_context_create_error_message(
-          ctx, loc, "generic parameter pack is not supported yet");
-    }
   }
   /* 实参在实例化点作用域求值（引用实例化点处的名字）。 */
   clux_value_t *args[arg_count ? arg_count : 1];
@@ -365,8 +419,48 @@ clux_value_t *exec_generic_instantiate(clux_context_t *ctx,
       return args[idx];
     }
   }
+  /* 包实参折叠：positional 之后的多余实参逐个校验为 type value，
+     描述类型收集为 TUPLE，包绑定 = 该 TUPLE 的 type value。 */
+  size_t bound_count = positional + (has_pack ? 1 : 0);
+  clux_value_t *bound_args[bound_count ? bound_count : 1];
+  for (size_t idx = 0; idx < positional; idx++) {
+    /* 省略的尾参显式填 NULL——交实例化核心走默认值回退（不补则读
+       未初始化栈条目）。 */
+    bound_args[idx] = idx < arg_count ? args[idx] : NULL;
+  }
+  if (has_pack) {
+    size_t pack_count = arg_count - positional;
+    clux_type_t *pack_elems[pack_count ? pack_count : 1];
+    for (size_t idx = 0; idx < pack_count; idx++) {
+      clux_value_t *elem = args[positional + idx];
+      if (clux_type_kind_unwrap(clux_value_get_type(elem)) != CLUX_TYPE_TYPE) {
+        const char *elem_name = clux_type_get_name(clux_value_get_type(elem));
+        return clux_context_create_error_message(
+            ctx,
+            node_get_location(
+                subscript_node_get_arg(subscript, positional + idx)),
+            "generic parameter pack element requires a type argument, "
+            "got '%s'",
+            elem_name ? elem_name : "<unknown>");
+      }
+      pack_elems[idx] = *(clux_type_t **)clux_value_get_raw(elem, 0);
+    }
+    bound_args[positional] = clux_context_create_type_value(
+        ctx,
+        clux_context_get_tuple_type(
+            ctx, pack_count ? pack_elems : NULL, pack_count),
+        NULL,
+        loc);
+    if (!bound_args[positional] ||
+        clux_value_is_error(bound_args[positional])) {
+      return bound_args[positional]
+                 ? bound_args[positional]
+                 : clux_context_create_error_message(
+                       ctx, loc, "generic parameter pack binding failed");
+    }
+  }
   return instantiate_with_args(
-      ctx, template_value, arg_count ? args : NULL, arg_count, loc);
+      ctx, template_value, bound_count ? bound_args : NULL, bound_count, loc);
 }
 
 /* 调用点推导（白皮书 §6.7）：只有函数调用触发——模板形参类型是裸
@@ -398,7 +492,9 @@ clux_value_t *exec_generic_infer_instance(clux_context_t *ctx,
                      !generic_param_node_get_type(param) &&
                      generic_param_node_get_name(param);
   }
-  /* 逐函数形参与实配对：裸标识符类型命中类型参数名即推断。 */
+  /* 逐函数形参与实配对：裸标识符类型命中类型参数名即推断；
+     rest 形参（`args: ...Args` 或裸 `...Args`）从该位置起吃掉剩余
+     实参类型，聚合为 TUPLE 的 type value 绑定到对应包（§6.4）。 */
   node_t *func_params = func_decl_node_get_params(ast);
   size_t func_param_count =
       func_params ? func_params_node_get_param_count(func_params) : 0;
@@ -409,6 +505,65 @@ clux_value_t *exec_generic_infer_instance(clux_context_t *ctx,
   clux_value_t *fail = NULL;
   for (size_t idx = 0; idx < argc && idx < func_param_count && !fail; idx++) {
     node_t *fparam = func_params_node_get_param(func_params, idx);
+    /* rest 形参：FUNC_PARAM 的 TYPE 槽为 EXPR_REST（args: ...Args），
+       或裸 EXPR_REST 节点（...Args）。 */
+    node_t *rest = NULL;
+    if (fparam && node_get_kind(fparam) == CLUX_NODE_EXPR_REST) {
+      rest = fparam;
+    } else if (fparam && node_get_kind(fparam) == CLUX_NODE_FUNC_PARAM) {
+      node_t *type_node = func_param_node_get_type(fparam);
+      if (type_node && node_get_kind(type_node) == CLUX_NODE_EXPR_REST) {
+        rest = type_node;
+      }
+    }
+    if (rest) {
+      char *text = exec_rest_pack_name(allocator, rest);
+      if (text) {
+        for (size_t pidx = 0; pidx < param_count && !fail; pidx++) {
+          node_t *param = generic_params_node_get_param(params_node, pidx);
+          if (!param || node_get_kind(param) != CLUX_NODE_EXPR_REST) {
+            continue;
+          }
+          char *pname = exec_rest_pack_name(allocator, param);
+          bool hit = pname && strcmp(text, pname) == 0;
+          allocator_free(allocator, (void **)&pname);
+          if (!hit) {
+            continue;
+          }
+          if (inferred[pidx]) {
+            fail = clux_context_create_error_message(
+                ctx,
+                loc,
+                "cannot infer generic parameter '%s': "
+                "conflicting argument types",
+                text);
+            break;
+          }
+          size_t pack_count = argc - idx;
+          clux_type_t *pack_elems[pack_count ? pack_count : 1];
+          for (size_t aidx = idx; aidx < argc; aidx++) {
+            pack_elems[aidx - idx] = clux_value_get_type(argv[aidx]);
+          }
+          clux_value_t *binding = clux_context_create_type_value(
+              ctx,
+              clux_context_get_tuple_type(
+                  ctx, pack_count ? pack_elems : NULL, pack_count),
+              NULL,
+              loc);
+          if (!binding || clux_value_is_error(binding)) {
+            fail = binding ? binding
+                           : clux_context_create_error_message(
+                                 ctx, loc, "generic inference binding failed");
+            break;
+          }
+          inferred[pidx] = binding;
+          break;
+        }
+        allocator_free(allocator, (void **)&text);
+      }
+      /* rest 形参必须是最后一个函数形参：此后不再逐位配对。 */
+      break;
+    }
     if (!fparam || node_get_kind(fparam) != CLUX_NODE_FUNC_PARAM) {
       continue;
     }

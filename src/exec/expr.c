@@ -548,10 +548,48 @@ clux_value_t *exec_expr_slice(clux_context_t *ctx, node_t *node) {
   return clux_context_slice(ctx, base, lo, hi, node_get_location(node));
 }
 
+/* 参数包引用求值（白皮书 §6.4）：...Args 的 Args 求值为包绑定——
+   type value 描述 TUPLE 类型（元素即包内容，实例化/推断通道折叠）。
+   返回该 TUPLE；失败置 *err 并返回 NULL。 */
+static clux_type_t *
+exec_pack_tuple_type(clux_context_t *ctx, node_t *rest, clux_value_t **err) {
+  node_t *expr = rest_node_get_expr(rest);
+  if (!expr) {
+    *err = clux_context_create_error_message(
+        ctx, node_get_location(rest), "parameter pack requires a name");
+    return NULL;
+  }
+  clux_value_t *value = exec_operand(ctx, expr);
+  if (!value || clux_value_is_error(value)) {
+    *err = value;
+    return NULL;
+  }
+  if (clux_type_kind_unwrap(clux_value_get_type(value)) != CLUX_TYPE_TYPE) {
+    const char *value_name = clux_type_get_name(clux_value_get_type(value));
+    *err = clux_context_create_error_message(
+        ctx,
+        node_get_location(rest),
+        "parameter pack '%s' must be bound to a type",
+        value_name ? value_name : "<unknown>");
+    return NULL;
+  }
+  clux_type_t *described = *(clux_type_t **)clux_value_get_raw(value, 0);
+  if (clux_type_get_kind(described) != CLUX_TYPE_TUPLE) {
+    const char *pack_name = clux_type_get_name(described);
+    *err = clux_context_create_error_message(
+        ctx,
+        node_get_location(rest),
+        "parameter pack must expand to a tuple type, got '%s'",
+        pack_name ? pack_name : "<unknown>");
+    return NULL;
+  }
+  return described;
+}
+
 /* 函数类型定义 func |captures|(params) -> ret（白皮书 §2.7）：捕获表、
    参数序列与返回类型全部求值为 type value 后经引擎结构去重构造——
-   捕获列表是类型签名的一部分。参数为 rest 表达式（C FFI 变参 `...`
-   或参数包 `...Args`）暂不支持，等 FFI / 泛型推断批次接入。 */
+   捕获列表是类型签名的一部分。rest 形参（参数包 `...Args`，§6.4）
+   展开为绑定包的各元素。 */
 clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   const location_t *loc = node_get_location(node);
@@ -571,12 +609,13 @@ clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node) {
       break;
     }
   }
-  /* 参数序列求值：函数类型的形参是裸类型表达式，rest（变参/参数包）
-     暂不支持。 */
+  /* 参数序列求值：函数类型的形参是裸类型表达式；rest 形参（参数包
+     `...Args`，§6.4）先求值包定展开总长，再填充展开——rest 必须最后。 */
   node_t *params_node = func_type_node_get_params(node);
   size_t param_count =
       params_node ? func_params_node_get_param_count(params_node) : 0;
-  clux_type_t *params[param_count];
+  clux_type_t *pack_types[param_count ? param_count : 1];
+  size_t expanded = 0;
   for (size_t idx = 0; idx < param_count && !fail; idx++) {
     node_t *param = func_params_node_get_param(params_node, idx);
     if (!param) {
@@ -585,18 +624,43 @@ clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node) {
       break;
     }
     if (node_get_kind(param) == CLUX_NODE_EXPR_REST) {
-      fail = clux_context_create_error_message(ctx,
-                                               node_get_location(param),
-                                               "variadic function type is "
-                                               "not supported yet");
-      break;
+      if (idx + 1 != param_count) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(param),
+            "rest parameter must be the last parameter");
+        break;
+      }
+      clux_value_t *err = NULL;
+      pack_types[idx] = exec_pack_tuple_type(ctx, param, &err);
+      if (!pack_types[idx]) {
+        fail = err;
+        break;
+      }
+      expanded += clux_tuple_elem_count(pack_types[idx]);
+    } else {
+      pack_types[idx] = NULL;
+      expanded++;
     }
+  }
+  clux_type_t *params[expanded ? expanded : 1];
+  size_t slot = 0;
+  for (size_t idx = 0; idx < param_count && !fail; idx++) {
+    if (pack_types[idx]) {
+      size_t count = clux_tuple_elem_count(pack_types[idx]);
+      for (size_t eidx = 0; eidx < count; eidx++) {
+        params[slot++] = clux_tuple_get_elem(pack_types[idx], eidx);
+      }
+      continue;
+    }
+    node_t *param = func_params_node_get_param(params_node, idx);
     clux_value_t *err = NULL;
-    params[idx] = exec_operand_type(ctx, param, &err);
-    if (!params[idx]) {
+    params[slot] = exec_operand_type(ctx, param, &err);
+    if (!params[slot]) {
       fail = err;
       break;
     }
+    slot++;
   }
   /* 返回类型必填（'->' 后的类型表达式）。 */
   clux_type_t *return_type = NULL;
@@ -616,7 +680,7 @@ clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node) {
   clux_type_t *type = NULL;
   if (!fail) {
     type = clux_context_create_func_type(
-        ctx, "func", captures, capture_count, params, param_count, return_type);
+        ctx, "func", captures, capture_count, params, slot, return_type);
   }
   for (size_t idx = 0; idx < filled; idx++) {
     allocator_free(allocator, (void **)&captures[idx].name);
@@ -774,10 +838,30 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
     }
   }
   /* 泛型绑定捕获项：类型参数绑定是 type value（类型为 "type" 单例），
-     值参数绑定按声明类型（§6.3 comptime）。名字经 create_func_type
-     驻留后释放（与 AST 捕获同一通道）。 */
+     值参数绑定按声明类型（§6.3 comptime）。参数包绑定同类型参数——
+     type value 描述 TUPLE。名字经 create_func_type 驻留后释放（与
+     AST 捕获同一通道）。 */
   for (size_t idx = 0; idx < binding_count && !fail; idx++) {
     node_t *param = generic_params_node_get_param(binding_params, idx);
+    if (param && node_get_kind(param) == CLUX_NODE_EXPR_REST) {
+      /* 参数包（§6.4）：名字在 rest 的 EXPR 槽，类型同 type 单例。 */
+      node_t *pname_node = rest_node_get_expr(param);
+      if (!pname_node) {
+        fail = clux_context_create_error_message(
+            ctx, loc, "generic parameter %zu requires a name", idx);
+        break;
+      }
+      char *bname = location_get(node_get_location(pname_node), allocator);
+      if (!bname) {
+        fail = clux_context_create_error_message(
+            ctx, loc, "generic parameter %zu requires a name", idx);
+        break;
+      }
+      captures[filled].name = bname;
+      captures[filled].type = clux_context_get_type_type(ctx);
+      filled++;
+      continue;
+    }
     node_t *bname_node = param ? generic_param_node_get_name(param) : NULL;
     if (!bname_node) {
       fail = clux_context_create_error_message(
@@ -802,11 +886,14 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
     captures[filled].type = btype;
     filled++;
   }
-  /* 参数序列求值：FUNC_PARAM 取 TYPE 槽，rest（变参/参数包）暂不支持。 */
+  /* 参数序列求值：FUNC_PARAM 取 TYPE 槽；rest 形参（§6.4 参数包
+     `args: ...Args`，TYPE 槽为 EXPR_REST；或裸 `...Args`）展开为绑定
+     包的各元素——先求值各包定展开总长，再填表。rest 必须最后。 */
   node_t *params_node = func_decl_node_get_params(node);
   size_t param_count =
       params_node ? func_params_node_get_param_count(params_node) : 0;
-  clux_type_t *params[param_count];
+  clux_type_t *pack_types[param_count ? param_count : 1];
+  size_t expanded = 0;
   for (size_t idx = 0; idx < param_count && !fail; idx++) {
     node_t *param = func_params_node_get_param(params_node, idx);
     if (!param) {
@@ -814,13 +901,42 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
           ctx, loc, "parameter %zu requires a type", idx);
       break;
     }
-    if (node_get_kind(param) == CLUX_NODE_EXPR_REST) {
-      fail = clux_context_create_error_message(
-          ctx,
-          node_get_location(param),
-          "variadic function parameter is not supported yet");
-      break;
+    node_t *rest = node_get_kind(param) == CLUX_NODE_EXPR_REST
+                       ? param
+                       : (node_get_kind(param) == CLUX_NODE_FUNC_PARAM
+                              ? func_param_node_get_type(param)
+                              : NULL);
+    if (rest && node_get_kind(rest) == CLUX_NODE_EXPR_REST) {
+      if (idx + 1 != param_count) {
+        fail = clux_context_create_error_message(
+            ctx,
+            node_get_location(rest),
+            "rest parameter must be the last parameter");
+        break;
+      }
+      clux_value_t *err = NULL;
+      pack_types[idx] = exec_pack_tuple_type(ctx, rest, &err);
+      if (!pack_types[idx]) {
+        fail = err;
+        break;
+      }
+      expanded += clux_tuple_elem_count(pack_types[idx]);
+    } else {
+      pack_types[idx] = NULL;
+      expanded++;
     }
+  }
+  clux_type_t *params[expanded ? expanded : 1];
+  size_t slot = 0;
+  for (size_t idx = 0; idx < param_count && !fail; idx++) {
+    if (pack_types[idx]) {
+      size_t count = clux_tuple_elem_count(pack_types[idx]);
+      for (size_t eidx = 0; eidx < count; eidx++) {
+        params[slot++] = clux_tuple_get_elem(pack_types[idx], eidx);
+      }
+      continue;
+    }
+    node_t *param = func_params_node_get_param(params_node, idx);
     node_t *param_type_node = node_get_kind(param) == CLUX_NODE_FUNC_PARAM
                                   ? func_param_node_get_type(param)
                                   : param;
@@ -830,11 +946,12 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
       break;
     }
     clux_value_t *err = NULL;
-    params[idx] = exec_operand_type(ctx, param_type_node, &err);
-    if (!params[idx]) {
+    params[slot] = exec_operand_type(ctx, param_type_node, &err);
+    if (!params[slot]) {
       fail = err;
       break;
     }
+    slot++;
   }
   /* 返回类型（':' 后的类型表达式，必填已校验）。 */
   clux_type_t *return_type = NULL;
@@ -848,13 +965,8 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
   /* 隐含生成函数类型：与显式类型表达式共用构造器，结构一致即恒等。 */
   clux_type_t *type = NULL;
   if (!fail) {
-    type = clux_context_create_func_type(ctx,
-                                         name ? name : "func",
-                                         captures,
-                                         filled,
-                                         params,
-                                         param_count,
-                                         return_type);
+    type = clux_context_create_func_type(
+        ctx, name ? name : "func", captures, filled, params, slot, return_type);
   }
   for (size_t idx = 0; idx < filled; idx++) {
     allocator_free(allocator, (void **)&captures[idx].name);
@@ -2113,26 +2225,56 @@ clux_value_t *exec_expr_struct_decl_instance(clux_context_t *ctx,
 }
 
 /* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value
-   后经引擎结构去重构造，空元组 <> 合法；<...Ts> 参数包（rest 表达式）
-   暂不支持，等泛型推断引擎就绪后接入。 */
+   后经引擎结构去重构造，空元组 <> 合法；<...Ts> 参数包引用（§6.4）
+   展开为绑定包的各元素——先求值各包定展开总长，再填表。 */
 clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node) {
   size_t count = tuple_node_get_elem_count(node);
-  clux_type_t *elems[count];
-  for (size_t idx = 0; idx < count; idx++) {
+  clux_type_t *pack_types[count ? count : 1];
+  size_t expanded = 0;
+  clux_value_t *fail = NULL;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
     node_t *elem = tuple_node_get_elem(node, idx);
-    if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
-      return clux_context_create_error_message(
-          ctx,
-          node_get_location(elem),
-          "generic parameter pack is not supported yet");
+    if (!elem) {
+      fail = clux_context_create_error_message(
+          ctx, node_get_location(node), "tuple element %zu is missing", idx);
+      break;
     }
-    clux_value_t *err = NULL;
-    elems[idx] = exec_operand_type(ctx, elem, &err);
-    if (!elems[idx]) {
-      return err;
+    if (node_get_kind(elem) == CLUX_NODE_EXPR_REST) {
+      clux_value_t *err = NULL;
+      pack_types[idx] = exec_pack_tuple_type(ctx, elem, &err);
+      if (!pack_types[idx]) {
+        fail = err;
+        break;
+      }
+      expanded += clux_tuple_elem_count(pack_types[idx]);
+    } else {
+      pack_types[idx] = NULL;
+      expanded++;
     }
   }
-  clux_type_t *type = clux_context_get_tuple_type(ctx, elems, count);
+  clux_type_t *elems[expanded ? expanded : 1];
+  size_t slot = 0;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    if (pack_types[idx]) {
+      size_t pack_count = clux_tuple_elem_count(pack_types[idx]);
+      for (size_t eidx = 0; eidx < pack_count; eidx++) {
+        elems[slot++] = clux_tuple_get_elem(pack_types[idx], eidx);
+      }
+      continue;
+    }
+    clux_value_t *err = NULL;
+    elems[slot] = exec_operand_type(ctx, tuple_node_get_elem(node, idx), &err);
+    if (!elems[slot]) {
+      fail = err;
+      break;
+    }
+    slot++;
+  }
+  if (fail) {
+    return fail;
+  }
+  clux_type_t *type =
+      clux_context_get_tuple_type(ctx, slot ? elems : NULL, slot);
   if (!type) {
     return clux_context_create_error_message(
         ctx, node_get_location(node), "tuple type creation failed");

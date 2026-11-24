@@ -4296,11 +4296,12 @@ TEST_F(ExecLiteralTest, FuncTypeCaptureMissingNameOrTypeErrors) {
   delete_node(&untyped);
 }
 
-/* 场景: 参数表含 rest（变参）/ 缺返回类型
-   预期: 分别报 "variadic function type is not supported yet" 与
-         "function type requires a return type" */
+/* 场景: 参数表含无名 rest（参数包缺名字表达式）/ 缺返回类型
+   预期: 分别报 "parameter pack requires a name" 与
+         "function type requires a return type"（§6.4 参数包：rest 的
+         名字在 EXPR 子槽，make_node 无该槽即无名包） */
 TEST_F(ExecLiteralTest, FuncTypeRestParamAndMissingReturnErrors) {
-  /* rest 参数：params 表中混入 CLUX_NODE_EXPR_REST 结点 */
+  /* rest 参数：params 表中混入无名 CLUX_NODE_EXPR_REST 结点 */
   node_t *params = create_func_params_node(a);
   func_params_node_add_param(params,
                              make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
@@ -4311,8 +4312,7 @@ TEST_F(ExecLiteralTest, FuncTypeRestParamAndMissingReturnErrors) {
   ASSERT_NE(rest_result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rest_result)),
             CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(rest_result),
-               "variadic function type is not supported yet");
+  EXPECT_STREQ(error_message_of(rest_result), "parameter pack requires a name");
   delete_node(&rest_node);
 
   /* 缺返回类型：RETURN 槽位为 NULL */
@@ -4456,7 +4456,7 @@ TEST_F(ExecLiteralTest, TupleElemErrors) {
                "expected a type expression, got 'i32'");
   delete_node(&bad);
 
-  /* rest 元素（泛型参数包） */
+  /* 无名 rest 元素（§6.4 参数包缺 EXPR 名字子槽） */
   node_t *packed = create_tuple_node(a);
   tuple_node_add_elem(packed, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
   tuple_node_add_elem(packed, make_node(CLUX_NODE_EXPR_REST, "...Ts"));
@@ -4465,7 +4465,7 @@ TEST_F(ExecLiteralTest, TupleElemErrors) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(packed_result)),
             CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(packed_result),
-               "generic parameter pack is not supported yet");
+               "parameter pack requires a name");
   delete_node(&packed);
 }
 
@@ -4836,14 +4836,15 @@ TEST_F(ExecLiteralTest, FuncDeclMissingReturnBodyAndGenericsErrors) {
   delete_node(&generic_node);
 }
 
-/* 场景: rest 参数 / 捕获表内非 FUNC_PARAM（泛型捕获）/ 形参缺类型节点 /
-        形参类型与返回类型非 type value
-   预期: 分别报 "variadic function parameter is not supported yet" /
+/* 场景: 无名 rest 参数（参数包缺名字表达式）/ 捕获表内非 FUNC_PARAM
+        （泛型捕获）/ 形参缺类型节点 / 形参类型与返回类型非 type value
+   预期: 分别报 "parameter pack requires a name" /
          "generic capture is not supported yet" /
          "parameter %zu requires a type" /
          "expected a type expression, got '<类型名>'" */
 TEST_F(ExecLiteralTest, FuncDeclRestGenericCaptureAndParamTypeErrors) {
-  /* rest 参数：PARAMS 中混入 CLUX_NODE_EXPR_REST 结点 */
+  /* rest 参数：PARAMS 中混入无名 CLUX_NODE_EXPR_REST 结点（§6.4：名字
+     在 EXPR 子槽，make_node 无该槽即无名包） */
   node_t *rest_params = create_func_params_node(a);
   func_params_node_add_param(
       rest_params,
@@ -4864,8 +4865,7 @@ TEST_F(ExecLiteralTest, FuncDeclRestGenericCaptureAndParamTypeErrors) {
   ASSERT_NE(rest_result, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(rest_result)),
             CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(rest_result),
-               "variadic function parameter is not supported yet");
+  EXPECT_STREQ(error_message_of(rest_result), "parameter pack requires a name");
   delete_node(&rest_node);
 
   /* 泛型捕获：CAPTURES 里的 FUNC_PARAMS 混入裸类型表达式（非 FUNC_PARAM） */
@@ -11736,19 +11736,70 @@ TEST_F(ExecLiteralTest, GenericConstraintTypePatternChecks) {
   delete_node(&decl);
 }
 
-/* 场景: 参数包 [T, ...] 模板实例化
-   预期: 预扫快速失败 "generic parameter pack is not supported yet" */
-TEST_F(ExecLiteralTest, GenericInstantiationRejectsParameterPack) {
+/* 场景: 参数包模板 func pk_g[T, ...Args](x: T, args: ...Args): i32 实例化
+        （白皮书 §6.4）
+   预期: 包在尾部时多余实参折叠为 TUPLE type value 绑定包——实例 FUNC
+         参数表 = 前缀形参 + 包元素展开（pk_g[i32, str] 展开 2 参、
+         pk_g[i32] 空包展开 1 参）；包不在尾部报 "generic parameter pack
+         must be the last parameter" */
+TEST_F(ExecLiteralTest, GenericInstantiationParameterPack) {
+  /* 包非最后：[...Args, T] 快速失败。 */
+  node_t *misplaced = create_generic_params_node(a);
+  node_t *misplaced_rest = create_rest_node(a);
+  rest_node_set_expr(misplaced_rest,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Args"));
+  generic_params_node_add_param(misplaced, misplaced_rest);
+  generic_params_node_add_param(
+      misplaced, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  node_t *misplaced_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        misplaced,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pk_bad"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        create_stmt_block_node(a));
+  clux_value_t *misplaced_result = exec_expr_func_decl(ctx, misplaced_decl);
+  ASSERT_NE(misplaced_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(misplaced_result)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+  node_t *misplaced_sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pk_bad"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *misplaced_inst = exec_expr_subscript(ctx, misplaced_sub);
+  ASSERT_NE(misplaced_inst, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(misplaced_inst)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(misplaced_inst),
+               "generic parameter pack must be the last parameter");
+  delete_node(&misplaced_sub);
+  delete_node(&misplaced_decl);
+
+  /* 包在尾部：[T, ...Args] + 形参 x: T, args: ...Args。 */
   node_t *packed = create_generic_params_node(a);
   generic_params_node_add_param(
       packed, make_generic_param_of(a, "T", NULL, NULL, NULL));
-  generic_params_node_add_param(
-      packed, make_static_node_of(a, CLUX_NODE_SYMBOL, "..."));
+  node_t *rest = create_rest_node(a);
+  rest_node_set_expr(rest, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Args"));
+  generic_params_node_add_param(packed, rest);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  node_t *rest_param_type = create_rest_node(a);
+  rest_node_set_expr(rest_param_type,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Args"));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "args"), rest_param_type));
   node_t *packed_decl =
       make_func_decl_of(a,
                         NULL,
                         packed,
-                        create_func_params_node(a),
+                        params,
                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pk_g"),
                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
                         create_stmt_block_node(a));
@@ -11757,17 +11808,166 @@ TEST_F(ExecLiteralTest, GenericInstantiationRejectsParameterPack) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(packed_template)),
             CLUX_TYPE_FUNC_TEMPLATE);
 
+  /* pk_g[i32, str]：T=i32，包=<str>，参数表展开 2 参。 */
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *str_type = clux_context_builtin_type(ctx, CLUX_TYPE_STR);
   node_t *packed_sub =
       make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pk_g"),
                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  subscript_node_add_arg(packed_sub,
+                         make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str"));
   clux_value_t *packed_result = exec_expr_subscript(ctx, packed_sub);
   ASSERT_NE(packed_result, nullptr);
-  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(packed_result)),
-            CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(packed_result),
-               "generic parameter pack is not supported yet");
+  ASSERT_EQ(clux_type_get_kind(clux_value_get_type(packed_result)),
+            CLUX_TYPE_FUNC)
+      << "packed template instantiation must produce an instance";
+  clux_type_t *packed_func = clux_value_get_type(packed_result);
+  EXPECT_EQ(clux_func_param_count(packed_func), (size_t)2);
+  EXPECT_EQ(clux_func_get_param(packed_func, 0), i32_type);
+  EXPECT_EQ(clux_func_get_param(packed_func, 1), str_type);
   delete_node(&packed_sub);
+
+  /* pk_g[i32]：空包，参数表展开 1 参（只余前缀 x: i32）。 */
+  node_t *empty_sub =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pk_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *empty_result = exec_expr_subscript(ctx, empty_sub);
+  ASSERT_NE(empty_result, nullptr);
+  ASSERT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_FUNC);
+  clux_type_t *empty_func = clux_value_get_type(empty_result);
+  EXPECT_EQ(clux_func_param_count(empty_func), (size_t)1);
+  EXPECT_EQ(clux_func_get_param(empty_func, 0), i32_type);
+  delete_node(&empty_sub);
   delete_node(&packed_decl);
+}
+
+/* 场景: 参数包模板调用点推导 pi_g[T, ...Ts](x: T, rest: ...Ts): T
+        （白皮书 §6.7 + §6.4）pi_g(1, "a") / pi_g(1)
+   预期: rest 形参从其位置起吃掉剩余实参类型聚合为 TUPLE type value
+         绑到包——两次调用均产出实例并执行成功（return x 直回 i32）。 */
+TEST_F(ExecLiteralTest, GenericInferenceParameterPack) {
+  node_t *generics = create_generic_params_node(a);
+  generic_params_node_add_param(
+      generics, make_generic_param_of(a, "T", NULL, NULL, NULL));
+  node_t *rest = create_rest_node(a);
+  rest_node_set_expr(rest, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Ts"));
+  generic_params_node_add_param(generics, rest);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T")));
+  node_t *rest_type = create_rest_node(a);
+  rest_node_set_expr(rest_type, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Ts"));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "rest"), rest_type));
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pi_g"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "T"),
+                        body);
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  /* pi_g(1, "a")：T←i32（首实参），Ts←<str>（rest 位起吃剩余）。 */
+  node_t *args_two[2] = {make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
+                         make_node(CLUX_NODE_LITERAL_STRING, "\"a\"")};
+  node_t *call_two = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pi_g"), 2, args_two);
+  clux_value_t *two = exec_expr_call(ctx, call_two);
+  ASSERT_NE(two, nullptr);
+  ASSERT_FALSE(clux_value_is_error(two)) << error_message_of(two);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(two)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(two), 1);
+  delete_node(&call_two);
+
+  /* pi_g(1)：空包（rest 位无剩余实参），同样成功。 */
+  node_t *args_one[1] = {make_node(CLUX_NODE_LITERAL_NUMERIC, "1")};
+  node_t *call_one = make_call_of(
+      a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pi_g"), 1, args_one);
+  clux_value_t *one = exec_expr_call(ctx, call_one);
+  ASSERT_NE(one, nullptr);
+  ASSERT_FALSE(clux_value_is_error(one)) << error_message_of(one);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(one)), CLUX_TYPE_I32);
+  EXPECT_EQ(read_i32(one), 1);
+  delete_node(&call_one);
+  delete_node(&decl);
+}
+
+/* 场景: 参数包帧协议 fp_g[...Ts](args: ...Ts): <...Ts> { return args; }
+        调用 fp_g(1, "a")（白皮书 §6.4）
+   预期: 帧内 rest 形参 args 绑定为整个实参组打包的 tuple 值（类型 =
+         展开后参数区段 TUPLE），return 按值语义克隆出帧——结果是
+         元素 <1, "a"> 的 TUPLE 值。 */
+TEST_F(ExecLiteralTest, ParameterPackFrameBindsTuple) {
+  node_t *generics = create_generic_params_node(a);
+  node_t *rest = create_rest_node(a);
+  rest_node_set_expr(rest, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Ts"));
+  generic_params_node_add_param(generics, rest);
+  node_t *params = create_func_params_node(a);
+  node_t *rest_type = create_rest_node(a);
+  rest_node_set_expr(rest_type, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Ts"));
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "args"), rest_type));
+  /* 返回类型 <...Ts>：元组类型表达式含包元素，实例化作用域内展开
+     （独立 rest 节点——AST 节点不允许双父挂接）。 */
+  node_t *ret_tuple = create_tuple_node(a);
+  node_t *ret_rest = create_rest_node(a);
+  rest_node_set_expr(ret_rest, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "Ts"));
+  tuple_node_add_elem(ret_tuple, ret_rest);
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret,
+                             make_node(CLUX_NODE_LITERAL_IDENTIFIER, "args"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        generics,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fp_g"),
+                        ret_tuple,
+                        body);
+  clux_value_t *tmpl = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_FUNC_TEMPLATE);
+
+  node_t *args[2] = {make_node(CLUX_NODE_LITERAL_NUMERIC, "1"),
+                     make_node(CLUX_NODE_LITERAL_STRING, "\"a\"")};
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "fp_g"), 2, args);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  clux_type_t *result_type = clux_value_get_type(result);
+  ASSERT_EQ(clux_type_get_kind(result_type), CLUX_TYPE_TUPLE);
+  EXPECT_EQ(clux_tuple_elem_count(result_type), (size_t)2)
+      << "args tuple "
+         "must carry every remaining argument";
+  /* 首元素按 index view 读出：i32 1。 */
+  clux_value_t *zero = clux_context_create_i32(ctx, 0, NULL, NULL);
+  clux_value_t *first = clux_context_index(ctx, result, zero, NULL);
+  ASSERT_NE(first, nullptr);
+  EXPECT_FALSE(clux_value_is_error(first)) << error_message_of(first);
+  EXPECT_EQ(read_i32(first), 1);
+  delete_node(&call);
+  delete_node(&decl);
 }
 
 /* 场景: interface IW_g { write(data: i32): void; } +
