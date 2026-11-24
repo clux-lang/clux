@@ -4,6 +4,7 @@
 #include "core/error.h"
 #include "core/location.h"
 #include "core/safe_alloc.h"
+#include "engine/bitfield.h"
 #include "engine/cunion.h"
 #include "engine/enum.h"
 #include "engine/func.h"
@@ -291,6 +292,34 @@ clux_type_t *clux_context_create_enum_type(clux_context_t *self,
                                            clux_type_t *underlying,
                                            const clux_enum_variant_t *variants,
                                            size_t count);
+/* 创建具名 bitfield 类型（白皮书 §10）：底层仅 u8/u16/u32/u64，字段
+   按 LSB 起声明序连续排布，宽度合法范围 1..底层位宽，总位数可超底层
+   字宽（跨字访问由语言定义）。布局按隐藏存储数组（ceil(total_bits/
+   word_bits) 个底层字）。字段名经 strs 驻留。结构判等（底层类型 +
+   字段名+宽度按声明序一致即同一类型）：已存在结构相同的实例时恒等
+   返回之。入参非法（缺底层类型/底层非 u8/u16/u32/u64/空字段表/
+   字段缺名/重名/宽度超界）返回 NULL 并记录 error。 */
+clux_type_t *
+clux_context_create_bitfield_type(clux_context_t *self,
+                                  const char *name,
+                                  clux_type_t *underlying,
+                                  const clux_bitfield_field_def_t *fields,
+                                  size_t count);
+/* 创建 bitfield 零值（memset 清零——缺失字段补零语义的落点）：
+   type 须是 CLUX_TYPE_BITFIELD。字段写入走
+   clux_context_bitfield_set_field（构造通道）。 */
+clux_value_t *clux_context_create_bitfield(clux_context_t *self,
+                                           clux_type_t *type,
+                                           const char *name,
+                                           const location_t *loc);
+/* 字段写入（构造通道，白皮书 §10）：value 须已是底层类型（调用方
+   先 safe_cast），引擎按字段宽度截断掩码 RMW 写入存储。未知字段返回
+   语义化 error，shadow 值原样返回。 */
+clux_value_t *clux_context_bitfield_set_field(clux_context_t *self,
+                                              clux_value_t *value,
+                                              const char *field,
+                                              clux_value_t *rhs,
+                                              const location_t *loc);
 /* 创建具名 interface 类型（白皮书 §3.10、§6.9）：纯编译期结构约束——
    成员是方法签名（名 + func 类型，无捕获），不产生运行期对象/虚表。
    永不 seal（与 void 同族天然不完整）：create_value 的 seal 门禁由此

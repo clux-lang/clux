@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "engine/bool.h"
+#include "engine/bitfield.h"
 #include "engine/cunion.h"
 #include "engine/error.h"
 #include "engine/floating.h"
@@ -1082,6 +1083,168 @@ clux_type_t *clux_context_create_enum_type(clux_context_t *self,
       create_clux_enum_type(self->allocator, name, underlying, interned, count);
   (void)vec_push(self->named_types, type);
   return type;
+}
+
+/* 创建具名 bitfield 类型（白皮书 §10）：前置校验（底层类型/空表/
+   缺名/重名/宽度超界）后结构去重（底层 + 字段名+宽度按声明序一致即
+   恒等返回），字段名经 strs 驻留。 */
+clux_type_t *
+clux_context_create_bitfield_type(clux_context_t *self,
+                                  const char *name,
+                                  clux_type_t *underlying,
+                                  const clux_bitfield_field_def_t *fields,
+                                  size_t count) {
+  if (!underlying || !fields || count == 0) {
+    (void)clux_context_create_error_message(
+        self,
+        NULL,
+        "bitfield '%s' requires an underlying type and at least one field",
+        name ? name : "bitfield");
+    return NULL;
+  }
+  clux_type_kind_t underlying_kind = clux_type_kind_unwrap(underlying);
+  if (underlying_kind != CLUX_TYPE_U8 && underlying_kind != CLUX_TYPE_U16 &&
+      underlying_kind != CLUX_TYPE_U32 && underlying_kind != CLUX_TYPE_U64) {
+    const char *underlying_name = clux_type_get_name(underlying);
+    (void)clux_context_create_error_message(
+        self,
+        NULL,
+        "bitfield '%s' underlying type must be u8, u16, u32 or u64, got '%s'",
+        name ? name : "bitfield",
+        underlying_name ? underlying_name : "<unknown>");
+    return NULL;
+  }
+  size_t word_bits = clux_type_get_size(underlying) * 8;
+  for (size_t idx = 0; idx < count; idx++) {
+    if (!fields[idx].name) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "bitfield '%s' field %zu requires a name",
+          name ? name : "bitfield",
+          idx);
+      return NULL;
+    }
+    if (fields[idx].width == 0 || fields[idx].width > word_bits) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "bitfield '%s' field '%s' requires a width in 1..%zu, got %zu",
+          name ? name : "bitfield",
+          fields[idx].name,
+          word_bits,
+          fields[idx].width);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(fields[idx].name, fields[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "bitfield '%s' has duplicate field '%s'",
+            name ? name : "bitfield",
+            fields[idx].name);
+        return NULL;
+      }
+    }
+  }
+  /* 结构去重：已存在底层类型 + 字段名+宽度按声明序一致的实例时恒等
+     返回（对比原始定义表，无需先构造临时类型实例）。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_bitfield_fields_equal(existing, underlying, fields, count)) {
+      return existing;
+    }
+  }
+  /* 字段名经 strs 驻留（类型只借用不释放），本地串由调用方释放。 */
+  clux_bitfield_field_def_t interned[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    size_t len = strlen(fields[idx].name);
+    char *field_name = clux_context_alloc_str(self, len);
+    (void)memcpy(field_name, fields[idx].name, len);
+    interned[idx].name = field_name;
+    interned[idx].width = fields[idx].width;
+  }
+  clux_type_t *type = create_clux_bitfield_type(
+      self->allocator, name, underlying, interned, count);
+  (void)vec_push(self->named_types, type);
+  return type;
+}
+
+/* 创建 bitfield 零值（memset 清零）：缺失字段补零语义的落点。 */
+clux_value_t *clux_context_create_bitfield(clux_context_t *self,
+                                           clux_type_t *type,
+                                           const char *name,
+                                           const location_t *loc) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_BITFIELD) {
+    return clux_context_create_error_message(
+        self, loc, "bitfield value creation requires a bitfield type");
+  }
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
+
+/* 字段写入（构造通道）：rhs 须已是底层类型（调用方先 safe_cast），
+   按字段宽度截断掩码 RMW 写入（白皮书 §10——值截断到字段宽度）。 */
+clux_value_t *clux_context_bitfield_set_field(clux_context_t *self,
+                                              clux_value_t *value,
+                                              const char *field,
+                                              clux_value_t *rhs,
+                                              const location_t *loc) {
+  if (!value || !field || !rhs) {
+    return clux_context_create_error_message(
+        self, loc, "bitfield field write requires a value, a field and a rhs");
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  if (clux_type_get_kind(type) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  if (clux_type_get_kind(type) != CLUX_TYPE_BITFIELD) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "bitfield field write requires a bitfield value, got '%s'",
+        type_name ? type_name : "<unknown>");
+  }
+  const clux_bitfield_field_t *found = clux_bitfield_find_field(type, field);
+  if (!found) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(self,
+                                             loc,
+                                             "bitfield '%s' has no field '%s'",
+                                             type_name ? type_name
+                                                       : "<unknown>",
+                                             field);
+  }
+  if (clux_value_is_shadow(value) || clux_value_is_shadow(rhs)) {
+    return value;
+  }
+  clux_type_t *underlying = clux_bitfield_get_underlying(type);
+  if (!clux_type_equal(underlying, clux_value_get_type(rhs))) {
+    const char *rhs_name = clux_type_get_name(clux_value_get_type(rhs));
+    const char *underlying_name = clux_type_get_name(underlying);
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "bitfield field '%s' requires a value of type '%s', got '%s'",
+        field,
+        underlying_name ? underlying_name : "<unknown>",
+        rhs_name ? rhs_name : "<unknown>");
+  }
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  if (!raw) {
+    return clux_context_create_error_message(
+        self, loc, "cannot write field '%s' of an invalid bitfield", field);
+  }
+  uint64_t bits = 0;
+  size_t word_size = clux_type_get_size(underlying);
+  (void)memcpy(&bits, clux_value_get_raw(rhs, 0), word_size);
+  size_t idx = (size_t)(found - clux_bitfield_get_field(type, 0));
+  clux_bitfield_store(type, raw, idx, bits);
+  return value;
 }
 
 /* 创建具名 interface 类型（白皮书 §3.10、§6.9）：纯编译期结构约束——

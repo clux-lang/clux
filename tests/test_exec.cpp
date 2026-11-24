@@ -68,6 +68,9 @@
 #include "exec/call.h"
 #include "parser/node_construct.h"
 #include "parser/node_construct_field.h"
+#include "parser/node_bitfield_decl.h"
+#include "parser/node_bitfield_field.h"
+#include "parser/node_stmt_bitfield.h"
 #include "parser/node_builtin.h"
 #include "parser/node_rest.h"
 #include "parser/node_subscript.h"
@@ -884,13 +887,14 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_EXPR_INTERFACE_DECL ||
         kind == CLUX_NODE_STMT_INTERFACE || kind == CLUX_NODE_STMT_TYPE ||
         kind == CLUX_NODE_EXPR_STRUCT_DECL || kind == CLUX_NODE_STMT_STRUCT ||
-        kind == CLUX_NODE_EXPR_CONSTRUCT || kind == CLUX_NODE_EXPR_BUILTIN ||
-        kind == CLUX_NODE_STMT_IF || kind == CLUX_NODE_STMT_EMPTY ||
-        kind == CLUX_NODE_STMT_BREAK || kind == CLUX_NODE_STMT_CONTINUE ||
-        kind == CLUX_NODE_STMT_WHILE || kind == CLUX_NODE_STMT_DO_WHILE ||
-        kind == CLUX_NODE_STMT_FOR || kind == CLUX_NODE_STMT_FOREACH ||
-        kind == CLUX_NODE_STMT_SWITCH || kind == CLUX_NODE_STMT_DEFER ||
-        kind == CLUX_NODE_STMT_COMPTIME_IF ||
+        kind == CLUX_NODE_EXPR_BITFIELD_DECL ||
+        kind == CLUX_NODE_STMT_BITFIELD || kind == CLUX_NODE_EXPR_CONSTRUCT ||
+        kind == CLUX_NODE_EXPR_BUILTIN || kind == CLUX_NODE_STMT_IF ||
+        kind == CLUX_NODE_STMT_EMPTY || kind == CLUX_NODE_STMT_BREAK ||
+        kind == CLUX_NODE_STMT_CONTINUE || kind == CLUX_NODE_STMT_WHILE ||
+        kind == CLUX_NODE_STMT_DO_WHILE || kind == CLUX_NODE_STMT_FOR ||
+        kind == CLUX_NODE_STMT_FOREACH || kind == CLUX_NODE_STMT_SWITCH ||
+        kind == CLUX_NODE_STMT_DEFER || kind == CLUX_NODE_STMT_COMPTIME_IF ||
         kind == CLUX_NODE_STMT_COMPTIME_FOREACH ||
         kind == CLUX_NODE_STMT_ASSERT || kind == CLUX_NODE_STMT_STATIC_ASSERT;
     if (synthetic_skip) {
@@ -12082,6 +12086,1239 @@ static node_t *make_construct_of(allocator_t *allocator, node_t *type_node) {
     construct_node_set_type(node, type_node);
   }
   return node;
+}
+
+/* 合成位域字段 name: width（width_text 为 NULL 构造缺宽度容错路径）。 */
+static node_t *make_bitfield_field_of(allocator_t *allocator,
+                                      const char *name_text,
+                                      const char *width_text) {
+  node_t *node = create_bitfield_field_node(allocator);
+  bitfield_field_node_set_name(
+      node, make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  if (width_text) {
+    bitfield_field_node_set_width(
+        node, make_text_node(allocator, CLUX_NODE_LITERAL_NUMERIC, width_text));
+  }
+  return node;
+}
+
+/* 合成位域声明 bitfield NAME: UNDERLYING { fields }（name_text/underlying_text
+   为 NULL 构造缺名/缺底层类型容错路径，fields 允许为 NULL）。 */
+static node_t *make_bitfield_decl_of(allocator_t *allocator,
+                                     const char *name_text,
+                                     const char *underlying_text,
+                                     node_t *fields) {
+  node_t *node = create_bitfield_decl_node(allocator);
+  bitfield_decl_node_set_keyword(
+      node, make_text_node(allocator, CLUX_NODE_SYMBOL, "bitfield"));
+  if (name_text) {
+    bitfield_decl_node_set_name(
+        node,
+        make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  }
+  if (underlying_text) {
+    bitfield_decl_node_set_underlying(
+        node,
+        make_text_node(
+            allocator, CLUX_NODE_LITERAL_IDENTIFIER, underlying_text));
+  }
+  bitfield_decl_node_set_body(node, fields);
+  return node;
+}
+
+/* 合成白皮书 §10 的 Big 字段表 { a:4; b:8; c:5 }——总 17 位跨 3 个 u8 字。 */
+static node_t *make_big_fields(allocator_t *allocator) {
+  node_t *fields = create_bitfield_fields_node(allocator);
+  bitfield_fields_node_add_field(fields,
+                                 make_bitfield_field_of(allocator, "a", "4"));
+  bitfield_fields_node_add_field(fields,
+                                 make_bitfield_field_of(allocator, "b", "8"));
+  bitfield_fields_node_add_field(fields,
+                                 make_bitfield_field_of(allocator, "c", "5"));
+  return fields;
+}
+
+/* 场景: 位域声明端到端——bitfield Big: u8 { a:4; b:8; c:5 }（白皮书 §10）
+   预期: 产出 type value 且具名定义进当前作用域；被描述类型 kind BITFIELD、
+         名 "Big"、底层恒等 u8 builtin；LSB 起连续布局 a@0 w4 / b@4 w8 /
+         c@12 w5；总 17 位跨 3 个 u8 字 → size 3 / align 1；find_field
+         按名命中、未知名查无、越界下标查无 */
+TEST_F(ExecLiteralTest, BitfieldDeclWhitepaperBigEndToEnd) {
+  node_t *decl = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *result = exec_expr_bitfield_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(clux_context_lookup(ctx, "Big", NULL), result)
+      << "the named path must define the type value in the current scope";
+
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_BITFIELD);
+  EXPECT_STREQ(clux_type_get_name(described), "Big");
+  EXPECT_EQ(clux_bitfield_get_underlying(described),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U8));
+  EXPECT_EQ(clux_type_get_size(described), 3u)
+      << "17 bits must span ceil(17/8)=3 underlying u8 words";
+  EXPECT_EQ(clux_type_get_align(described), 1u);
+
+  EXPECT_EQ(clux_bitfield_field_count(described), 3u);
+  const clux_bitfield_field_t *fa = clux_bitfield_get_field(described, 0);
+  ASSERT_NE(fa, nullptr);
+  EXPECT_STREQ(fa->name, "a");
+  EXPECT_EQ(fa->bit_offset, 0u);
+  EXPECT_EQ(fa->width, 4u);
+  const clux_bitfield_field_t *fb = clux_bitfield_get_field(described, 1);
+  ASSERT_NE(fb, nullptr);
+  EXPECT_STREQ(fb->name, "b");
+  EXPECT_EQ(fb->bit_offset, 4u);
+  EXPECT_EQ(fb->width, 8u);
+  const clux_bitfield_field_t *fc = clux_bitfield_get_field(described, 2);
+  ASSERT_NE(fc, nullptr);
+  EXPECT_STREQ(fc->name, "c");
+  EXPECT_EQ(fc->bit_offset, 12u);
+  EXPECT_EQ(fc->width, 5u);
+  const clux_bitfield_field_t *found = clux_bitfield_find_field(described, "b");
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->bit_offset, 4u);
+  EXPECT_EQ(clux_bitfield_find_field(described, "zzz"), nullptr)
+      << "unknown field lookup must not match";
+  EXPECT_EQ(clux_bitfield_get_field(described, 3), nullptr)
+      << "out-of-bounds field index must not match";
+  delete_node(&decl);
+}
+
+/* 场景: 位域构造与字段读——.Big{ .a=1, .b=255, .c=31 } 全字段构造 + 缺失
+        补零 + 超宽值截断（白皮书 §10）
+   预期: 构造产出 kind BITFIELD 值；字段读返回底层 u8 新值：a=1、b=255、
+         c=31；.Big{ .b=7 } 缺失字段补零（a/c 读 0）；.Big{ .a=255 } 超宽
+         值按宽度截断（a 宽 4 → 15）；读结果类型恒等底层 u8 */
+TEST_F(ExecLiteralTest, BitfieldConstructAndFieldReadRoundTrip) {
+  node_t *decl = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *declared = exec_expr_bitfield_decl(ctx, decl);
+  delete_node(&decl);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  node_t *full = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      full,
+      make_construct_field_of(
+          a, "a", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1u8")));
+  construct_node_add_elem(
+      full,
+      make_construct_field_of(
+          a, "b", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "255u8")));
+  construct_node_add_elem(
+      full,
+      make_construct_field_of(
+          a, "c", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "31u8")));
+  clux_value_t *value = exec_expr_construct(ctx, full);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_BITFIELD);
+
+  clux_value_t *va = clux_context_field(ctx, value, "a", NULL);
+  clux_value_t *vb = clux_context_field(ctx, value, "b", NULL);
+  clux_value_t *vc = clux_context_field(ctx, value, "c", NULL);
+  ASSERT_FALSE(clux_value_is_error(va)) << error_message_of(va);
+  ASSERT_FALSE(clux_value_is_error(vb)) << error_message_of(vb);
+  ASSERT_FALSE(clux_value_is_error(vc)) << error_message_of(vc);
+  EXPECT_EQ(clux_value_get_type(va),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U8))
+      << "field read yields a fresh underlying-typed value";
+  EXPECT_EQ(read_u8(va), 1);
+  EXPECT_EQ(read_u8(vb), 255);
+  EXPECT_EQ(read_u8(vc), 31);
+  delete_node(&full);
+
+  /* 缺失字段补零：.Big{ .b=7 } → a==0 / c==0。 */
+  node_t *partial = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      partial,
+      make_construct_field_of(
+          a, "b", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7u8")));
+  clux_value_t *pv = exec_expr_construct(ctx, partial);
+  ASSERT_FALSE(clux_value_is_error(pv)) << error_message_of(pv);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, pv, "a", NULL)), 0);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, pv, "b", NULL)), 7);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, pv, "c", NULL)), 0);
+  delete_node(&partial);
+
+  /* 超宽值按宽度截断：.Big{ .a=255 }，a 宽 4 → 15。 */
+  node_t *clamp = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      clamp,
+      make_construct_field_of(
+          a, "a", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "255u8")));
+  clux_value_t *cv = exec_expr_construct(ctx, clamp);
+  ASSERT_FALSE(clux_value_is_error(cv)) << error_message_of(cv);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, cv, "a", NULL)), 15)
+      << "oversized initializer must be truncated to the field width";
+  delete_node(&clamp);
+}
+
+/* 场景: bitfield 语句分派——无装饰器 STMT_BITFIELD 经 exec_node 落到
+        exec_stmt_bitfield 并按名定义
+   预期: exec_node(stmt) 返回定义值（非 unsupported 错误）；lookup("Packed")
+         取回 type value，被描述类型 kind BITFIELD 且底层恒等 u32 */
+TEST_F(ExecLiteralTest, BitfieldStmtDispatchDefinesByName) {
+  node_t *fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(fields, make_bitfield_field_of(a, "lo", "12"));
+  bitfield_fields_node_add_field(fields, make_bitfield_field_of(a, "hi", "20"));
+  node_t *decl = make_bitfield_decl_of(a, "Packed", "u32", fields);
+  node_t *stmt = create_stmt_bitfield_node(a);
+  stmt_bitfield_node_set_bitfield_decl(stmt, decl);
+  clux_value_t *result = exec_node(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  clux_value_t *named = clux_context_lookup(ctx, "Packed", NULL);
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(named)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(named);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_BITFIELD);
+  EXPECT_EQ(clux_bitfield_get_underlying(described),
+            clux_context_builtin_type(ctx, CLUX_TYPE_U32));
+  delete_node(&stmt);
+}
+
+/* ==================== bitfield 正式单元测试（G/F 阶段产出） ==================== */
+
+/* 合成位域字段 name: <width_node>（宽度结点由调用方构造并持有，支持非数字
+   字面量形态——浮点/str——覆盖非整型宽度拒绝分支）。 */
+static node_t *make_bitfield_field_with_width(allocator_t *allocator,
+                                              const char *name_text,
+                                              node_t *width_node) {
+  node_t *node = create_bitfield_field_node(allocator);
+  bitfield_field_node_set_name(
+      node, make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  bitfield_field_node_set_width(node, width_node);
+  return node;
+}
+
+/* 合成 .Big{ .a=<a_text>, .b=<b_text>, .c=<c_text> } 构造（任一 text 为 NULL
+   表示省略该字段走缺失补零路径）；字段值文本须自带底层类型后缀（"9u8"）。 */
+static node_t *make_big_construct_of(allocator_t *allocator,
+                                     const char *a_text,
+                                     const char *b_text,
+                                     const char *c_text) {
+  node_t *node = make_construct_of(
+      allocator,
+      make_static_node_of(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  if (a_text) {
+    construct_node_add_elem(
+        node,
+        make_construct_field_of(
+            allocator,
+            "a",
+            make_static_node_of(allocator, CLUX_NODE_LITERAL_NUMERIC, a_text)));
+  }
+  if (b_text) {
+    construct_node_add_elem(
+        node,
+        make_construct_field_of(
+            allocator,
+            "b",
+            make_static_node_of(allocator, CLUX_NODE_LITERAL_NUMERIC, b_text)));
+  }
+  if (c_text) {
+    construct_node_add_elem(
+        node,
+        make_construct_field_of(
+            allocator,
+            "c",
+            make_static_node_of(allocator, CLUX_NODE_LITERAL_NUMERIC, c_text)));
+  }
+  return node;
+}
+
+/* 场景: 位域声明缺底层类型——UNDERLYING 槽缺省，具名与匿名（回退名
+        "bitfield"）两种形态
+   预期: 具名报 "bitfield 'NU' requires an underlying type"；
+         匿名报 "bitfield 'bitfield' requires an underlying type"
+         （关键字文本回退名，与 enum 一致） */
+TEST_F(ExecLiteralTest, BitfieldDeclMissingUnderlyingReports) {
+  node_t *named = make_bitfield_decl_of(a, "NU", NULL, make_big_fields(a));
+  clux_value_t *named_result = exec_expr_bitfield_decl(ctx, named);
+  ASSERT_NE(named_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(named_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(named_result),
+               "bitfield 'NU' requires an underlying type");
+  delete_node(&named);
+
+  node_t *anon = make_bitfield_decl_of(a, NULL, NULL, make_big_fields(a));
+  clux_value_t *anon_result = exec_expr_bitfield_decl(ctx, anon);
+  ASSERT_NE(anon_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(anon_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(anon_result),
+               "bitfield 'bitfield' requires an underlying type")
+      << "the anonymous form must fall back to the keyword text as type name";
+  delete_node(&anon);
+}
+
+/* 场景: 底层类型非无符号——bitfield NU8: i32 { ... }，以及底层类型表达式
+        求值失败（undeclared）与非类型表达式（数值字面量）
+   预期: i32 报 "underlying type must be u8, u16, u32 or u64, got 'i32'"；
+         undeclared 原样传播 "use of undeclared identifier 'nope'"；
+         数值字面量报 "expected a type expression, got 'i32'" */
+TEST_F(ExecLiteralTest, BitfieldDeclUnderlyingNotUnsignedReports) {
+  node_t *i32_decl = make_bitfield_decl_of(a, "NU8", "i32", make_big_fields(a));
+  clux_value_t *i32_result = exec_expr_bitfield_decl(ctx, i32_decl);
+  ASSERT_NE(i32_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(i32_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(
+      error_message_of(i32_result),
+      "bitfield 'NU8' underlying type must be u8, u16, u32 or u64, got 'i32'");
+  delete_node(&i32_decl);
+
+  node_t *undeclared =
+      make_bitfield_decl_of(a, "NU9", "nope", make_big_fields(a));
+  clux_value_t *undeclared_result = exec_expr_bitfield_decl(ctx, undeclared);
+  ASSERT_NE(undeclared_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(undeclared_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(undeclared_result),
+               "use of undeclared identifier 'nope'")
+      << "underlying type evaluation failure must propagate verbatim";
+  delete_node(&undeclared);
+
+  /* 非 type 表达式：underlying 槽换数值字面量（求值 i32 值）。 */
+  node_t *non_type = make_bitfield_decl_of(a, "NUA", "u8", make_big_fields(a));
+  /* node_set_child 是覆盖式语义（所有权手工维护）：先释放旧 underlying 再换新。 */
+  node_t *old_underlying = bitfield_decl_node_get_underlying(non_type);
+  delete_node(&old_underlying);
+  bitfield_decl_node_set_underlying(
+      non_type, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *non_type_result = exec_expr_bitfield_decl(ctx, non_type);
+  ASSERT_NE(non_type_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(non_type_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(non_type_result),
+               "expected a type expression, got 'i32'");
+  delete_node(&non_type);
+}
+
+/* 场景: 位域声明无字段——body 槽为 NULL 与空字段表两种形态
+   预期: 均报 "bitfield 'NF' requires at least one field"；lookup("NF")
+         查无（失败不产生定义） */
+TEST_F(ExecLiteralTest, BitfieldDeclNoFieldsReports) {
+  node_t *null_body = make_bitfield_decl_of(a, "NF", "u8", NULL);
+  clux_value_t *null_result = exec_expr_bitfield_decl(ctx, null_body);
+  ASSERT_NE(null_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(null_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(null_result),
+               "bitfield 'NF' requires at least one field");
+  delete_node(&null_body);
+
+  node_t *empty_body =
+      make_bitfield_decl_of(a, "NF", "u8", create_bitfield_fields_node(a));
+  clux_value_t *empty_result = exec_expr_bitfield_decl(ctx, empty_body);
+  ASSERT_NE(empty_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(empty_result),
+               "bitfield 'NF' requires at least one field");
+  delete_node(&empty_body);
+}
+
+/* 场景: 字段缺宽度——width 槽缺省（容错结点）
+   预期: 报 "bitfield 'MW' field 'f' requires a width"（exec 层在引擎
+         校验前拦截，携带字段名） */
+TEST_F(ExecLiteralTest, BitfieldDeclFieldMissingWidthReports) {
+  node_t *fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(fields, make_bitfield_field_of(a, "f", NULL));
+  node_t *decl = make_bitfield_decl_of(a, "MW", "u8", fields);
+  clux_value_t *result = exec_expr_bitfield_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "bitfield 'MW' field 'f' requires a width");
+  delete_node(&decl);
+}
+
+/* 场景: 宽度越界——u8 底层下宽度 0（下界）与 9（上界+1）非法；边界值
+        8（u8 满宽）与 64（u64 满宽）合法
+   预期: 0 报 "requires a width in 1..8, got 0"；9 报 "...got 9"；
+         满宽 8/64 声明成功且 size 分别为 1/8 */
+TEST_F(ExecLiteralTest, BitfieldDeclWidthBoundsReports) {
+  node_t *zero_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(zero_fields,
+                                 make_bitfield_field_of(a, "f", "0"));
+  node_t *zero_decl = make_bitfield_decl_of(a, "WB", "u8", zero_fields);
+  clux_value_t *zero_result = exec_expr_bitfield_decl(ctx, zero_decl);
+  ASSERT_NE(zero_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(zero_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(zero_result),
+               "bitfield 'WB' field 'f' requires a width in 1..8, got 0");
+  delete_node(&zero_decl);
+
+  node_t *over_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(over_fields,
+                                 make_bitfield_field_of(a, "f", "9"));
+  node_t *over_decl = make_bitfield_decl_of(a, "WB", "u8", over_fields);
+  clux_value_t *over_result = exec_expr_bitfield_decl(ctx, over_decl);
+  ASSERT_NE(over_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(over_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(over_result),
+               "bitfield 'WB' field 'f' requires a width in 1..8, got 9");
+  delete_node(&over_decl);
+
+  node_t *full_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(full_fields,
+                                 make_bitfield_field_of(a, "full", "8"));
+  node_t *full_decl = make_bitfield_decl_of(a, "WB8", "u8", full_fields);
+  clux_value_t *full_result = exec_expr_bitfield_decl(ctx, full_decl);
+  ASSERT_NE(full_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(full_result))
+      << error_message_of(full_result);
+  EXPECT_EQ(clux_type_get_size(type_described_by(full_result)), 1u)
+      << "a single 8-bit field under u8 must occupy exactly one word";
+  delete_node(&full_decl);
+
+  node_t *wide_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(wide_fields,
+                                 make_bitfield_field_of(a, "all", "64"));
+  node_t *wide_decl = make_bitfield_decl_of(a, "WB64", "u64", wide_fields);
+  clux_value_t *wide_result = exec_expr_bitfield_decl(ctx, wide_decl);
+  ASSERT_NE(wide_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(wide_result))
+      << error_message_of(wide_result);
+  EXPECT_EQ(clux_type_get_size(type_described_by(wide_result)), 8u)
+      << "a single 64-bit field under u64 must occupy exactly one word";
+  delete_node(&wide_decl);
+}
+
+/* 场景: 宽度非编译期整数常量——f64 字面量（浮点后缀强制）与 str 字面量宽度
+   预期: 均报 "bitfield 'NW' field 'f' requires an integer constant width"
+         （exec 层拦截：宽度按值自身宽度取原始位型，非整型无位型可取；
+         无后缀 "1.5" 按整型约定 strtoull 取 1 不属本拒绝分支） */
+TEST_F(ExecLiteralTest, BitfieldDeclWidthNotIntegerReports) {
+  node_t *float_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(float_fields,
+                                 make_bitfield_field_of(a, "f", "1.5f64"));
+  node_t *float_decl = make_bitfield_decl_of(a, "NW", "u8", float_fields);
+  clux_value_t *float_result = exec_expr_bitfield_decl(ctx, float_decl);
+  ASSERT_NE(float_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(float_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(float_result),
+               "bitfield 'NW' field 'f' requires an integer constant width");
+  delete_node(&float_decl);
+
+  node_t *str_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(
+      str_fields,
+      make_bitfield_field_with_width(
+          a, "f", make_text_node(a, CLUX_NODE_LITERAL_STRING, "\"hi\"")));
+  node_t *str_decl = make_bitfield_decl_of(a, "NW", "u8", str_fields);
+  clux_value_t *str_result = exec_expr_bitfield_decl(ctx, str_decl);
+  ASSERT_NE(str_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(str_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(str_result),
+               "bitfield 'NW' field 'f' requires an integer constant width");
+  delete_node(&str_decl);
+}
+
+/* 场景: 宽度求值为 shadow 值——shadow 模式下数值字面量宽度求值产出
+        无存储 shadow（块提升类型推断专用通道复用）
+   预期: 报 "bitfield 'SW' field 'f' requires an integer constant width"
+         （shadow 无位型可取）；恢复 shadow 模式后同构声明成功（模式
+         无残留副作用） */
+TEST_F(ExecLiteralTest, BitfieldDeclWidthShadowReports) {
+  node_t *fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(fields, make_bitfield_field_of(a, "f", "4"));
+  node_t *decl = make_bitfield_decl_of(a, "SW", "u8", fields);
+  clux_context_set_shadow_mode(ctx, true);
+  clux_value_t *result = exec_expr_bitfield_decl(ctx, decl);
+  clux_context_set_shadow_mode(ctx, false);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "bitfield 'SW' field 'f' requires an integer constant width")
+      << "a shadow width has no raw bits to read and must be rejected";
+  delete_node(&decl);
+
+  node_t *sane_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(sane_fields,
+                                 make_bitfield_field_of(a, "f", "4"));
+  node_t *sane_decl = make_bitfield_decl_of(a, "SW2", "u8", sane_fields);
+  clux_value_t *sane_result = exec_expr_bitfield_decl(ctx, sane_decl);
+  ASSERT_NE(sane_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(sane_result))
+      << error_message_of(sane_result)
+      << "the shadow mode must be fully restored after the probe";
+  delete_node(&sane_decl);
+}
+
+/* 场景: 重名字段声明——bitfield DP: u8 { a:4; a:3 }
+   预期: 引擎校验报 "bitfield 'DP' has duplicate field 'a'"；lookup("DP")
+         查无（类型未创建成功，不产生定义） */
+TEST_F(ExecLiteralTest, BitfieldDeclDuplicateFieldReports) {
+  node_t *fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(fields, make_bitfield_field_of(a, "a", "4"));
+  bitfield_fields_node_add_field(fields, make_bitfield_field_of(a, "a", "3"));
+  node_t *decl = make_bitfield_decl_of(a, "DP", "u8", fields);
+  clux_value_t *result = exec_expr_bitfield_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "bitfield 'DP' has duplicate field 'a'");
+  clux_value_t *probe = clux_context_lookup(ctx, "DP", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_TRUE(clux_value_is_error(probe))
+      << "the failed declaration must not define the name";
+  delete_node(&decl);
+}
+
+/* 场景: 同名重定义——两次执行 bitfield Big: u8 { a:4; b:8; c:5 }
+   预期: 首次成功并 define；第二次按名 define 时报
+         "duplicate declaration 'Big'"，首个定义值不被覆盖 */
+TEST_F(ExecLiteralTest, BitfieldDeclRedefineReportsDuplicateDeclaration) {
+  node_t *first = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *first_result = exec_expr_bitfield_decl(ctx, first);
+  delete_node(&first);
+  ASSERT_NE(first_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(first_result))
+      << error_message_of(first_result);
+
+  node_t *second = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *second_result = exec_expr_bitfield_decl(ctx, second);
+  delete_node(&second);
+  ASSERT_NE(second_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(second_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(second_result), "duplicate declaration 'Big'");
+  EXPECT_EQ(clux_context_lookup(ctx, "Big", NULL), first_result)
+      << "the duplicate must not clobber the first definition";
+}
+
+/* 场景: 底层类型矩阵——u16（单字/跨字）、u32、u64 各一条快乐路径 +
+        u32 构造/字段读往返
+   预期: u16{a:9;b:7} size 2/align 2；u16{x:10;y:9} 总 19 位跨 2 字
+         size 4/align 2；u32{lo:12;hi:20} size 4/align 4（偏移 0/12）；
+         u64{lo:33;hi:31} size 8/align 8（偏移 0/33）；
+         .M32{ .lo=4095u32, .hi=1048575u32 } 往返读回精确值 */
+TEST_F(ExecLiteralTest, BitfieldDeclUnderlyingMatrixU16U32U64) {
+  struct {
+    const char *name;
+    const char *underlying;
+    const char *n1;
+    const char *w1;
+    const char *n2;
+    const char *w2;
+    size_t size;
+    size_t align;
+    size_t off2;
+    size_t w2v;
+    clux_type_kind_t kind;
+  } cases[] = {
+      {"M16", "u16", "a", "9", "b", "7", 2u, 2u, 9u, 7u, CLUX_TYPE_U16},
+      {"M16X", "u16", "x", "10", "y", "9", 4u, 2u, 10u, 9u, CLUX_TYPE_U16},
+      {"M32", "u32", "lo", "12", "hi", "20", 4u, 4u, 12u, 20u, CLUX_TYPE_U32},
+      {"M64", "u64", "lo", "33", "hi", "31", 8u, 8u, 33u, 31u, CLUX_TYPE_U64},
+  };
+  for (const auto &c : cases) {
+    node_t *fields = create_bitfield_fields_node(a);
+    bitfield_fields_node_add_field(fields,
+                                   make_bitfield_field_of(a, c.n1, c.w1));
+    bitfield_fields_node_add_field(fields,
+                                   make_bitfield_field_of(a, c.n2, c.w2));
+    node_t *decl = make_bitfield_decl_of(a, c.name, c.underlying, fields);
+    clux_value_t *result = exec_expr_bitfield_decl(ctx, decl);
+    delete_node(&decl);
+    ASSERT_NE(result, nullptr) << c.name;
+    ASSERT_FALSE(clux_value_is_error(result))
+        << c.name << ": " << error_message_of(result);
+    clux_type_t *described = type_described_by(result);
+    ASSERT_NE(described, nullptr) << c.name;
+    EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_BITFIELD) << c.name;
+    EXPECT_EQ(clux_bitfield_get_underlying(described),
+              clux_context_builtin_type(ctx, c.kind))
+        << c.name;
+    EXPECT_EQ(clux_type_get_size(described), c.size) << c.name;
+    EXPECT_EQ(clux_type_get_align(described), c.align) << c.name;
+    const clux_bitfield_field_t *f1 = clux_bitfield_get_field(described, 0);
+    ASSERT_NE(f1, nullptr) << c.name;
+    EXPECT_EQ(f1->bit_offset, 0u) << c.name;
+    const clux_bitfield_field_t *f2 = clux_bitfield_get_field(described, 1);
+    ASSERT_NE(f2, nullptr) << c.name;
+    EXPECT_EQ(f2->bit_offset, c.off2) << c.name;
+    EXPECT_EQ(f2->width, c.w2v) << c.name;
+  }
+
+  /* u32 构造往返：lo 宽 12 取满边界 4095，hi 宽 20 取满边界 1048575。 */
+  node_t *packed = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "M32"));
+  construct_node_add_elem(
+      packed,
+      make_construct_field_of(
+          a,
+          "lo",
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "4095u32")));
+  construct_node_add_elem(
+      packed,
+      make_construct_field_of(
+          a,
+          "hi",
+          make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1048575u32")));
+  clux_value_t *value = exec_expr_construct(ctx, packed);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_u32(clux_context_field(ctx, value, "lo", NULL)), 4095u);
+  EXPECT_EQ(read_u32(clux_context_field(ctx, value, "hi", NULL)), 1048575u);
+  delete_node(&packed);
+}
+
+/* 场景: 跨字读写与字节布局——Big（u8{a:4;b:8;c:5}，总 17 位跨 3 字）：
+        引擎位流原语逐字节精确验证 + 端到端构造/读回 + 空构造全零 +
+        set_field 按宽度掩码 RMW（写入/清零不污染邻接字段）
+   预期: store a=9,b=200,c=17 后字节 {0x89,0x1C,0x01}（LSB 起小端位流，
+         b 跨 byte0/byte1，c 跨 byte1/byte2）；extract 逐字段读回 9/200/17；
+         端到端构造存储字节一致；.Big{} 全零；set_field 写 b=200 后
+         byte0=0x81（a 低半字节保留）、byte1=0x0C，再写 b=0 后 a 原样保留 */
+TEST_F(ExecLiteralTest, BitfieldCrossWordStoreExtractAndEmptyConstruct) {
+  node_t *decl = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *declared = exec_expr_bitfield_decl(ctx, decl);
+  delete_node(&decl);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+  clux_type_t *described = type_described_by(declared);
+  ASSERT_NE(described, nullptr);
+
+  /* 引擎位流原语：跨字 store 后字节流与 extract 精确匹配。 */
+  uint8_t raw[3] = {0, 0, 0};
+  clux_bitfield_store(described, raw, 0, 9);
+  clux_bitfield_store(described, raw, 1, 200);
+  clux_bitfield_store(described, raw, 2, 17);
+  EXPECT_EQ(raw[0], 0x89) << "byte0 = a(4 bits) | low nibble of b";
+  EXPECT_EQ(raw[1], 0x1C) << "byte1 = high nibble of b | low nibble of c";
+  EXPECT_EQ(raw[2], 0x01) << "byte2 = top bit of c";
+  EXPECT_EQ(clux_bitfield_extract(described, raw, 0), 9u);
+  EXPECT_EQ(clux_bitfield_extract(described, raw, 1), 200u);
+  EXPECT_EQ(clux_bitfield_extract(described, raw, 2), 17u);
+
+  /* 端到端：构造已知组合，存储字节须与引擎布局一致。 */
+  node_t *full = make_big_construct_of(a, "9u8", "200u8", "17u8");
+  clux_value_t *value = exec_expr_construct(ctx, full);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  const uint8_t *bytes = (const uint8_t *)clux_value_get_raw(value, 0);
+  ASSERT_NE(bytes, nullptr);
+  EXPECT_EQ(bytes[0], 0x89);
+  EXPECT_EQ(bytes[1], 0x1C);
+  EXPECT_EQ(bytes[2], 0x01);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, value, "a", NULL)), 9);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, value, "b", NULL)), 200);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, value, "c", NULL)), 17);
+  delete_node(&full);
+
+  /* 空构造 .Big{} 合法：隐藏字数组整体为零。 */
+  node_t *empty = make_big_construct_of(a, NULL, NULL, NULL);
+  clux_value_t *empty_value = exec_expr_construct(ctx, empty);
+  ASSERT_NE(empty_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(empty_value))
+      << error_message_of(empty_value);
+  const uint8_t *empty_bytes =
+      (const uint8_t *)clux_value_get_raw(empty_value, 0);
+  ASSERT_NE(empty_bytes, nullptr);
+  EXPECT_EQ(empty_bytes[0], 0);
+  EXPECT_EQ(empty_bytes[1], 0);
+  EXPECT_EQ(empty_bytes[2], 0);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, empty_value, "a", NULL)), 0);
+  delete_node(&empty);
+
+  /* set_field RMW：写入与清零均只动目标字段区。 */
+  node_t *partial = make_big_construct_of(a, "1u8", NULL, NULL);
+  clux_value_t *pv = exec_expr_construct(ctx, partial);
+  delete_node(&partial);
+  ASSERT_NE(pv, nullptr);
+  ASSERT_FALSE(clux_value_is_error(pv)) << error_message_of(pv);
+  node_t *b200 = make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "200u8");
+  clux_value_t *rhs200 = exec_node(ctx, b200);
+  delete_node(&b200);
+  ASSERT_NE(rhs200, nullptr);
+  ASSERT_FALSE(clux_value_is_error(rhs200)) << error_message_of(rhs200);
+  node_t *b0 = make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "0u8");
+  clux_value_t *rhs0 = exec_node(ctx, b0);
+  delete_node(&b0);
+  ASSERT_NE(rhs0, nullptr);
+  ASSERT_FALSE(clux_value_is_error(rhs0)) << error_message_of(rhs0);
+
+  clux_value_t *written =
+      clux_context_bitfield_set_field(ctx, pv, "b", rhs200, NULL);
+  EXPECT_EQ(written, pv) << "set_field must return the bitfield value itself";
+  const uint8_t *pv_bytes = (const uint8_t *)clux_value_get_raw(pv, 0);
+  ASSERT_NE(pv_bytes, nullptr);
+  EXPECT_EQ(pv_bytes[0], 0x81) << "a=1 low nibble must survive the b write";
+  EXPECT_EQ(pv_bytes[1], 0x0C);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, pv, "b", NULL)), 200);
+
+  clux_value_t *cleared =
+      clux_context_bitfield_set_field(ctx, pv, "b", rhs0, NULL);
+  EXPECT_EQ(cleared, pv);
+  EXPECT_EQ(pv_bytes[0], 0x01)
+      << "clearing b must clear its high nibble while keeping a intact";
+  EXPECT_EQ(pv_bytes[1], 0x00);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, pv, "a", NULL)), 1);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, pv, "b", NULL)), 0);
+}
+
+/* 场景: 位域判等/不等——同内容构造 ==true/!=false；异内容 ==false/!=true；
+        两个空构造相等；与 i32 比较类型不匹配报错（== 与 != 各一）；
+        shadow 对经引擎通道产出 shadow bool
+   预期: vtable eq/ne 按存储 memcmp 分派；类型不匹配报
+         "operator '==' requires operands of the same type"（!= 同构）；
+         shadow 比较结果无存储且类型为 bool */
+TEST_F(ExecLiteralTest, BitfieldEqualityAndInequalitySemantics) {
+  node_t *decl = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *declared = exec_expr_bitfield_decl(ctx, decl);
+  delete_node(&decl);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+  clux_type_t *described = type_described_by(declared);
+  ASSERT_NE(described, nullptr);
+  clux_type_t *bool_type = clux_context_builtin_type(ctx, CLUX_TYPE_BOOL);
+
+  /* 同内容：构造两个独立实例，== 为真、!= 为假。 */
+  node_t *eq_node =
+      make_binary_of(a,
+                     make_big_construct_of(a, "9u8", "200u8", "17u8"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "=="),
+                     make_big_construct_of(a, "9u8", "200u8", "17u8"));
+  clux_value_t *eq_result = exec_expr_binary(ctx, eq_node);
+  delete_node(&eq_node);
+  ASSERT_NE(eq_result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(eq_result)) << error_message_of(eq_result);
+  EXPECT_EQ(clux_value_get_type(eq_result), bool_type);
+  EXPECT_TRUE(read_bool(eq_result));
+
+  node_t *ne_node =
+      make_binary_of(a,
+                     make_big_construct_of(a, "9u8", "200u8", "17u8"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "!="),
+                     make_big_construct_of(a, "9u8", "200u8", "17u8"));
+  clux_value_t *ne_result = exec_expr_binary(ctx, ne_node);
+  delete_node(&ne_node);
+  ASSERT_NE(ne_result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(ne_result)) << error_message_of(ne_result);
+  EXPECT_FALSE(read_bool(ne_result));
+
+  /* 异内容：仅 c 不同，== 为假、!= 为真。 */
+  node_t *diff_node =
+      make_binary_of(a,
+                     make_big_construct_of(a, "9u8", "200u8", "17u8"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "=="),
+                     make_big_construct_of(a, "9u8", "200u8", "18u8"));
+  clux_value_t *diff_result = exec_expr_binary(ctx, diff_node);
+  delete_node(&diff_node);
+  ASSERT_NE(diff_result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(diff_result))
+      << error_message_of(diff_result);
+  EXPECT_FALSE(read_bool(diff_result));
+
+  node_t *diff_ne_node =
+      make_binary_of(a,
+                     make_big_construct_of(a, "9u8", "200u8", "17u8"),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "!="),
+                     make_big_construct_of(a, "9u8", "200u8", "18u8"));
+  clux_value_t *diff_ne_result = exec_expr_binary(ctx, diff_ne_node);
+  delete_node(&diff_ne_node);
+  ASSERT_NE(diff_ne_result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(diff_ne_result))
+      << error_message_of(diff_ne_result);
+  EXPECT_TRUE(read_bool(diff_ne_result));
+
+  /* 两个空构造：未写入字段天然为零，存储 memcmp 相等。 */
+  node_t *empty_node =
+      make_binary_of(a,
+                     make_big_construct_of(a, NULL, NULL, NULL),
+                     make_static_node_of(a, CLUX_NODE_SYMBOL, "=="),
+                     make_big_construct_of(a, NULL, NULL, NULL));
+  clux_value_t *empty_result = exec_expr_binary(ctx, empty_node);
+  delete_node(&empty_node);
+  ASSERT_NE(empty_result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(empty_result))
+      << error_message_of(empty_result);
+  EXPECT_TRUE(read_bool(empty_result));
+
+  /* 类型不匹配：bitfield 与 i32 比较，== 与 != 均拒绝。 */
+  node_t *value_node = make_big_construct_of(a, "1u8", NULL, NULL);
+  clux_value_t *value = exec_expr_construct(ctx, value_node);
+  delete_node(&value_node);
+  ASSERT_NE(value, nullptr);
+  clux_value_t *mism_eq =
+      clux_context_binary(ctx,
+                          CLUX_OP_EQ,
+                          value,
+                          clux_context_create_i32(ctx, 1, NULL, NULL),
+                          NULL);
+  ASSERT_NE(mism_eq, nullptr);
+  EXPECT_TRUE(clux_value_is_error(mism_eq));
+  EXPECT_STREQ(error_message_of(mism_eq),
+               "operator '==' requires operands of the same type");
+  clux_value_t *mism_ne =
+      clux_context_binary(ctx,
+                          CLUX_OP_NE,
+                          value,
+                          clux_context_create_i32(ctx, 1, NULL, NULL),
+                          NULL);
+  ASSERT_NE(mism_ne, nullptr);
+  EXPECT_TRUE(clux_value_is_error(mism_ne));
+  EXPECT_STREQ(error_message_of(mism_ne),
+               "operator '!=' requires operands of the same type");
+
+  /* shadow 对：比较结果是无存储的 shadow bool。 */
+  clux_value_t *s1 = clux_context_create_shadow_value(ctx, described);
+  clux_value_t *s2 = clux_context_create_shadow_value(ctx, described);
+  clux_value_t *shadow_eq = clux_context_binary(ctx, CLUX_OP_EQ, s1, s2, NULL);
+  ASSERT_NE(shadow_eq, nullptr);
+  EXPECT_FALSE(clux_value_is_error(shadow_eq)) << error_message_of(shadow_eq);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_eq))
+      << "shadow operands must produce a shadow comparison result";
+  EXPECT_EQ(clux_value_get_type(shadow_eq), bool_type);
+}
+
+/* 场景: 结构去重——"Big" 与 "Big2" 底层+字段名+宽度按声明序一致（名字
+        不同不参与判等），去重产出恒等类型指针；结构漂移（c 宽度 5→4）
+        产出新实例；引擎 clux_bitfield_fields_equal 正负例
+   预期: 两次定义各自成功且 lookup 取回不同 type value，但
+         type_described_by 恒等；漂移版指针不同；引擎判等对精确表 true、
+         对宽度漂移表/不同底层 false */
+TEST_F(ExecLiteralTest, BitfieldStructuralDedupIdenticalType) {
+  node_t *first = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *first_result = exec_expr_bitfield_decl(ctx, first);
+  delete_node(&first);
+  ASSERT_FALSE(clux_value_is_error(first_result))
+      << error_message_of(first_result);
+  clux_type_t *first_type = type_described_by(first_result);
+  ASSERT_NE(first_type, nullptr);
+
+  node_t *second = make_bitfield_decl_of(a, "Big2", "u8", make_big_fields(a));
+  clux_value_t *second_result = exec_expr_bitfield_decl(ctx, second);
+  delete_node(&second);
+  ASSERT_NE(second_result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(second_result))
+      << error_message_of(second_result);
+  EXPECT_NE(clux_context_lookup(ctx, "Big", NULL),
+            clux_context_lookup(ctx, "Big2", NULL))
+      << "the two names must bind distinct type values in the scope";
+  EXPECT_EQ(type_described_by(second_result), first_type)
+      << "structurally identical bitfields must dedup to the same engine type";
+
+  /* 结构漂移：c 宽度 5→4，不得复用既有实例。 */
+  node_t *drift_fields = create_bitfield_fields_node(a);
+  bitfield_fields_node_add_field(drift_fields,
+                                 make_bitfield_field_of(a, "a", "4"));
+  bitfield_fields_node_add_field(drift_fields,
+                                 make_bitfield_field_of(a, "b", "8"));
+  bitfield_fields_node_add_field(drift_fields,
+                                 make_bitfield_field_of(a, "c", "4"));
+  node_t *drift = make_bitfield_decl_of(a, "Other", "u8", drift_fields);
+  clux_value_t *drift_result = exec_expr_bitfield_decl(ctx, drift);
+  delete_node(&drift);
+  ASSERT_FALSE(clux_value_is_error(drift_result))
+      << error_message_of(drift_result);
+  EXPECT_NE(type_described_by(drift_result), first_type)
+      << "width drift must produce a fresh engine type";
+
+  /* 引擎判等通道：原始定义表正负例。 */
+  clux_bitfield_field_def_t exact[3] = {{"a", 4}, {"b", 8}, {"c", 5}};
+  clux_bitfield_field_def_t drifted[3] = {{"a", 4}, {"b", 8}, {"c", 4}};
+  EXPECT_TRUE(clux_bitfield_fields_equal(
+      first_type, clux_context_builtin_type(ctx, CLUX_TYPE_U8), exact, 3));
+  EXPECT_FALSE(clux_bitfield_fields_equal(
+      first_type, clux_context_builtin_type(ctx, CLUX_TYPE_U8), drifted, 3));
+  EXPECT_FALSE(clux_bitfield_fields_equal(
+      first_type, clux_context_builtin_type(ctx, CLUX_TYPE_U16), exact, 3))
+      << "underlying type participates in structural equality";
+}
+
+/* 场景: 位域构造错误路径全矩阵——未知名/非具名元素/缺名/缺 value/重复
+        字段名/字段值 error 传播/字段值窄化拒绝
+   预期: 未知名报 "cunion 'Big' has no member 'zzz'"（复用 union 的
+         construct_member_not_found 通道，见发现清单）；数值元素报
+         "bitfield construction takes named fields only"；无名 construct
+         字段报 "construction field requires a name"；有名无值报
+         "construction field requires a name and a value"；重复 .a 报
+         "bitfield 'Big' has duplicate field 'a' in construction"；
+         undeclared 值 error 原样传播；i32 值报
+         "cannot safely cast 'i32' to 'u8'" */
+TEST_F(ExecLiteralTest, BitfieldConstructErrorPaths) {
+  node_t *decl = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *declared = exec_expr_bitfield_decl(ctx, decl);
+  delete_node(&decl);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+
+  /* 未知名。 */
+  node_t *unknown = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      unknown,
+      make_construct_field_of(
+          a, "zzz", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1u8")));
+  clux_value_t *unknown_result = exec_expr_construct(ctx, unknown);
+  delete_node(&unknown);
+  ASSERT_NE(unknown_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(unknown_result));
+  EXPECT_STREQ(error_message_of(unknown_result),
+               "cunion 'Big' has no member 'zzz'")
+      << "current behavior: the shared member_not_found channel labels "
+         "bitfields as cunion (see findings list)";
+
+  /* 非 CONSTRUCT_FIELD 元素（位置式元素）混入。 */
+  node_t *positional = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      positional, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1u8"));
+  clux_value_t *positional_result = exec_expr_construct(ctx, positional);
+  delete_node(&positional);
+  ASSERT_NE(positional_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(positional_result));
+  EXPECT_STREQ(error_message_of(positional_result),
+               "bitfield construction takes named fields only");
+
+  /* 无名构造字段（name 槽缺省——手工装 value 不装 name）。 */
+  node_t *nameless = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  node_t *nameless_elem = create_construct_field_node(a);
+  construct_field_node_set_value(
+      nameless_elem, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1u8"));
+  construct_node_add_elem(nameless, nameless_elem);
+  clux_value_t *nameless_result = exec_expr_construct(ctx, nameless);
+  delete_node(&nameless);
+  ASSERT_NE(nameless_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(nameless_result));
+  EXPECT_STREQ(error_message_of(nameless_result),
+               "construction field requires a name");
+
+  /* 有名无值（value 槽缺省）。 */
+  node_t *valueless = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(valueless,
+                          make_construct_field_without_value(a, "a"));
+  clux_value_t *valueless_result = exec_expr_construct(ctx, valueless);
+  delete_node(&valueless);
+  ASSERT_NE(valueless_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(valueless_result));
+  EXPECT_STREQ(error_message_of(valueless_result),
+               "construction field requires a name and a value");
+
+  /* 重复构造字段名。 */
+  node_t *dup = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      dup,
+      make_construct_field_of(
+          a, "a", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1u8")));
+  construct_node_add_elem(
+      dup,
+      make_construct_field_of(
+          a, "a", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "2u8")));
+  clux_value_t *dup_result = exec_expr_construct(ctx, dup);
+  delete_node(&dup);
+  ASSERT_NE(dup_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(dup_result));
+  EXPECT_STREQ(error_message_of(dup_result),
+               "bitfield 'Big' has duplicate field 'a' in construction");
+
+  /* 字段值 error 原样传播（undeclared 标识符）。 */
+  node_t *bad_value = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      bad_value,
+      make_construct_field_of(
+          a,
+          "a",
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "nope")));
+  clux_value_t *bad_result = exec_expr_construct(ctx, bad_value);
+  delete_node(&bad_value);
+  ASSERT_NE(bad_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bad_result));
+  EXPECT_STREQ(error_message_of(bad_result),
+               "use of undeclared identifier 'nope'")
+      << "field value evaluation failure must propagate verbatim";
+
+  /* 字段值类型不匹配：无后缀整数字面量是 i32，safe_cast i32->u8 拒绝。 */
+  node_t *narrow = make_construct_of(
+      a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Big"));
+  construct_node_add_elem(
+      narrow,
+      make_construct_field_of(
+          a, "a", make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *narrow_result = exec_expr_construct(ctx, narrow);
+  delete_node(&narrow);
+  ASSERT_NE(narrow_result, nullptr);
+  EXPECT_TRUE(clux_value_is_error(narrow_result));
+  EXPECT_STREQ(error_message_of(narrow_result),
+               "cannot safely cast 'i32' to 'u8'");
+}
+
+/* 场景: bitfield 语句错误路径——decl 槽缺省与匿名声明
+   预期: 缺 decl 报 "bitfield statement requires a bitfield declaration"；
+         匿名（语句层必须具名）报 "bitfield statement requires a named
+         bitfield declaration" */
+TEST_F(ExecLiteralTest, BitfieldStmtErrorPaths) {
+  node_t *empty_stmt = create_stmt_bitfield_node(a);
+  clux_value_t *empty_result = exec_stmt_bitfield(ctx, empty_stmt);
+  ASSERT_NE(empty_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(empty_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(empty_result),
+               "bitfield statement requires a bitfield declaration");
+  delete_node(&empty_stmt);
+
+  node_t *anon_stmt = create_stmt_bitfield_node(a);
+  stmt_bitfield_node_set_bitfield_decl(
+      anon_stmt, make_bitfield_decl_of(a, NULL, "u8", make_big_fields(a)));
+  clux_value_t *anon_result = exec_stmt_bitfield(ctx, anon_stmt);
+  ASSERT_NE(anon_result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(anon_result)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(anon_result),
+               "bitfield statement requires a named bitfield declaration");
+  delete_node(&anon_stmt);
+}
+
+/* 场景: bitfield 语句装饰器包装——func 装饰器 wrap_t(type): type 以源
+        类型值为实参调用，返回 i32 类型值替换（与 enum 装饰路径同构）
+   预期: 装饰后的值按名 "DB" 绑定进作用域；被描述类型恒等 i32 builtin
+         （装饰器替换生效）；执行 func 值后执行器惰性安装（非 NULL） */
+TEST_F(ExecLiteralTest, BitfieldStmtDecoratorWrapsTypeValueEndToEnd) {
+  clux_type_t *meta = clux_context_get_type_type(ctx);
+  clux_type_t *wrap_params[1] = {meta};
+  clux_type_t *wrap_type = clux_context_create_func_type(
+      ctx, "wrap_t", NULL, 0, wrap_params, 1, meta);
+  ASSERT_NE(wrap_type, nullptr);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type")));
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *wrap_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      params,
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t"),
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "type"),
+      body);
+  clux_value_t *wrap_func =
+      clux_context_create_func(ctx, wrap_type, NULL, NULL);
+  ASSERT_NE(wrap_func, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+            wrap_func);
+  clux_value_t *wrap_bound = clux_context_declare_value(
+      ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
+  ASSERT_NE(wrap_bound, nullptr);
+  EXPECT_FALSE(clux_value_is_error(wrap_bound));
+
+  node_t *stmt = create_stmt_bitfield_node(a);
+  stmt_bitfield_node_set_bitfield_decl(
+      stmt, make_bitfield_decl_of(a, "DB", "u8", make_big_fields(a)));
+  stmt_bitfield_node_add_decorator(
+      stmt,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wrap_t")));
+  clux_value_t *result = exec_stmt_bitfield(ctx, stmt);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_context_lookup(ctx, "DB", NULL), result)
+      << "the decorated path must bind the wrapped value under the name";
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "the decorator must substitute the source bitfield type with its "
+         "return type";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "invoking the func decorator must lazily install the executor";
+  delete_node(&stmt);
+  delete_node(&wrap_decl);
+}
+
+/* 场景: bitfield 匿名表达式求值——exec_expr_bitfield_decl_value 求值出
+        不具名的 type value（不 define），declare_value 收尾具名化
+   预期: 求值成功且被描述类型 kind BITFIELD；lookup("AV") 仍是
+         undeclared error；declare_value 后 lookup 取回绑定值；
+         具名路径（exec_expr_bitfield_decl）按名 define 回归不回退 */
+TEST_F(ExecLiteralTest, BitfieldValueEvaluationIsAnonymous) {
+  node_t *decl = make_bitfield_decl_of(a, "AV", "u8", make_big_fields(a));
+  clux_value_t *value = exec_expr_bitfield_decl_value(ctx, decl);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(value)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(value);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_BITFIELD);
+  clux_value_t *probe = clux_context_lookup(ctx, "AV", NULL);
+  ASSERT_NE(probe, nullptr);
+  EXPECT_TRUE(clux_value_is_error(probe))
+      << "the anonymous evaluation must not define the name";
+  EXPECT_STREQ(error_message_of(probe), "use of undeclared identifier 'AV'");
+
+  /* 具名化（exec_stmt_bitfield 装饰路径的收尾通道）。 */
+  clux_value_t *bound =
+      clux_context_declare_value(ctx, value, "AV", node_get_location(decl));
+  ASSERT_NE(bound, nullptr);
+  EXPECT_EQ(clux_context_lookup(ctx, "AV", NULL), bound);
+  delete_node(&decl);
+
+  /* 具名路径回归：exec_expr_bitfield_decl 按名 define。 */
+  node_t *named_decl =
+      make_bitfield_decl_of(a, "AV2", "u8", make_big_fields(a));
+  clux_value_t *named = exec_expr_bitfield_decl(ctx, named_decl);
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(clux_context_lookup(ctx, "AV2", NULL), named)
+      << "the named declaration path must not regress";
+  delete_node(&named_decl);
+}
+
+/* 场景: 引擎级 set_field 语义与 shadow 通道——NULL 形参三态、非 bitfield
+        值、未知名、rhs 类型不匹配、shadow rhs/值原样返回不写存储、
+        非 bitfield 类型创建值被拒、真实写回读精确值
+   预期: 各错误分支报语义化精确消息；shadow 写返回原值且存储不变；
+         shadow 值字段读产出底层类型的 shadow 值；真实字段读未知名
+         报错；写后读回 7 */
+TEST_F(ExecLiteralTest, BitfieldEngineSetFieldSemanticsAndShadow) {
+  node_t *decl = make_bitfield_decl_of(a, "Big", "u8", make_big_fields(a));
+  clux_value_t *declared = exec_expr_bitfield_decl(ctx, decl);
+  delete_node(&decl);
+  ASSERT_FALSE(clux_value_is_error(declared)) << error_message_of(declared);
+  clux_type_t *described = type_described_by(declared);
+  ASSERT_NE(described, nullptr);
+  clux_type_t *u8_type = clux_context_builtin_type(ctx, CLUX_TYPE_U8);
+
+  /* 值创建的类型门槛：非 bitfield 类型被拒。 */
+  clux_value_t *bad_create =
+      clux_context_create_bitfield(ctx, u8_type, NULL, NULL);
+  ASSERT_NE(bad_create, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bad_create));
+  EXPECT_STREQ(error_message_of(bad_create),
+               "bitfield value creation requires a bitfield type");
+
+  /* 构造真实值与三个 rhs（u8/u16/i32）。 */
+  node_t *value_node = make_big_construct_of(a, NULL, "0u8", NULL);
+  clux_value_t *value = exec_expr_construct(ctx, value_node);
+  delete_node(&value_node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  node_t *lit8 = make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7u8");
+  clux_value_t *rhs8 = exec_node(ctx, lit8);
+  delete_node(&lit8);
+  ASSERT_NE(rhs8, nullptr);
+  node_t *lit16 = make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1u16");
+  clux_value_t *rhs16 = exec_node(ctx, lit16);
+  delete_node(&lit16);
+  ASSERT_NE(rhs16, nullptr);
+  node_t *lit32 = make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "1");
+  clux_value_t *i32_value = exec_node(ctx, lit32);
+  delete_node(&lit32);
+  ASSERT_NE(i32_value, nullptr);
+
+  /* NULL 形参三态：value/field/rhs 任一为 NULL 即拒绝。 */
+  EXPECT_STREQ(error_message_of(
+                   clux_context_bitfield_set_field(ctx, NULL, "a", rhs8, NULL)),
+               "bitfield field write requires a value, a field and a rhs");
+  EXPECT_STREQ(error_message_of(clux_context_bitfield_set_field(
+                   ctx, value, NULL, rhs8, NULL)),
+               "bitfield field write requires a value, a field and a rhs");
+  EXPECT_STREQ(error_message_of(clux_context_bitfield_set_field(
+                   ctx, value, "a", NULL, NULL)),
+               "bitfield field write requires a value, a field and a rhs");
+
+  /* 非 bitfield 接收者。 */
+  EXPECT_STREQ(error_message_of(clux_context_bitfield_set_field(
+                   ctx, i32_value, "a", rhs8, NULL)),
+               "bitfield field write requires a bitfield value, got 'i32'");
+
+  /* 未知字段名。 */
+  EXPECT_STREQ(error_message_of(clux_context_bitfield_set_field(
+                   ctx, value, "zz", rhs8, NULL)),
+               "bitfield 'Big' has no field 'zz'");
+
+  /* rhs 类型不匹配：u16 写入 u8 底层字段。 */
+  EXPECT_STREQ(error_message_of(clux_context_bitfield_set_field(
+                   ctx, value, "a", rhs16, NULL)),
+               "bitfield field 'a' requires a value of type 'u8', got 'u16'");
+
+  /* shadow rhs：原样返回接收者且不写存储。 */
+  clux_value_t *shadow_u8 = clux_context_create_shadow_value(ctx, u8_type);
+  clux_value_t *shadow_written =
+      clux_context_bitfield_set_field(ctx, value, "a", shadow_u8, NULL);
+  EXPECT_EQ(shadow_written, value)
+      << "a shadow rhs must short-circuit and return the receiver verbatim";
+  EXPECT_EQ(read_u8(clux_context_field(ctx, value, "a", NULL)), 0)
+      << "the shadow write must not touch the storage";
+
+  /* shadow 接收者：原样返回 shadow 值。 */
+  clux_value_t *shadow_bf = clux_context_create_shadow_value(ctx, described);
+  clux_value_t *shadow_received =
+      clux_context_bitfield_set_field(ctx, shadow_bf, "a", rhs8, NULL);
+  EXPECT_EQ(shadow_received, shadow_bf);
+
+  /* shadow 值字段读：产出底层类型的新 shadow 值（拷贝语义通道）。 */
+  clux_value_t *shadow_read = clux_context_field(ctx, shadow_bf, "a", NULL);
+  ASSERT_NE(shadow_read, nullptr);
+  EXPECT_FALSE(clux_value_is_error(shadow_read))
+      << error_message_of(shadow_read);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_read));
+  EXPECT_EQ(clux_value_get_type(shadow_read), u8_type)
+      << "a shadow bitfield field read must yield a shadow of the underlying";
+
+  /* 真实字段读的未知名错误。 */
+  clux_value_t *missing = clux_context_field(ctx, value, "zz", NULL);
+  ASSERT_NE(missing, nullptr);
+  EXPECT_TRUE(clux_value_is_error(missing));
+  EXPECT_STREQ(error_message_of(missing), "bitfield 'Big' has no field 'zz'");
+
+  /* 真实写回读：set_field 返回接收者本体，读回精确值。 */
+  clux_value_t *written =
+      clux_context_bitfield_set_field(ctx, value, "a", rhs8, NULL);
+  EXPECT_EQ(written, value);
+  EXPECT_EQ(read_u8(clux_context_field(ctx, value, "a", NULL)), 7);
+}
+
+/* 场景: 引擎级创建校验——底层 NULL/空表/缺名字段直接拒绝，失败不污染
+        named_types（同构后续创建仍成功）
+   预期: 非法入参返回 NULL；随后合法创建返回非 NULL 且为 BITFIELD */
+TEST_F(ExecLiteralTest, BitfieldEngineCreateTypeValidationRejects) {
+  const clux_bitfield_field_def_t valid[1] = {{"f", 4}};
+  const clux_bitfield_field_def_t nameless[1] = {{NULL, 4}};
+  const clux_bitfield_field_def_t dup[2] = {{"f", 4}, {"f", 3}};
+  clux_type_t *u8_type = clux_context_builtin_type(ctx, CLUX_TYPE_U8);
+
+  EXPECT_EQ(clux_context_create_bitfield_type(ctx, "BF", NULL, valid, 1),
+            nullptr);
+  EXPECT_EQ(clux_context_create_bitfield_type(ctx, "BF", u8_type, NULL, 1),
+            nullptr);
+  EXPECT_EQ(clux_context_create_bitfield_type(ctx, "BF", u8_type, valid, 0),
+            nullptr);
+  EXPECT_EQ(clux_context_create_bitfield_type(ctx, "BF", u8_type, nameless, 1),
+            nullptr);
+  EXPECT_EQ(clux_context_create_bitfield_type(ctx, "BF", u8_type, dup, 2),
+            nullptr)
+      << "duplicate field names must be rejected before type creation";
+
+  clux_type_t *created =
+      clux_context_create_bitfield_type(ctx, "BF", u8_type, valid, 1);
+  ASSERT_NE(created, nullptr)
+      << "the engine validation failures must not poison the context";
+  EXPECT_EQ(clux_type_get_kind(created), CLUX_TYPE_BITFIELD);
+  EXPECT_EQ(clux_type_get_size(created), 1u);
 }
 
 /* 场景: .Point{ .x = 1, .y = 2 } 穷尽构造 + spread 合并 + 全错误分支

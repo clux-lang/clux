@@ -37,6 +37,8 @@
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_interface.h"
+#include "parser/node_bitfield_decl.h"
+#include "parser/node_stmt_bitfield.h"
 #include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_static_assert.h"
@@ -1345,6 +1347,55 @@ clux_value_t *exec_stmt_enum(clux_context_t *ctx, node_t *node) {
     value = apply_decorator(ctx,
                             value,
                             stmt_enum_node_get_decorator(node, idx),
+                            node_get_location(node));
+    if (clux_value_is_error(value)) {
+      return value;
+    }
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  char *name = location_get(node_get_location(name_node), allocator);
+  clux_value_t *bound = clux_context_declare_value(
+      ctx, value, name, node_get_location(name_node));
+  allocator_free(allocator, (void **)&name);
+  return bound;
+}
+
+/* bitfield 语句 <decorator>* [export]? <bitfield_decl>（白皮书 §10、
+   §8.1）：与 enum/union 语句同构——无装饰器时直接执行声明本体（经
+   exec_expr_bitfield_decl 按名 define 出 type value）；有装饰器时先匿名
+   求值源类型值（不按名 define），装饰器按源码顺序链式应用（求值为 func
+   时以类型值为实参调用，编译期标记原样返回），最后 declare_value 具名化。
+   语句层的声明必须具名（匿名 bitfield 类型只在表达式位置合法）；
+   export（run 阶段产出）是编译期语义，exec 层不处理。 */
+clux_value_t *exec_stmt_bitfield(clux_context_t *ctx, node_t *node) {
+  node_t *decl = stmt_bitfield_node_get_bitfield_decl(node);
+  if (!decl) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "bitfield statement requires a bitfield declaration");
+  }
+  node_t *name_node = bitfield_decl_node_get_name(decl);
+  if (!name_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "bitfield statement requires a named bitfield declaration");
+  }
+  size_t decorator_count = stmt_bitfield_node_get_decorator_count(node);
+  if (decorator_count == 0) {
+    return exec_operand(ctx, decl);
+  }
+  /* 匿名求值源类型值：不具名——type value 无捕获引用，装饰失败
+     直接返回 error，无需回滚声明。 */
+  clux_value_t *value = exec_expr_bitfield_decl_value(ctx, decl);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  for (size_t idx = 0; idx < decorator_count; idx++) {
+    value = apply_decorator(ctx,
+                            value,
+                            stmt_bitfield_node_get_decorator(node, idx),
                             node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;

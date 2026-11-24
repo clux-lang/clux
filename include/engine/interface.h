@@ -99,6 +99,13 @@ typedef enum _clux_type_kind_t {
      同族的引擎级控制值，不属于类型系统的用户可见面。 */
   CLUX_TYPE_BREAK_SIGNAL,
   CLUX_TYPE_CONTINUE_SIGNAL,
+  /* bitfield（枚举尾部追加，不打断既有序号）：LSB 起连续排布的具名
+     位段（白皮书 §10）——底层仅 u8/u16/u32/u64，字段宽度是 1..底层
+     位宽的编译期整数，总位数可超底层字宽（跨字访问由语言定义，无
+     C 位域 UB）。存储是 ceil(total_bits/word_bits) 个底层字的隐藏
+     数组（#sizeof/#alignof 按其计算）。字段读取提取位段返回底层
+     无符号值，构造写入按宽度截断掩码（缺失补零）；字段不可寻址。 */
+  CLUX_TYPE_BITFIELD,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

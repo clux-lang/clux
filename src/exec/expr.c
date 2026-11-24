@@ -14,12 +14,15 @@
 #include "engine/array.h"
 #include "engine/cunion.h"
 #include "engine/enum.h"
+#include "engine/bitfield.h"
 #include "engine/interface_type.h"
 #include "engine/union.h"
 #include "exec/exec.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
+#include "parser/node_bitfield_decl.h"
+#include "parser/node_bitfield_field.h"
 #include "parser/node_construct.h"
 #include "parser/node_construct_field.h"
 #include "parser/node_enum_decl.h"
@@ -1278,6 +1281,187 @@ clux_value_t *exec_expr_enum_decl_value(clux_context_t *ctx, node_t *node) {
   return exec_expr_enum_decl_impl(ctx, node, false);
 }
 
+/* bitfield 定义（白皮书 §10）：bitfield Name: u8|u16|u32|u64 { f: width; ... }，
+   底层类型必须是无符号整数（求值 UNDERLYING 为 type value 后交引擎
+   构造——引擎校验合法范围 1..底层位宽），字段按 LSB 起声明序连续排布，
+   宽度是编译期整数常量（按值自身宽度取原始位型）。结构去重恒等返回；
+   产出 type value，具名（NAME 槽非空）时按名 define 进当前作用域
+   （重名报 duplicate），匿名（NAME 缺省）合法——引擎类型名用关键字
+   文本回退，不 define。字段缺名/缺宽度/宽度超界/重名在引擎校验前
+   拦截以携带源位置与字段名（引擎校验保持兜底）。declare_named=false
+   时仅求值出不具名的
+   type value（装饰器包装路径：具名化推迟到包装完成后的 declare_value）。
+   一阶段构造（字段只是宽度常量，无类型引用），不需要 union 的两阶段
+   递归壳。 */
+static clux_value_t *exec_expr_bitfield_decl_impl(clux_context_t *ctx,
+                                                  node_t *node,
+                                                  bool declare_named) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  node_t *name_node = bitfield_decl_node_get_name(node);
+  char *name =
+      name_node ? location_get(node_get_location(name_node), allocator) : NULL;
+  const char *type_name = name;
+  if (!type_name) {
+    type_name = "bitfield";
+  }
+  node_t *underlying_node = bitfield_decl_node_get_underlying(node);
+  if (!underlying_node) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "bitfield '%s' requires an underlying type", type_name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  clux_value_t *underlying_err = NULL;
+  clux_type_t *underlying =
+      exec_operand_type(ctx, underlying_node, &underlying_err);
+  if (!underlying) {
+    allocator_free(allocator, (void **)&name);
+    return underlying_err;
+  }
+  clux_type_kind_t underlying_kind = clux_type_kind_unwrap(underlying);
+  if (underlying_kind != CLUX_TYPE_U8 && underlying_kind != CLUX_TYPE_U16 &&
+      underlying_kind != CLUX_TYPE_U32 && underlying_kind != CLUX_TYPE_U64) {
+    const char *underlying_name = clux_type_get_name(underlying);
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx,
+        node_get_location(underlying_node),
+        "bitfield '%s' underlying type must be u8, u16, u32 or u64, got '%s'",
+        type_name,
+        underlying_name ? underlying_name : "<unknown>");
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  node_t *body = bitfield_decl_node_get_body(node);
+  size_t count = body ? bitfield_fields_node_get_field_count(body) : 0;
+  if (count == 0) {
+    clux_value_t *fail = clux_context_create_error_message(
+        ctx, loc, "bitfield '%s' requires at least one field", type_name);
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  clux_bitfield_field_def_t fields[count];
+  size_t filled = 0;
+  clux_value_t *fail = NULL;
+  size_t word_bits = clux_type_get_size(underlying) * 8;
+  for (size_t idx = 0; idx < count && !fail; idx++) {
+    node_t *field = bitfield_fields_node_get_field(body, idx);
+    node_t *field_name_node =
+        field ? bitfield_field_node_get_name(field) : NULL;
+    char *field_name =
+        field_name_node
+            ? location_get(node_get_location(field_name_node), allocator)
+            : NULL;
+    if (!field_name) {
+      fail = clux_context_create_error_message(
+          ctx,
+          field ? node_get_location(field) : loc,
+          "bitfield '%s' field %zu requires a name",
+          type_name,
+          idx);
+      break;
+    }
+    node_t *width_node = field ? bitfield_field_node_get_width(field) : NULL;
+    if (!width_node) {
+      fail = clux_context_create_error_message(
+          ctx,
+          field ? node_get_location(field) : loc,
+          "bitfield '%s' field '%s' requires a width",
+          type_name,
+          field_name);
+      allocator_free(allocator, (void **)&field_name);
+      break;
+    }
+    clux_value_t *width_value = exec_operand(ctx, width_node);
+    if (clux_value_is_error(width_value)) {
+      fail = width_value;
+      allocator_free(allocator, (void **)&field_name);
+      break;
+    }
+    /* 编译期常量：shadow 无位型可取；宽度须整数常量（按值自身宽度
+       取原始位型），合法范围 1..底层位宽与重名在本层拦截以携带源
+       位置与字段名。 */
+    clux_type_t *width_type = clux_value_get_type(width_value);
+    if (clux_value_is_shadow(width_value) ||
+        !enum_integer_kind(clux_type_kind_unwrap(width_type))) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(width_node),
+          "bitfield '%s' field '%s' requires an integer constant width",
+          type_name,
+          field_name);
+      allocator_free(allocator, (void **)&field_name);
+      break;
+    }
+    uint64_t bits = 0;
+    size_t width_size = clux_type_get_size(width_type);
+    (void)memcpy(&bits, clux_value_get_raw(width_value, 0), width_size);
+    if (bits == 0 || bits > (uint64_t)word_bits) {
+      fail = clux_context_create_error_message(
+          ctx,
+          node_get_location(width_node),
+          "bitfield '%s' field '%s' requires a width in 1..%zu, got %zu",
+          type_name,
+          field_name,
+          word_bits,
+          (size_t)bits);
+      allocator_free(allocator, (void **)&field_name);
+      break;
+    }
+    for (size_t prev = 0; prev < filled; prev++) {
+      if (strcmp(fields[prev].name, field_name) == 0) {
+        fail = clux_context_create_error_message(
+            ctx,
+            field ? node_get_location(field) : loc,
+            "bitfield '%s' has duplicate field '%s'",
+            type_name,
+            field_name);
+        break;
+      }
+    }
+    if (fail) {
+      allocator_free(allocator, (void **)&field_name);
+      break;
+    }
+    fields[filled].name = field_name;
+    fields[filled].width = (size_t)bits;
+    filled++;
+  }
+  clux_type_t *type = NULL;
+  if (!fail) {
+    type = clux_context_create_bitfield_type(
+        ctx, type_name, underlying, fields, filled);
+  }
+  /* 字段名经 context 路径 strs 驻留，本地拷贝统一释放。 */
+  for (size_t idx = 0; idx < filled; idx++) {
+    allocator_free(allocator, (void **)&fields[idx].name);
+  }
+  if (fail) {
+    allocator_free(allocator, (void **)&name);
+    return fail;
+  }
+  if (!type) {
+    clux_value_t *create_fail = clux_context_create_error_message(
+        ctx, loc, "bitfield type creation failed");
+    allocator_free(allocator, (void **)&name);
+    return create_fail;
+  }
+  clux_value_t *value = clux_context_create_type_value(
+      ctx, type, (declare_named && name) ? name : NULL, loc);
+  allocator_free(allocator, (void **)&name);
+  return value;
+}
+
+clux_value_t *exec_expr_bitfield_decl(clux_context_t *ctx, node_t *node) {
+  return exec_expr_bitfield_decl_impl(ctx, node, true);
+}
+
+/* 匿名 bitfield 值求值：仅求值出不具名的 type value（不按名 define），
+   bitfield 语句装饰器包装路径用——包装完成后由 declare_value 具名化。 */
+clux_value_t *exec_expr_bitfield_decl_value(clux_context_t *ctx, node_t *node) {
+  return exec_expr_bitfield_decl_impl(ctx, node, false);
+}
+
 /* interface 定义（白皮书 §3.10、§6.9）：interface Name { func sig; ... }，
    纯编译期结构约束——成员逐个求值为方法签名（名 + func 类型，经
    clux_context_create_func_type 构造，与显式 func 类型表达式结构一致即
@@ -2160,6 +2344,109 @@ construct_union_like(clux_context_t *ctx, node_t *node, clux_type_t *type) {
   return union_value;
 }
 
+/* 位域构造（白皮书 §10）：.Name{ .f = v, ... }——元素必须全部具名，
+   值截断到字段宽度（引擎 RMW 掩码写入），缺失字段补零（零初始化
+   存储天然满足），空构造 .Name{} 合法（全零）。字段值须底层无符号
+   类型可表达（safe_cast 吸收整型转换）。 */
+static clux_value_t *
+construct_bitfield(clux_context_t *ctx, node_t *node, clux_type_t *type) {
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  const char *type_name = clux_type_get_name(type);
+  size_t elem_count = construct_node_get_elem_count(node);
+  /* 预检：必须全部具名且无重名（写入按字段名分派，重名即歧义）。 */
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    node_t *elem = construct_node_get_elem(node, idx);
+    if (!elem) {
+      continue;
+    }
+    if (node_get_kind(elem) != CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "bitfield construction takes named fields only");
+    }
+    node_t *elem_name = construct_field_node_get_name(elem);
+    char *name = elem_name
+                     ? location_get(node_get_location(elem_name), allocator)
+                     : NULL;
+    clux_value_t *fail = NULL;
+    if (!name) {
+      fail = clux_context_create_error_message(
+          ctx, node_get_location(elem), "construction field requires a name");
+    } else {
+      for (size_t prev = 0; prev < idx && !fail; prev++) {
+        node_t *prev_elem = construct_node_get_elem(node, prev);
+        if (!prev_elem ||
+            node_get_kind(prev_elem) != CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+          continue;
+        }
+        node_t *prev_name_node = construct_field_node_get_name(prev_elem);
+        char *prev_name =
+            prev_name_node
+                ? location_get(node_get_location(prev_name_node), allocator)
+                : NULL;
+        if (prev_name && strcmp(name, prev_name) == 0) {
+          fail = clux_context_create_error_message(
+              ctx,
+              node_get_location(elem),
+              "bitfield '%s' has duplicate field '%s' in construction",
+              type_name ? type_name : "<unknown>",
+              name);
+        }
+        allocator_free(allocator, (void **)&prev_name);
+      }
+      allocator_free(allocator, (void **)&name);
+    }
+    if (fail) {
+      return fail;
+    }
+  }
+  clux_value_t *value = clux_context_create_bitfield(ctx, type, NULL, loc);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  clux_type_t *underlying = clux_bitfield_get_underlying(type);
+  for (size_t idx = 0; idx < elem_count; idx++) {
+    node_t *elem = construct_node_get_elem(node, idx);
+    if (!elem) {
+      continue;
+    }
+    node_t *name_node = construct_field_node_get_name(elem);
+    node_t *value_node = construct_field_node_get_value(elem);
+    if (!name_node || !value_node) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(elem),
+          "construction field requires a name and a value");
+    }
+    char *name = location_get(node_get_location(name_node), allocator);
+    if (!clux_bitfield_find_field(type, name)) {
+      clux_value_t *fail = construct_member_not_found(ctx, type, name, loc);
+      allocator_free(allocator, (void **)&name);
+      return fail;
+    }
+    clux_value_t *field_value = exec_operand(ctx, value_node);
+    if (clux_value_is_error(field_value)) {
+      allocator_free(allocator, (void **)&name);
+      return field_value;
+    }
+    clux_value_t *cast =
+        clux_context_safe_cast(ctx, field_value, underlying, loc);
+    if (clux_value_is_error(cast)) {
+      allocator_free(allocator, (void **)&name);
+      return cast;
+    }
+    clux_value_t *written =
+        clux_context_bitfield_set_field(ctx, value, name, cast, loc);
+    allocator_free(allocator, (void **)&name);
+    if (clux_value_is_error(written)) {
+      return written;
+    }
+  }
+  return value;
+}
+
 /* 位置元素预检（数组/元组构造，白皮书 §5.10）：混用报错，spread 展开
    暂不支持，个数必须与类型长度一致（构造必穷尽——少即缺元素，多即溢出）。
    返回 NULL 表示预检通过，非 NULL 为待上抛 error。 */
@@ -2527,6 +2814,8 @@ clux_value_t *exec_expr_construct(clux_context_t *ctx, node_t *node) {
   case CLUX_TYPE_UNION:
   case CLUX_TYPE_CUNION:
     return construct_union_like(ctx, node, type);
+  case CLUX_TYPE_BITFIELD:
+    return construct_bitfield(ctx, node, type);
   case CLUX_TYPE_ARRAY:
     return construct_array(ctx, node, type);
   case CLUX_TYPE_TUPLE:
