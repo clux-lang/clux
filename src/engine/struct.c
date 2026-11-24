@@ -537,6 +537,11 @@ struct_type_create_from_fields(allocator_t *allocator,
     end = (end + field_align - 1) / field_align * field_align + field_size;
   }
   size_t size = (end + align - 1) / align * align;
+  /* 零字段 struct（纯行为类型）size 定为 1：有大小才有地址与内存分配
+     （未来 C 编译实现插入 char rsvd; 占位，语义一致）。 */
+  if (field_count == 0) {
+    size = 1;
+  }
   clux_type_t *type = create_clux_type(
       allocator, CLUX_TYPE_STRUCT, name, size, align, get_clux_struct_vtable());
   /* meta 与字段表连体单块分配：delete_clux_type 释放 meta 本体即整块释放 */
@@ -545,7 +550,10 @@ struct_type_create_from_fields(allocator_t *allocator,
   clux_struct_meta_t *meta = clux_type_create_meta(type, bytes);
   char *cursor = (char *)meta + sizeof(clux_struct_meta_t);
   meta->fields = (clux_struct_field_t *)cursor;
-  (void)memcpy(meta->fields, fields, sizeof(clux_struct_field_t) * field_count);
+  if (field_count > 0) {
+    (void)memcpy(
+        meta->fields, fields, sizeof(clux_struct_field_t) * field_count);
+  }
   meta->count = field_count;
   meta->attrs = NULL;
   meta->attr_count = 0;

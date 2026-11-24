@@ -11238,6 +11238,33 @@ TEST_F(ExecLiteralTest,
   delete_node(&decl);
 }
 
+/* 场景: struct Empty {} 零字段具名声明（纯行为类型，成员表为空）
+   预期: 合法——非 error、描述类型 kind STRUCT、壳按名 define（lookup
+         恒等）；size/align 引擎层补 1（有大小才能有地址与内存分配，
+         未来 C 编译实现插 char rsvd; 占位，语义一致）；字段表为空
+         （field_count 0，任意名 find_field 返回 NULL） */
+TEST_F(ExecLiteralTest, StructDeclEmptyMembersYieldsUnitSizedType) {
+  node_t *members = create_struct_members_node(a);
+  node_t *decl = make_struct_decl_of(a, "Empty", NULL, members);
+
+  clux_value_t *result = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  EXPECT_EQ(clux_context_lookup(ctx, "Empty", NULL), result)
+      << "the named path must bind the shell type value under the name";
+  clux_type_t *empty_type = type_described_by(result);
+  ASSERT_NE(empty_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(empty_type), CLUX_TYPE_STRUCT);
+  EXPECT_EQ(clux_type_get_size(empty_type), (size_t)1)
+      << "a zero-field struct must still have a size so it can have an "
+         "address";
+  EXPECT_EQ(clux_type_get_align(empty_type), (size_t)1);
+  EXPECT_EQ(clux_struct_field_count(empty_type), 0u);
+  EXPECT_EQ(clux_struct_find_field(empty_type, "any"), nullptr);
+  delete_node(&decl);
+}
+
 /* 场景: struct Base { a: i32; b: str } 前置声明 + struct Derived
         { pre: u8; ...Base; post: bool } embed 在字段间展开
    预期: Derived 字段表按声明序 4 项 pre/a/b/post，embed 槽位展开保持
@@ -11755,15 +11782,8 @@ TEST_F(ExecLiteralTest, GenericConstraintInterfaceSatisfiedStructurally) {
   ASSERT_NE(iface_value, nullptr);
   EXPECT_FALSE(clux_value_is_error(iface_value));
 
-  /* pad 字段满足引擎"至少一个字段"门禁（接口判定只看 attribute 表的
-     方法成员，字段数不参与）。 */
+  /* 零字段纯方法 struct（接口判定只看 attribute 表的方法成员）。 */
   node_t *members = create_struct_members_node(a);
-  struct_members_node_add_member(
-      members,
-      make_field_member_of(
-          a,
-          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "pad"),
-          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
   node_t *method_params = create_func_params_node(a);
   func_params_node_add_param(
       method_params,
@@ -11846,14 +11866,8 @@ TEST_F(ExecLiteralTest, GenericConstraintInterfaceReportsFirstViolation) {
   ASSERT_NE(miss_value, nullptr);
   EXPECT_FALSE(clux_value_is_error(miss_value));
 
-  /* 签名不符：write(data: str): void（pad 字段过引擎字段门禁） */
+  /* 签名不符：write(data: str): void（零字段纯方法 struct） */
   node_t *bad_members = create_struct_members_node(a);
-  struct_members_node_add_member(
-      bad_members,
-      make_field_member_of(
-          a,
-          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "pad"),
-          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
   node_t *bad_params = create_func_params_node(a);
   func_params_node_add_param(
       bad_params,
@@ -13613,8 +13627,9 @@ TEST_F(ExecLiteralTest, StructStmtDecoratorChainWrapsAndDeclaresByName) {
   delete_node(&fail_stmt);
 }
 
-/* 场景: context 层两阶段构造直连——begin 字段校验六条 NULL 路径（缺名/
-        缺表/空表/字段缺名/字段缺类型/重名），install 对非 struct 类型与
+/* 场景: context 层两阶段构造直连——begin 字段校验五条 NULL 路径（缺名/
+        缺表/字段缺名/字段缺类型/重名；空表合法，零字段 struct size 补 1），
+        install 对非 struct 类型与
         attr/method/subtype 九类非法表返回 false，正向安装后三表可读，
         二次 install（含全空）拒绝
    预期: 校验失败通道只可观测返回值（错误值被 (void) 丢弃）；正向安装后
@@ -13635,8 +13650,14 @@ TEST_F(ExecLiteralTest, StructContextTwoPhaseBeginAndInstallValidationPaths) {
       << "a missing name must be rejected";
   EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", NULL, 2), nullptr)
       << "a missing field table must be rejected";
-  EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", fields, 0), nullptr)
-      << "an empty field table must be rejected";
+  clux_type_t *empty_shell =
+      clux_context_begin_struct_type(ctx, "SE", fields, 0);
+  ASSERT_NE(empty_shell, nullptr)
+      << "a zero-field struct is a legal pure-behavior type";
+  EXPECT_EQ(clux_type_get_kind(empty_shell), CLUX_TYPE_STRUCT);
+  EXPECT_EQ(clux_type_get_size(empty_shell), (size_t)1);
+  EXPECT_EQ(clux_type_get_align(empty_shell), (size_t)1);
+  EXPECT_EQ(clux_struct_field_count(empty_shell), 0u);
   clux_struct_field_t no_name[1] = {{NULL, i32_type}};
   EXPECT_EQ(clux_context_begin_struct_type(ctx, "SN", no_name, 1), nullptr)
       << "a field without a name must be rejected";

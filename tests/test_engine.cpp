@@ -5783,10 +5783,19 @@ TEST(EngineTest, StructTypeFieldsAndEquality) {
   EXPECT_NE(swapped_type, point_type);
   EXPECT_FALSE(clux_type_equal(point_type, swapped_type));
 
-  /* 非法入参：缺名、空字段表、空声明体、字段缺类型、重名 */
+  /* 非法入参：缺名、空声明体、字段缺类型、重名 */
   EXPECT_EQ(clux_context_create_struct_type(ctx, NULL, &decl), nullptr);
   clux_struct_decl_t empty_decl = {fields, 0, NULL, 0, NULL, 0, NULL, 0};
-  EXPECT_EQ(clux_context_create_struct_type(ctx, "E", &empty_decl), nullptr);
+  clux_type_t *empty_type =
+      clux_context_create_struct_type(ctx, "E", &empty_decl);
+  ASSERT_NE(empty_type, nullptr)
+      << "a zero-field struct is a legal pure-behavior type";
+  EXPECT_EQ(clux_type_get_kind(empty_type), CLUX_TYPE_STRUCT);
+  EXPECT_EQ(clux_type_get_size(empty_type), 1u)
+      << "a zero-field struct must still have a size so it can have an "
+         "address";
+  EXPECT_EQ(clux_type_get_align(empty_type), 1u);
+  EXPECT_EQ(clux_struct_field_count(empty_type), 0u);
   EXPECT_EQ(clux_context_create_struct_type(ctx, "E", NULL), nullptr);
   clux_struct_field_t bad[] = {
       {"a", i32_type},

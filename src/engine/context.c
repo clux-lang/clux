@@ -1705,9 +1705,9 @@ static bool struct_fields_valid(clux_context_t *self,
                                 const char *name,
                                 const clux_struct_field_t *fields,
                                 size_t field_count) {
-  if (!name || !fields || field_count == 0) {
+  if (!name || (!fields && field_count > 0)) {
     (void)clux_context_create_error_message(
-        self, NULL, "struct requires a name and at least one field");
+        self, NULL, "struct requires a name");
     return false;
   }
   for (size_t idx = 0; idx < field_count; idx++) {
@@ -1845,8 +1845,9 @@ clux_type_t *clux_context_begin_struct_type(clux_context_t *self,
   if (!struct_fields_valid(self, name, fields, field_count)) {
     return NULL;
   }
-  /* 零长度 VLA 是 UB，count 为 0 的表占位 1 个槽位（不会被读取）。 */
-  clux_struct_field_t interned_fields[field_count];
+  /* 零长度 VLA 是 UB，count 为 0 的表占位 1 个槽位（不会被读取）。
+     零字段 struct 合法（size 由引擎层补 1）。 */
+  clux_struct_field_t interned_fields[field_count ? field_count : 1];
   for (size_t idx = 0; idx < field_count; idx++) {
     char *field_name = clux_context_alloc_str(self, strlen(fields[idx].name));
     (void)memcpy(field_name, fields[idx].name, strlen(fields[idx].name));
@@ -1927,9 +1928,9 @@ bool clux_context_install_struct_tables(clux_context_t *self,
 clux_type_t *clux_context_create_struct_type(clux_context_t *self,
                                              const char *name,
                                              const clux_struct_decl_t *decl) {
-  if (!name || !decl || !decl->fields || decl->field_count == 0) {
+  if (!name || !decl || (!decl->fields && decl->field_count > 0)) {
     (void)clux_context_create_error_message(
-        self, NULL, "struct requires a name and at least one field");
+        self, NULL, "struct requires a name");
     return NULL;
   }
   for (size_t idx = 0; idx < decl->field_count; idx++) {
