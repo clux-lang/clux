@@ -410,6 +410,14 @@ clux_ast_executor_t clux_context_get_executor(clux_context_t *self);
 bool clux_context_call_depth_enter(clux_context_t *self);
 void clux_context_call_depth_leave(clux_context_t *self);
 size_t clux_context_get_call_depth(clux_context_t *self);
+/* 泛型实例化深度护栏：实例化是对模板 AST 的递归重执行，无界递归实例化
+   （如模板体内再实例化自身）等于栈溢出——执行器进入/退出实例化边界时
+   enter/leave 配对，超限的 enter 返回 false（执行层报 maximum generic
+   instantiation depth exceeded）。上限默认 256，环境变量
+   CLUX_MAX_INSTANCE_DEPTH 覆盖（与调用深度护栏正交）。 */
+bool clux_context_instance_depth_enter(clux_context_t *self);
+void clux_context_instance_depth_leave(clux_context_t *self);
+size_t clux_context_get_instance_depth(clux_context_t *self);
 /* return signal（栈帧协议的展开通道）：return 语句产出信号值（载荷为
    返回值的借用），语句层原样上抛，唯一消费点是调用表达式的帧边界；
    逃逸到调用边界之外由执行层报 "return outside of a function"。 */

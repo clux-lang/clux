@@ -18,6 +18,7 @@
 #include "engine/interface_type.h"
 #include "engine/union.h"
 #include "exec/exec.h"
+#include "exec/generic.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
@@ -31,6 +32,7 @@
 #include "parser/node_interface_decl.h"
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
+#include "parser/node_generic_param.h"
 #include "parser/node_func_param.h"
 #include "parser/node_func_type.h"
 #include "parser/node_group.h"
@@ -493,9 +495,16 @@ clux_value_t *exec_expr_subscript(clux_context_t *ctx, node_t *node) {
   if (clux_value_is_error(base)) {
     return base;
   }
-  /* 泛型实例化（Type[arg, ...]）：BASE 是 type value。
-     TODO: 泛型实例化暂不支持——等泛型推断引擎就绪后接入。 */
-  if (clux_type_kind_unwrap(clux_value_get_type(base)) == CLUX_TYPE_TYPE) {
+  /* 泛型实例化（tmpl[arg, ...]，白皮书 §6.6）：BASE 是模板值
+     （type_template / func_template）时走实例化通道展开。 */
+  clux_type_kind_t base_kind = clux_type_kind_unwrap(clux_value_get_type(base));
+  if (base_kind == CLUX_TYPE_TYPE_TEMPLATE ||
+      base_kind == CLUX_TYPE_FUNC_TEMPLATE) {
+    return exec_generic_instantiate(ctx, base, node);
+  }
+  /* 非模板类型的下标取项形态 Type[...]：泛型实例化语义不成立
+     （Type 不是模板，无可绑定参数表）。 */
+  if (base_kind == CLUX_TYPE_TYPE) {
     return clux_context_create_error_message(
         ctx,
         node_get_location(node),
@@ -691,10 +700,15 @@ clux_value_t *exec_func_decl_init_captures(clux_context_t *ctx,
   return NULL;
 }
 
+/* binding_params 非空即实例模式（泛型实例化通道，exec/generic.c 进入）：
+   跳过泛型门禁、不按名 define，泛型绑定作为尾随捕获并入签名（interim
+   方案——函数体自由名字只解析到形参/捕获/模块级，捕获表是绑定进帧的
+   唯一通道），创建后从实例化 scope 按参名初始化绑定捕获。 */
 static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
                                          node_t *node,
                                          bool declare_named,
-                                         bool defer_captures) {
+                                         bool defer_captures,
+                                         node_t *binding_params) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   const location_t *loc = node_get_location(node);
   node_t *return_node = func_decl_node_get_return(node);
@@ -707,14 +721,21 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
     return clux_context_create_error_message(
         ctx, loc, "function definition requires a body");
   }
-  if (func_decl_node_get_generics(node)) {
-    return clux_context_create_error_message(
-        ctx, loc, "generic function is not supported yet");
-  }
   char *name = NULL;
   node_t *name_node = func_decl_node_get_name(node);
   if (name_node) {
     name = location_get(node_get_location(name_node), allocator);
+  }
+  /* 泛型定义产 func 模板值（白皮书 §6.1）：data 存声明 AST 本身，
+     实例化通道取回后按下标实参在绑定环境内重执行。 */
+  if (func_decl_node_get_generics(node) && !binding_params) {
+    clux_value_t *template_value = clux_context_create_func_template(
+        ctx, node, declare_named ? name : NULL, loc);
+    allocator_free(allocator, (void **)&name);
+    return template_value;
+  }
+  if (binding_params) {
+    declare_named = false; /* 实例不 define：本体归实例化出口 clone */
   }
   /* 捕获列表形态：FUNC_CAPTURES 的唯一子节点是 FUNC_PARAMS，内为
      FUNC_PARAM（name: type），非 FUNC_PARAM 即参数包，暂不支持。 */
@@ -728,7 +749,10 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
       capture_count = func_params_node_get_param_count(capture_params);
     }
   }
-  clux_func_capture_t captures[capture_count];
+  /* 实例模式：泛型绑定计数（AST 捕获在前，绑定在后）。 */
+  size_t binding_count =
+      binding_params ? generic_params_node_get_param_count(binding_params) : 0;
+  clux_func_capture_t captures[capture_count + binding_count];
   size_t filled = 0;
   clux_value_t *fail = NULL;
   for (size_t idx = 0; idx < capture_count && !fail; idx++) {
@@ -748,6 +772,35 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
                                       &fail)) {
       break;
     }
+  }
+  /* 泛型绑定捕获项：类型参数绑定是 type value（类型为 "type" 单例），
+     值参数绑定按声明类型（§6.3 comptime）。名字经 create_func_type
+     驻留后释放（与 AST 捕获同一通道）。 */
+  for (size_t idx = 0; idx < binding_count && !fail; idx++) {
+    node_t *param = generic_params_node_get_param(binding_params, idx);
+    node_t *bname_node = param ? generic_param_node_get_name(param) : NULL;
+    if (!bname_node) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "generic parameter %zu requires a name", idx);
+      break;
+    }
+    char *bname = location_get(node_get_location(bname_node), allocator);
+    node_t *btype_node = generic_param_node_get_type(param);
+    clux_type_t *btype = NULL;
+    if (btype_node) {
+      clux_value_t *err = NULL;
+      btype = exec_operand_type(ctx, btype_node, &err);
+      if (!btype) {
+        fail = err;
+        allocator_free(allocator, (void **)&bname);
+        break;
+      }
+    } else {
+      btype = clux_context_get_type_type(ctx);
+    }
+    captures[filled].name = bname;
+    captures[filled].type = btype;
+    filled++;
   }
   /* 参数序列求值：FUNC_PARAM 取 TYPE 槽，rest（变参/参数包）暂不支持。 */
   node_t *params_node = func_decl_node_get_params(node);
@@ -839,18 +892,57 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
       return capture_fail;
     }
   }
+  /* 实例模式：绑定捕获初值从实例化 scope 按参名取（bind 阶段已
+     declare），经捕获 view + assign 以 copy 语义快照进函数值存储——
+     实例值此后独立于实例化 scope 存活（块出口 clone）。 */
+  for (size_t idx = 0; idx < binding_count; idx++) {
+    node_t *param = generic_params_node_get_param(binding_params, idx);
+    node_t *bname_node = param ? generic_param_node_get_name(param) : NULL;
+    if (!bname_node) {
+      continue; /* 签名构造期已报错，不可达 */
+    }
+    char *bname = location_get(node_get_location(bname_node), allocator);
+    clux_value_t *view =
+        clux_context_func_capture(ctx, value, bname, node_get_location(node));
+    if (clux_value_is_error(view)) {
+      allocator_free(allocator, (void **)&bname);
+      return view;
+    }
+    clux_value_t *bound =
+        clux_context_lookup(ctx, bname, node_get_location(bname_node));
+    if (!clux_value_is_error(bound)) {
+      bound =
+          clux_context_consume_value(ctx, bound, node_get_location(bname_node));
+    }
+    allocator_free(allocator, (void **)&bname);
+    if (clux_value_is_error(bound)) {
+      return bound;
+    }
+    clux_value_t *assigned =
+        clux_context_assign(ctx, view, bound, node_get_location(bname_node));
+    if (clux_value_is_error(assigned)) {
+      return assigned;
+    }
+  }
   return value;
 }
 
 clux_value_t *exec_expr_func_decl(clux_context_t *ctx, node_t *node) {
-  return exec_func_decl_impl(ctx, node, true, false);
+  return exec_func_decl_impl(ctx, node, true, false, NULL);
+}
+
+/* 泛型函数实例：在绑定环境（实例化 scope）内重执行声明 AST——
+   签名（形参/返回类型）此刻可引用泛型参数名。 */
+clux_value_t *exec_func_decl_instance(clux_context_t *ctx, node_t *node) {
+  return exec_func_decl_impl(
+      ctx, node, false, false, func_decl_node_get_generics(node));
 }
 
 /* 匿名函数值求值：仅求值出函数值（带类型与 AST 挂接），不按名 define。
    函数语句装饰器包装路径用——先匿名求值源函数值，包装完成后由
    declare_value 具名化，避开 scope 的重名冲突（scope 无重绑定通道）。 */
 clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node) {
-  return exec_func_decl_impl(ctx, node, false, false);
+  return exec_func_decl_impl(ctx, node, false, false, NULL);
 }
 
 /* 块提升两阶段捕获（前向捕获通道）——
@@ -861,7 +953,7 @@ clux_value_t *exec_func_decl_value(clux_context_t *ctx, node_t *node) {
    含捕获表，类型无限回归无法闭式书写，语义决策 2026-11-20）。TDZ 源
    仍拒绝。phase 2 必须与 phase 1 同作用域执行（lookup 按名取捕获初值）。 */
 clux_value_t *exec_func_decl_define(clux_context_t *ctx, node_t *node) {
-  return exec_func_decl_impl(ctx, node, true, true);
+  return exec_func_decl_impl(ctx, node, true, true, NULL);
 }
 
 clux_value_t *exec_func_decl_bind_captures(clux_context_t *ctx,
@@ -1701,12 +1793,15 @@ clux_value_t *exec_expr_interface_decl_value(clux_context_t *ctx,
    字段表并建壳（布局即时 seal），具名时先 define 出壳的 type value
    （方法签名此刻可解析自身），再求值 var（attribute）与 func（method）
    成员，最后 install 三表收尾。implements 是 sema 断言（exec 忽略）；
-   泛型暂不支持；匿名 struct 合法（define 只在具名时发生——装饰器包装
-   走匿名路径，方法签名引用自身会报 use of undeclared identifier，
-   值级装饰路径待泛型批次一并处理）。 */
+   泛型定义产 type 模板值（实例化通道按下标实参重执行）；匿名 struct
+   合法（define 只在具名时发生——装饰器包装走匿名路径，方法签名引用
+   自身会报 use of undeclared identifier）。is_instance 为真时（泛型
+   实例重执行）跳过门禁且不 define：保留原名作 shell 名（类型名不参与
+   判等），实例值归实例化出口 clone。 */
 static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
                                                 node_t *node,
-                                                bool declare_named) {
+                                                bool declare_named,
+                                                bool is_instance) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   const location_t *loc = node_get_location(node);
   node_t *name_node = struct_decl_node_get_name(node);
@@ -1714,11 +1809,12 @@ static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
       name_node ? location_get(node_get_location(name_node), allocator) : NULL;
   /* 匿名 struct 合法：错误消息与引擎构造用关键字文本回退类型名。 */
   const char *type_name = name ? name : "struct";
-  if (struct_decl_node_get_generics(node)) {
-    clux_value_t *fail = clux_context_create_error_message(
-        ctx, loc, "generic struct is not supported yet");
+  if (struct_decl_node_get_generics(node) && !is_instance) {
+    /* 泛型定义产 type 模板值（白皮书 §6.1）：data 存声明 AST 本身。 */
+    clux_value_t *template_value = clux_context_create_type_template(
+        ctx, node, declare_named ? name : NULL, loc);
     allocator_free(allocator, (void **)&name);
-    return fail;
+    return template_value;
   }
   node_t *body = struct_decl_node_get_body(node);
   size_t count = body ? struct_members_node_get_member_count(body) : 0;
@@ -1997,7 +2093,7 @@ static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
 }
 
 clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node) {
-  return exec_expr_struct_decl_impl(ctx, node, true);
+  return exec_expr_struct_decl_impl(ctx, node, true, false);
 }
 
 /* 匿名 struct 值求值：仅求值出不具名的 type value（不按名 define），
@@ -2005,7 +2101,15 @@ clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node) {
    注意：此路径方法签名引用 struct 自身不可解析（壳名未 define），
    值级装饰路径待泛型批次一并处理。 */
 clux_value_t *exec_expr_struct_decl_value(clux_context_t *ctx, node_t *node) {
-  return exec_expr_struct_decl_impl(ctx, node, false);
+  return exec_expr_struct_decl_impl(ctx, node, false, false);
+}
+
+/* 泛型 struct 实例：在绑定环境（实例化 scope）内重执行声明 AST——
+   字段/方法签名此刻可引用泛型参数名；不 define（方法签名引用原名
+   不可解析，§6.8 自引用留待调用点推导批次）。 */
+clux_value_t *exec_expr_struct_decl_instance(clux_context_t *ctx,
+                                             node_t *node) {
+  return exec_expr_struct_decl_impl(ctx, node, false, true);
 }
 
 /* 元组类型定义 <T, U, ...>（白皮书 §2.6）：元素逐个求值为 type value

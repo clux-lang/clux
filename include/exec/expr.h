@@ -56,6 +56,12 @@ clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node);
    （方法签名引用 struct 自身在此路径不可解析，值级装饰路径待泛型
    批次一并处理）。 */
 clux_value_t *exec_expr_struct_decl_value(clux_context_t *ctx, node_t *node);
+/* 泛型实例重执行（exec/generic.c 进入）：在已含泛型参数绑定的实例化
+   scope 内重执行声明 AST——func 实例的绑定并入捕获表（尾随捕获），
+   struct 实例不 define 留原名作 shell 名，type 别名实例只重求值
+   VALUE 表达式。 */
+clux_value_t *exec_func_decl_instance(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_expr_struct_decl_instance(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node);
 /* 构造表达式 .<type?>{ elem, ... }（白皮书 §5.10）：构造必穷尽，具名按
    类型分流，匿名产出匿名 struct/tuple（经 safe_cast 鸭子类型转换到接收方）。 */

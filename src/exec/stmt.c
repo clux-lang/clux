@@ -179,7 +179,8 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
    通道（error 优先传播、shadow 拒绝、TDZ 消费校验均由其内置语义化
    报错），必须产出 type value（否则按 clux_type_t* 解引用是内存错误），
    经 declare_value 以别名注册进作用域。export（run 阶段产出）是编译期
-   语义，exec 层不处理；generics/decorators 待泛型实现完成后接入。 */
+   语义，exec 层不处理；泛型别名产 type 模板值（STMT_TYPE 节点本身即
+   AST 载荷，实例化通道按下标实参重求值 VALUE 表达式）。 */
 clux_value_t *exec_stmt_type(clux_context_t *ctx, node_t *node) {
   node_t *name_node = stmt_type_node_get_name(node);
   if (!name_node) {
@@ -192,6 +193,14 @@ clux_value_t *exec_stmt_type(clux_context_t *ctx, node_t *node) {
         ctx,
         node_get_location(node),
         "type statement requires a type expression");
+  }
+  if (stmt_type_node_get_generics(node)) {
+    allocator_t *allocator = clux_context_get_allocator(ctx);
+    char *name = location_get(node_get_location(name_node), allocator);
+    clux_value_t *template_value = clux_context_create_type_template(
+        ctx, node, name, node_get_location(node));
+    allocator_free(allocator, (void **)&name);
+    return template_value;
   }
   clux_value_t *value = exec_operand(ctx, value_node);
   if (!value || clux_value_is_error(value)) {

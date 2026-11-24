@@ -49,6 +49,10 @@ struct _clux_context_t {
      上限默认 1024，环境变量 CLUX_MAX_CALL_DEPTH 覆盖。 */
   size_t call_depth;
   size_t max_call_depth;
+  /* 泛型实例化深度护栏：模板 AST 重执行递归超限报语义化错误。
+     上限默认 256，环境变量 CLUX_MAX_INSTANCE_DEPTH 覆盖。 */
+  size_t instance_depth;
+  size_t max_instance_depth;
   /* shadow 模式：块提升 pass 借执行器整树推断类型时开启——create_value
      拦截为 shadow 构造、invoke 拦截为返回类型 shadow（不执行函数体）。
      error 值不拦截，保证推断期错误照常传播。 */
@@ -108,6 +112,7 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->executor = NULL;
   ctx->call_depth = 0;
   ctx->shadow_mode = false;
+  ctx->instance_depth = 0;
   /* 调用深度上限：环境变量 CLUX_MAX_CALL_DEPTH 覆盖，默认 1024。 */
   ctx->max_call_depth = 1024;
   const char *depth_env = getenv("CLUX_MAX_CALL_DEPTH");
@@ -116,6 +121,16 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
     unsigned long long parsed = strtoull(depth_env, &end, 10);
     if (end != depth_env && parsed > 0) {
       ctx->max_call_depth = (size_t)parsed;
+    }
+  }
+  /* 泛型实例化深度上限：环境变量 CLUX_MAX_INSTANCE_DEPTH 覆盖，默认 256。 */
+  ctx->max_instance_depth = 256;
+  const char *instance_env = getenv("CLUX_MAX_INSTANCE_DEPTH");
+  if (instance_env && *instance_env) {
+    char *end = NULL;
+    unsigned long long parsed = strtoull(instance_env, &end, 10);
+    if (end != instance_env && parsed > 0) {
+      ctx->max_instance_depth = (size_t)parsed;
     }
   }
   ctx->builtin_types.type_error =
@@ -1629,6 +1644,21 @@ void clux_context_call_depth_leave(clux_context_t *self) {
 }
 size_t clux_context_get_call_depth(clux_context_t *self) {
   return self ? self->call_depth : 0;
+}
+bool clux_context_instance_depth_enter(clux_context_t *self) {
+  if (!self || self->instance_depth >= self->max_instance_depth) {
+    return false;
+  }
+  self->instance_depth++;
+  return true;
+}
+void clux_context_instance_depth_leave(clux_context_t *self) {
+  if (self && self->instance_depth > 0) {
+    self->instance_depth--;
+  }
+}
+size_t clux_context_get_instance_depth(clux_context_t *self) {
+  return self ? self->instance_depth : 0;
 }
 clux_value_t *clux_context_create_return_signal(clux_context_t *self,
                                                 clux_value_t *payload) {
