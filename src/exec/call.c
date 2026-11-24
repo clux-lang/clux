@@ -17,6 +17,7 @@
 #include "parser/node_call.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
+#include "parser/node_stmt_defer.h"
 
 /* 帧出口协议（栈帧协议核心的收尾半程）：帧内产出的值（error / return
    signal）都注册在帧 scope 内，直接 delete 后引用即悬空——先恢复调用
@@ -70,7 +71,12 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
   (void)loc;
   node_t *decl = ast;
   const location_t *decl_loc = node_get_location(decl);
-  if (node_get_kind(decl) != CLUX_NODE_EXPR_FUNC_DECL) {
+  node_kind_t decl_kind = node_get_kind(decl);
+  /* defer 延期体挂在 STMT_DEFER 节点本身（不能合成 FUNC_DECL——setter
+     会 parent 重指 + delete_node 无条件递归删 children，借用子节点即
+     double free），与函数定义共用本帧协议：无形参、void 返回。 */
+  bool is_defer = decl_kind == CLUX_NODE_STMT_DEFER;
+  if (decl_kind != CLUX_NODE_EXPR_FUNC_DECL && !is_defer) {
     return clux_context_create_error_message(
         ctx, decl_loc, "function AST is not a function definition");
   }
@@ -84,7 +90,7 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
   clux_scope_t *caller = clux_context_swap_scope(ctx, frame);
   /* 形参绑定：copy 语义——实参克隆进帧后按 AST 形参名具名化
      （func_invoke 已交验个数与类型，argc == 形参个数）。 */
-  node_t *params_node = func_decl_node_get_params(decl);
+  node_t *params_node = is_defer ? NULL : func_decl_node_get_params(decl);
   clux_value_t *fail = NULL;
   for (size_t idx = 0; idx < argc && !fail; idx++) {
     node_t *param =
@@ -125,10 +131,14 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
   if (fail) {
     return frame_exit(ctx, frame, caller, fail);
   }
-  node_t *body = func_decl_node_get_body(decl);
+  node_t *body = is_defer ? stmt_defer_node_get_body(decl)
+                          : func_decl_node_get_body(decl);
   if (!body) {
     fail = clux_context_create_error_message(
-        ctx, decl_loc, "function definition requires a body");
+        ctx,
+        decl_loc,
+        is_defer ? "defer statement requires a body"
+                 : "function definition requires a body");
     return frame_exit(ctx, frame, caller, fail);
   }
   clux_value_t *result = exec_node(ctx, body);
@@ -143,6 +153,12 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
     fail = clux_context_create_error_message(
         ctx, decl_loc, "continue outside of a loop");
     return frame_exit(ctx, frame, caller, fail);
+  }
+  /* defer 延期体是无参 void 闭包：fallthrough（无 return，块产出普通
+     最后语句值或空块 NULL）合法——frame_exit 只转换 error 与 return
+     signal，普通值即弃（void 语义不外传）。 */
+  if (is_defer) {
+    return frame_exit(ctx, frame, caller, result);
   }
   /* fallthrough：无 return（块产出普通最后语句值或空块 NULL）统一报
      missing return——clux 的函数体必须显式 return（白皮书 §4.11）。 */

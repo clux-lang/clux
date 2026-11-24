@@ -23,6 +23,10 @@ clux_value_t *exec_stmt_while(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_do_while(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_for(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_foreach(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_switch(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_defer(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_assert(clux_context_t *ctx, node_t *node);
+clux_value_t *exec_stmt_static_assert(clux_context_t *ctx, node_t *node);
 #ifdef __cplusplus
 }
 #endif

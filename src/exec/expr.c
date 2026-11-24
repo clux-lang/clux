@@ -168,16 +168,18 @@ static bool exec_func_capture_entry(clux_context_t *ctx,
 
 /* 函数定义路径捕获项（区别于类型表达式的签名声明）：捕获的是定义点
    作用域的现值。|f: T| 带标注约束类型；|f| 无标注从作用域查询现值
-   （shadow 亦可），以查得值的类型推断捕获类型。重名在引擎校验前
-   拦截以携带源位置。成功并入 captures[(*filled)++]；失败返回 false
-   且 *out_fail 携带 error（已并入的项由调用方统一释放）。 */
-static bool exec_func_decl_capture_entry(clux_context_t *ctx,
-                                         node_t *name_node,
-                                         node_t *type_node,
-                                         size_t idx,
-                                         clux_func_capture_t *captures,
-                                         size_t *filled,
-                                         clux_value_t **out_fail) {
+   （shadow 亦可），以查得值的类型推断捕获类型；|h = expr| 无标注带
+   默认值（defer 的改名捕获形态）从默认值表达式推断类型。重名在引擎
+   校验前拦截以携带源位置。成功并入 captures[(*filled)++]；失败返回
+   false 且 *out_fail 携带 error（已并入的项由调用方统一释放）。 */
+bool exec_func_decl_capture_entry(clux_context_t *ctx,
+                                  node_t *name_node,
+                                  node_t *type_node,
+                                  node_t *default_node,
+                                  size_t idx,
+                                  clux_func_capture_t *captures,
+                                  size_t *filled,
+                                  clux_value_t **out_fail) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   char *name =
       name_node ? location_get(node_get_location(name_node), allocator) : NULL;
@@ -203,6 +205,22 @@ static bool exec_func_decl_capture_entry(clux_context_t *ctx,
       allocator_free(allocator, (void **)&name);
       return false;
     }
+  } else if (default_node) {
+    /* |h = expr| 改名捕获（defer 形态）：从默认值表达式推断捕获类型。
+       值仅为类型推断求出后即弃（本体归 scope 统一销毁）。 */
+    clux_value_t *source = exec_operand(ctx, default_node);
+    if (!source || clux_value_is_error(source)) {
+      *out_fail = clux_value_is_error(source)
+                      ? source
+                      : clux_context_create_error_message(
+                            ctx,
+                            node_get_location(default_node),
+                            "capture %zu requires a value",
+                            idx);
+      allocator_free(allocator, (void **)&name);
+      return false;
+    }
+    type = clux_value_get_type(source);
   } else {
     /* 无标注 |f|：以定义点作用域现值的类型推断捕获类型。 */
     clux_value_t *found =
@@ -615,10 +633,10 @@ clux_value_t *exec_expr_func_type(clux_context_t *ctx, node_t *node) {
    作用域查询现值（TDZ 源拒绝），经捕获 view + assign 以 copy 语义
    快照进函数值存储——写入独立于外层变量，类型不匹配由 assign 的
    safe_cast 拦截。错误逐一向上传播。 */
-static clux_value_t *exec_func_decl_init_captures(clux_context_t *ctx,
-                                                  clux_value_t *func,
-                                                  node_t *node) {
-  node_t *captures_node = func_decl_node_get_captures(node);
+clux_value_t *exec_func_decl_init_captures(clux_context_t *ctx,
+                                           clux_value_t *func,
+                                           node_t *captures_node,
+                                           node_t *node) {
   if (!captures_node) {
     return NULL;
   }
@@ -720,6 +738,7 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
     if (!exec_func_decl_capture_entry(ctx,
                                       func_param_node_get_name(entry),
                                       func_param_node_get_type(entry),
+                                      NULL,
                                       idx,
                                       captures,
                                       &filled,
@@ -811,7 +830,8 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
      defer_captures 时跳过（块提升 phase 1 仅定义——全部函数名字就位后
      由 phase 2 统一初始化，前向捕获由此成立）。 */
   if (!defer_captures) {
-    clux_value_t *capture_fail = exec_func_decl_init_captures(ctx, value, node);
+    clux_value_t *capture_fail = exec_func_decl_init_captures(
+        ctx, value, func_decl_node_get_captures(node), node);
     if (capture_fail) {
       return capture_fail;
     }
@@ -844,7 +864,8 @@ clux_value_t *exec_func_decl_define(clux_context_t *ctx, node_t *node) {
 clux_value_t *exec_func_decl_bind_captures(clux_context_t *ctx,
                                            clux_value_t *func,
                                            node_t *node) {
-  return exec_func_decl_init_captures(ctx, func, node);
+  return exec_func_decl_init_captures(
+      ctx, func, func_decl_node_get_captures(node), node);
 }
 
 /* union 定义（白皮书 §3.7 tag union、§3.8 C union）：tag union 与

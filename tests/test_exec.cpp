@@ -54,6 +54,11 @@
 #include "parser/node_interface_decl.h"
 #include "parser/node_stmt_interface.h"
 #include "parser/node_stmt_jump.h"
+#include "parser/node_stmt_switch.h"
+#include "parser/node_switch_branch.h"
+#include "parser/node_stmt_defer.h"
+#include "parser/node_stmt_assert.h"
+#include "parser/node_stmt_static_assert.h"
 #include "parser/node_stmt_while.h"
 #include "parser/node_stmt_do_while.h"
 #include "parser/node_generic_param.h"
@@ -883,7 +888,11 @@ TEST_F(ExecLiteralTest, ExecNodeAllKindsDispatch) {
         kind == CLUX_NODE_STMT_IF || kind == CLUX_NODE_STMT_EMPTY ||
         kind == CLUX_NODE_STMT_BREAK || kind == CLUX_NODE_STMT_CONTINUE ||
         kind == CLUX_NODE_STMT_WHILE || kind == CLUX_NODE_STMT_DO_WHILE ||
-        kind == CLUX_NODE_STMT_FOR || kind == CLUX_NODE_STMT_FOREACH;
+        kind == CLUX_NODE_STMT_FOR || kind == CLUX_NODE_STMT_FOREACH ||
+        kind == CLUX_NODE_STMT_SWITCH || kind == CLUX_NODE_STMT_DEFER ||
+        kind == CLUX_NODE_STMT_COMPTIME_IF ||
+        kind == CLUX_NODE_STMT_COMPTIME_FOREACH ||
+        kind == CLUX_NODE_STMT_ASSERT || kind == CLUX_NODE_STMT_STATIC_ASSERT;
     if (synthetic_skip) {
       continue;
     }
@@ -17466,4 +17475,1002 @@ TEST_F(ExecLiteralTest, ExecStmtForeachIterationVariableScopedPerRound) {
                      "use of undeclared identifier 'x'") != nullptr)
       << "actual: " << error_message_of(leaked);
   delete_node(&loop);
+}
+
+/* ---- exec_stmt_switch/comptime/defer/assert/static_assert（白皮书
+       §4.5、§4.15、§4.12、§11.3、§4.16）---- */
+
+/* 合成单模式 switch 分支 (pattern) -> { body }：default 分支直接用
+   create_switch_branch_node + set_body 构造（PATTERNS 缺省即 NULL），
+   delete 根节点时递归释放全部子节点。 */
+static node_t *
+make_switch_branch_of(allocator_t *allocator, node_t *pattern, node_t *body) {
+  node_t *patterns = create_switch_patterns_node(allocator);
+  switch_patterns_node_add_pattern(patterns, pattern);
+  node_t *branch = create_switch_branch_node(allocator);
+  switch_branch_node_set_patterns(branch, patterns);
+  switch_branch_node_set_body(branch, body);
+  return branch;
+}
+
+/* 合成完整 switch 语句 switch (value) { branches... }。 */
+static node_t *
+make_stmt_switch_of(allocator_t *allocator, node_t *value, node_t *branches) {
+  node_t *node = create_stmt_switch_node(allocator);
+  stmt_switch_node_set_value(node, value);
+  stmt_switch_node_set_body(node, branches);
+  return node;
+}
+
+/* 合成 defer 捕获表 |(name = default_expr)|：FUNC_CAPTURES 唯一子
+   FUNC_PARAMS 内单个 FUNC_PARAM（改名捕获形态）。 */
+static node_t *make_defer_captures_of(allocator_t *allocator,
+                                      const char *name_text,
+                                      node_t *default_expr) {
+  node_t *param = create_func_param_node(allocator);
+  func_param_node_set_name(
+      param,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name_text));
+  func_param_node_set_default(param, default_expr);
+  node_t *params = create_func_params_node(allocator);
+  func_params_node_add_param(params, param);
+  node_t *captures = create_func_captures_node(allocator);
+  func_captures_node_add_capture(captures, params);
+  return captures;
+}
+
+/* 合成完整 defer 语句 defer |captures|? { body }：captures 可为 NULL。 */
+static node_t *
+make_stmt_defer_of(allocator_t *allocator, node_t *captures, node_t *body) {
+  node_t *node = create_stmt_defer_node(allocator);
+  if (captures) {
+    stmt_defer_node_set_captures(node, captures);
+  }
+  stmt_defer_node_set_body(node, body);
+  return node;
+}
+
+/* 合成 assert 语句 assert(cond_text)：SOURCE 槽 SOURCE_TEXT 覆盖条件
+   文本，失败诊断直接引用。 */
+static node_t *make_stmt_assert_of(allocator_t *allocator,
+                                   const char *cond_text) {
+  node_t *node = create_stmt_assert_node(allocator);
+  stmt_assert_node_set_condition(
+      node, make_text_node(allocator, CLUX_NODE_LITERAL_BOOLEAN, cond_text));
+  stmt_assert_node_set_source(
+      node, make_text_node(allocator, CLUX_NODE_SOURCE_TEXT, cond_text));
+  return node;
+}
+
+/* 合成 static_assert 语句 static_assert(cond_text, message_text)：
+   message_text 须为持久存储的源码形态（含首尾引号，literal 求值剥引号
+   取内容；make_text_node 不复制 text），为 NULL 时省略 MESSAGE 槽。 */
+static node_t *make_stmt_static_assert_of(allocator_t *allocator,
+                                          const char *cond_text,
+                                          const char *message_text) {
+  node_t *node = create_stmt_static_assert_node(allocator);
+  stmt_static_assert_node_set_condition(
+      node, make_text_node(allocator, CLUX_NODE_LITERAL_BOOLEAN, cond_text));
+  if (message_text) {
+    stmt_static_assert_node_set_message(
+        node,
+        make_text_node(allocator, CLUX_NODE_LITERAL_STRING, message_text));
+  }
+  return node;
+}
+
+/* 场景: switch (2) { 1 => { n = 10; } 2 => { n = 20; } }——第二个模式
+        分支命中并执行其分支体，不 fallthrough
+   预期: n == 20，语句无 error，未命中分支体不执行 */
+TEST_F(ExecLiteralTest, ExecStmtSwitchPatternMatchRunsBranch) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10")))));
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "2"),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "20")))));
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "2"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 20)
+      << "the second pattern branch must run and assign n = 20";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: switch (9) { 1 => { n = 10; } default => { n = 99; } }——模式
+        全扫无命中后落到 default 分支
+   预期: n == 99（default 在模式分支之后兜底，不与模式分支抢跑） */
+TEST_F(ExecLiteralTest, ExecStmtSwitchDefaultFallback) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *default_branch = create_switch_branch_node(a);
+  switch_branch_node_set_body(
+      default_branch,
+      make_block_of(
+          a,
+          make_assign_stmt_of(
+              a, "n", make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "99"))));
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10")))));
+  switch_branches_node_add_branch(branches, default_branch);
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "9"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 99)
+      << "the default branch must run after no pattern matches";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: switch (2) { (1, 2, 3) => { n = 7; } }——单分支多模式，
+        第二个模式命中
+   预期: n == 7（分支内逐模式比较，模式列表中途命中即执行） */
+TEST_F(ExecLiteralTest, ExecStmtSwitchMultiPatternMatch) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *patterns = create_switch_patterns_node(a);
+  switch_patterns_node_add_pattern(
+      patterns, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  switch_patterns_node_add_pattern(
+      patterns, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+  switch_patterns_node_add_pattern(
+      patterns, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3"));
+  node_t *branch = create_switch_branch_node(a);
+  switch_branch_node_set_patterns(branch, patterns);
+  switch_branch_node_set_body(
+      branch,
+      make_block_of(
+          a,
+          make_assign_stmt_of(
+              a, "n", make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "7"))));
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(branches, branch);
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "2"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 7)
+      << "the second pattern in the list must match and run the branch";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: switch (5) { 1 => { n = 10; } }——无模式命中且无 default
+   预期: 语句无值（NULL），分支体不执行，n 保持 0 */
+TEST_F(ExecLiteralTest, ExecStmtSwitchNoMatchNoDefaultYieldsNull) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10")))));
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "5"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr)
+      << "an unmatched switch without default must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 0)
+      << "the unmatched branch body must not run";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: while (true) { i = i + 1; switch (1) { 1 => { break; } } }——
+        break 在 switch 命中分支体内，白皮书语义上属外层循环
+   预期: break 透传出 switch 被最近循环边界（while）消费，i == 1，
+        循环正常退出无值（NULL），不是死循环也不是 error */
+TEST_F(ExecLiteralTest, ExecStmtSwitchBreakPropagatesToOuterLoop) {
+  node_t *i_decl =
+      make_stmt_var("i", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, i_decl)));
+
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(a,
+                            make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+                            make_block_of(a, create_stmt_break_node(a))));
+  node_t *sw = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"), branches);
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(body, sw);
+  node_t *loop = make_stmt_while_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"), body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr)
+      << "the while loop must consume the break and exit with no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "i", NULL)), 1)
+      << "exactly one round must run before the break exits the loop";
+  delete_node(&loop);
+  delete_node(&i_decl);
+}
+
+/* 场景: switch 缺 VALUE / 缺 BODY / BODY 非分支列表——容错报错
+   预期: 三条语义化 error 消息精确匹配 */
+TEST_F(ExecLiteralTest, ExecStmtSwitchMalformedReportsErrors) {
+  node_t *no_value =
+      make_stmt_switch_of(a, NULL, create_switch_branches_node(a));
+  clux_value_t *value_err = exec_node(ctx, no_value);
+  ASSERT_NE(value_err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value_err));
+  EXPECT_STREQ(error_message_of(value_err),
+               "switch statement requires a value");
+  delete_node(&no_value);
+
+  node_t *no_body = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"), NULL);
+  clux_value_t *body_err = exec_node(ctx, no_body);
+  ASSERT_NE(body_err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(body_err));
+  EXPECT_STREQ(error_message_of(body_err), "switch statement requires a body");
+  delete_node(&no_body);
+
+  node_t *bad_body =
+      make_stmt_switch_of(a,
+                          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+                          make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "2"));
+  clux_value_t *list_err = exec_node(ctx, bad_body);
+  ASSERT_NE(list_err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(list_err));
+  EXPECT_STREQ(error_message_of(list_err),
+               "switch statement requires a branch list");
+  delete_node(&bad_body);
+}
+
+/* 场景: comptime if (true) { 33; }——解释执行下与普通 if 等价
+        （exec 无编译期概念，纯执行期 CTFE）
+   预期: 走 then 分支，语句值 33 */
+TEST_F(ExecLiteralTest, ExecStmtComptimeIfReusesIfDispatch) {
+  node_t *node = create_stmt_comptime_if_node(a);
+  stmt_if_node_set_condition(
+      node, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "true"));
+  stmt_if_node_set_then(
+      node,
+      make_block_of(a, make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "33")));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 33)
+      << "comptime if must reuse the if dispatch and run the then branch";
+  delete_node(&node);
+}
+
+/* 场景: comptime foreach (var x of arr) { n = n + x; }——解释执行下与
+        普通 foreach 等价
+   预期: 4 轮全部执行，n == 46（10+11+12+13） */
+TEST_F(ExecLiteralTest, ExecStmtComptimeForeachReusesForeachDispatch) {
+  ASSERT_NE(make_i32_array("arr_cf", 4), nullptr);
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(
+              a,
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+              make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+              make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"))));
+  node_t *node = create_stmt_comptime_foreach_node(a);
+  stmt_foreach_node_set_keyword(node,
+                                make_text_node(a, CLUX_NODE_SYMBOL, "var"));
+  stmt_foreach_node_set_name(
+      node, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_foreach_node_set_iterable(
+      node, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_cf"));
+  stmt_foreach_node_set_body(node, body);
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr) << "a comptime foreach must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 46)
+      << "comptime foreach must reuse the foreach dispatch for all 4 rounds";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: 块 { defer { d = d + 10; } defer { d = d + 100; } d = d + 1; }——
+        两个 defer 在块出口按 LIFO（逆序）执行
+   预期: 块体先执行 d == 1，出口先 +100 再 +10，最终 d == 111 */
+TEST_F(ExecLiteralTest, ExecStmtDeferRunsAtBlockExitLifo) {
+  node_t *d_decl =
+      make_stmt_var("d", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, d_decl)));
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_defer_of(
+          a,
+          NULL,
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "d",
+                  make_binary_of(
+                      a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                      make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10"))))));
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_defer_of(
+          a,
+          NULL,
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "d",
+                  make_binary_of(
+                      a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                      make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "100"))))));
+  stmt_block_node_add_stmt(
+      block,
+      make_assign_stmt_of(
+          a,
+          "d",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "d", NULL)), 111)
+      << "defers must run LIFO at block exit: 1 + 100 + 10 == 111";
+  delete_node(&block);
+  delete_node(&d_decl);
+}
+
+/* 场景: 块 { c = c + 1; defer |(s = c)| { m = s; } c = 99; }——改名捕获
+        在 defer 登记点对 c 快照，登记后再改 c 不影响延期体
+   预期: 块出口 defer 执行 m = s，s 是登记点快照 1（m == 1），c == 99 */
+TEST_F(ExecLiteralTest, ExecStmtDeferCaptureSnapshotsRegistrationValue) {
+  node_t *c_decl =
+      make_stmt_var("c", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, c_decl)));
+  node_t *m_decl =
+      make_stmt_var("m", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, m_decl)));
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_assign_stmt_of(
+          a,
+          "c",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "c"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_defer_of(
+          a,
+          make_defer_captures_of(
+              a, "s", make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "c")),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "m",
+                  make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "s")))));
+  stmt_block_node_add_stmt(
+      block,
+      make_assign_stmt_of(
+          a, "c", make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "99")));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "m", NULL)), 1)
+      << "the capture must snapshot the registration-point value (c == 1)";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "c", NULL)), 99)
+      << "the post-registration reassignment must stand after the defer runs";
+  delete_node(&block);
+  delete_node(&m_decl);
+  delete_node(&c_decl);
+}
+
+/* 场景: for (var i = 0; i < 3; i = i + 1) { defer { d = d + 1; } }——
+        defer 挂在每轮 body 块 scope 上，每轮出口各执行一次
+   预期: d == 3（每轮一次），循环无值（NULL） */
+TEST_F(ExecLiteralTest, ExecStmtDeferRunsPerRoundInLoop) {
+  node_t *d_decl =
+      make_stmt_var("d", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, d_decl)));
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_stmt_defer_of(
+          a,
+          NULL,
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "d",
+                  make_binary_of(
+                      a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                      make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))))));
+  node_t *loop = make_stmt_for_of(
+      a,
+      make_stmt_var("i", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0"),
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "<"),
+                     make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "3")),
+      make_assign_stmt_of(
+          a,
+          "i",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))),
+      body);
+  clux_value_t *value = exec_node(ctx, loop);
+  EXPECT_EQ(value, nullptr) << "a for loop must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "d", NULL)), 3)
+      << "the defer must run once per round at each body-block exit";
+  delete_node(&loop);
+  delete_node(&d_decl);
+}
+
+/* 场景: 块 { defer { import; } d = 1; }——defer 延期体执行产 error
+   预期: error 替代块出口值向上传播（"unsupported node kind: STMT_IMPORT"） */
+TEST_F(ExecLiteralTest, ExecStmtDeferErrorPropagatesFromExit) {
+  node_t *d_decl =
+      make_stmt_var("d", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, d_decl)));
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_defer_of(
+          a,
+          NULL,
+          make_block_of(a,
+                        make_text_stmt(a, CLUX_NODE_STMT_IMPORT, "import"))));
+  stmt_block_node_add_stmt(
+      block,
+      make_assign_stmt_of(
+          a, "d", make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a defer body error must replace the block exit value";
+  EXPECT_STREQ(error_message_of(value), "unsupported node kind: STMT_IMPORT")
+      << "actual: " << error_message_of(value);
+  delete_node(&block);
+  delete_node(&d_decl);
+}
+
+/* 场景: defer 缺 BODY——容错报错
+   预期: "defer statement requires a body" 语义化 error */
+TEST_F(ExecLiteralTest, ExecStmtDeferRequiresBody) {
+  node_t *node = create_stmt_defer_node(a);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value), "defer statement requires a body");
+  delete_node(&node);
+}
+
+/* 场景: assert(true)——条件成立，语句静默通过
+   预期: 语句无值（NULL），非 error */
+TEST_F(ExecLiteralTest, ExecStmtAssertTrueYieldsNull) {
+  node_t *node = make_stmt_assert_of(a, "true");
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr) << "a passing assert must yield no value";
+  delete_node(&node);
+}
+
+/* 场景: assert(false)——条件不成立，error 引用 SOURCE 槽的源码文本
+   预期: "assertion failed: false" */
+TEST_F(ExecLiteralTest, ExecStmtAssertFalseQuotesSource) {
+  node_t *node = make_stmt_assert_of(a, "false");
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a failing assert must produce an error";
+  EXPECT_STREQ(error_message_of(value), "assertion failed: false")
+      << "actual: " << error_message_of(value);
+  delete_node(&node);
+}
+
+/* 场景: assert(1)——条件非 bool；assert 缺 CONDITION——容错报错
+   预期: "assert condition must be 'bool', got 'i32'"；
+        "assert statement requires a condition" */
+TEST_F(ExecLiteralTest, ExecStmtAssertMalformedReportsErrors) {
+  node_t *non_bool = create_stmt_assert_node(a);
+  stmt_assert_node_set_condition(
+      non_bool, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  clux_value_t *cond_err = exec_node(ctx, non_bool);
+  ASSERT_NE(cond_err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(cond_err));
+  EXPECT_STREQ(error_message_of(cond_err),
+               "assert condition must be 'bool', got 'i32'")
+      << "actual: " << error_message_of(cond_err);
+  delete_node(&non_bool);
+
+  node_t *no_cond = create_stmt_assert_node(a);
+  clux_value_t *missing_err = exec_node(ctx, no_cond);
+  ASSERT_NE(missing_err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(missing_err));
+  EXPECT_STREQ(error_message_of(missing_err),
+               "assert statement requires a condition");
+  delete_node(&no_cond);
+}
+
+/* 场景: static_assert(true, "boom") / static_assert(false) 缺 MESSAGE——
+        成立静默通过；缺消息回退 <unknown>
+   预期: true 无值（NULL）；false 缺 MESSAGE 报
+        "static assertion failed: <unknown>" */
+TEST_F(ExecLiteralTest, ExecStmtStaticAssertPassAndUnknownMessage) {
+  node_t *pass = make_stmt_static_assert_of(a, "true", "\"boom\"");
+  clux_value_t *pass_value = exec_node(ctx, pass);
+  EXPECT_EQ(pass_value, nullptr)
+      << "a passing static assert must yield no value";
+  delete_node(&pass);
+
+  node_t *no_msg = make_stmt_static_assert_of(a, "false", NULL);
+  clux_value_t *no_msg_value = exec_node(ctx, no_msg);
+  ASSERT_NE(no_msg_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(no_msg_value));
+  EXPECT_STREQ(error_message_of(no_msg_value),
+               "static assertion failed: <unknown>")
+      << "actual: " << error_message_of(no_msg_value);
+  delete_node(&no_msg);
+}
+
+/* 场景: static_assert(false, "boom")——失败引用 MESSAGE 槽字符串字面量；
+        static_assert(1, "x")——条件非 bool；缺 CONDITION——容错报错
+   预期: "static assertion failed: boom"；
+        "static assert condition must be 'bool', got 'i32'"；
+        "static assert statement requires a condition" */
+TEST_F(ExecLiteralTest, ExecStmtStaticAssertFailAndMalformed) {
+  node_t *fail = make_stmt_static_assert_of(a, "false", "\"boom\"");
+  clux_value_t *fail_value = exec_node(ctx, fail);
+  ASSERT_NE(fail_value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(fail_value));
+  EXPECT_STREQ(error_message_of(fail_value), "static assertion failed: boom")
+      << "actual: " << error_message_of(fail_value);
+  delete_node(&fail);
+
+  node_t *non_bool = create_stmt_static_assert_node(a);
+  stmt_static_assert_node_set_condition(
+      non_bool, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_static_assert_node_set_message(
+      non_bool, make_text_node(a, CLUX_NODE_LITERAL_STRING, "x"));
+  clux_value_t *cond_err = exec_node(ctx, non_bool);
+  ASSERT_NE(cond_err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(cond_err));
+  EXPECT_STREQ(error_message_of(cond_err),
+               "static assert condition must be 'bool', got 'i32'")
+      << "actual: " << error_message_of(cond_err);
+  delete_node(&non_bool);
+
+  node_t *no_cond = create_stmt_static_assert_node(a);
+  clux_value_t *missing_err = exec_node(ctx, no_cond);
+  ASSERT_NE(missing_err, nullptr);
+  ASSERT_TRUE(clux_value_is_error(missing_err));
+  EXPECT_STREQ(error_message_of(missing_err),
+               "static assert statement requires a condition");
+  delete_node(&no_cond);
+}
+
+/* ---- 批 4 正式用例：exec_stmt_switch / defer / comptime / assert /
+       static_assert 的补充路径（default 前置、不 fallthrough、模式
+       容错、defer 注册惰性 / 嵌套出口 / error 出口跳过 / 捕获缺省值、
+       comptime 分派等价 else / 空迭代、非 STR 消息回退）---- */
+
+/* 场景: switch (1) { default => { n = 99; } 1 => { n = 10; } }——default
+        分支排在模式分支之前，模式全扫语义下 default 只兜底不抢跑
+   预期: n == 10（default 在前也不得先于模式命中执行） */
+TEST_F(ExecLiteralTest, ExecStmtSwitchDefaultListedFirstDoesNotPreemptMatch) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *default_branch = create_switch_branch_node(a);
+  switch_branch_node_set_body(
+      default_branch,
+      make_block_of(
+          a,
+          make_assign_stmt_of(
+              a, "n", make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "99"))));
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(branches, default_branch);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10")))));
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 10)
+      << "a leading default must not preempt the matching pattern branch";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: switch (1) { 1 => { n = 10; } 1 => { n = 20; } }——首个命中分支
+        执行后即返回，后续分支体不得再执行（无 fallthrough）
+   预期: n == 10（若 fallthrough 则会被第二个同模式分支覆写成 20） */
+TEST_F(ExecLiteralTest, ExecStmtSwitchMatchDoesNotFallThroughToLaterBranch) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10")))));
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "20")))));
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 10)
+      << "a matched branch must return immediately without fallthrough";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: switch (1) { {} => { n = 10; } }——模式节点求值无值（空块）
+   预期: "switch pattern requires a value" 语义化容错 error */
+TEST_F(ExecLiteralTest, ExecStmtSwitchPatternWithoutValueFails) {
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          create_stmt_block_node(a),
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "n",
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10")))));
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value), "switch pattern requires a value")
+      << "actual: " << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 0)
+      << "the branch body must not run when the pattern has no value";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: switch (1) { "x" => {} }——模式比较类型不匹配（i32 == str）
+   预期: 引擎比较容错 error 原样传播，不落 default 不静默忽略 */
+TEST_F(ExecLiteralTest, ExecStmtSwitchPatternComparisonErrorPropagates) {
+  node_t *branches = create_switch_branches_node(a);
+  switch_branches_node_add_branch(
+      branches,
+      make_switch_branch_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_STRING, "\"x\""),
+          make_block_of(a, make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  node_t *node = make_stmt_switch_of(
+      a, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"), branches);
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a type-mismatched pattern comparison must not silently miss";
+  EXPECT_STREQ(error_message_of(value),
+               "operator '==' requires operands of the same type")
+      << "actual: " << error_message_of(value);
+  delete_node(&node);
+}
+
+/* 场景: defer { d = d + 10; }——语句在当前作用域直接执行（不进块）
+   预期: 仅登记不执行延期体，语句无值（NULL），d 保持 0 */
+TEST_F(ExecLiteralTest, ExecStmtDeferRegistrationIsInert) {
+  node_t *d_decl =
+      make_stmt_var("d", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, d_decl)));
+
+  node_t *node = make_stmt_defer_of(
+      a,
+      NULL,
+      make_block_of(
+          a,
+          make_assign_stmt_of(
+              a,
+              "d",
+              make_binary_of(
+                  a,
+                  make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                  make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                  make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10")))));
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr)
+      << "executing a defer statement must yield no value";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "d", NULL)), 0)
+      << "registration alone must not run the deferred body";
+  delete_node(&node);
+  delete_node(&d_decl);
+}
+
+/* 场景: { { d = d + 1; defer { d = d * 10; } } d = d + 5; }——内层块出口
+        先执行内层 defer，再回到外层继续执行 d = d + 5
+   预期: d == 15（(0+1)*10+5；若 defer 拖到外层出口才执行则是 60，
+        顺序敏感算术区分两种出口时序） */
+TEST_F(ExecLiteralTest, ExecStmtDeferInnerBlockExitRunsBeforeOuterTail) {
+  node_t *d_decl =
+      make_stmt_var("d", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, d_decl)));
+
+  node_t *inner = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      inner,
+      make_assign_stmt_of(
+          a,
+          "d",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  stmt_block_node_add_stmt(
+      inner,
+      make_stmt_defer_of(
+          a,
+          NULL,
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "d",
+                  make_binary_of(
+                      a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                      make_text_node(a, CLUX_NODE_SYMBOL, "*"),
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10"))))));
+  node_t *outer = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(outer, inner);
+  stmt_block_node_add_stmt(
+      outer,
+      make_assign_stmt_of(
+          a,
+          "d",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "5"))));
+  clux_value_t *value = exec_node(ctx, outer);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "d", NULL)), 15)
+      << "the inner defer must fire at the inner block exit, before the "
+         "outer tail statement";
+  delete_node(&outer);
+  delete_node(&d_decl);
+}
+
+/* 场景: { defer { d = d + 10; } assert(false); }——块体产 error 出口
+   预期: error 出口绕过 defer（d 保持 0），assert 的 error 原样传播 */
+TEST_F(ExecLiteralTest, ExecStmtDeferSkippedOnErrorExit) {
+  node_t *d_decl =
+      make_stmt_var("d", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, d_decl)));
+
+  node_t *block = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      block,
+      make_stmt_defer_of(
+          a,
+          NULL,
+          make_block_of(
+              a,
+              make_assign_stmt_of(
+                  a,
+                  "d",
+                  make_binary_of(
+                      a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "d"),
+                      make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                      make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "10"))))));
+  stmt_block_node_add_stmt(block, make_stmt_assert_of(a, "false"));
+  clux_value_t *value = exec_node(ctx, block);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "the block must propagate the assert error";
+  EXPECT_STREQ(error_message_of(value), "assertion failed: false")
+      << "actual: " << error_message_of(value);
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "d", NULL)), 0)
+      << "an error exit must bypass registered defers";
+  delete_node(&block);
+  delete_node(&d_decl);
+}
+
+/* 场景: defer |(s)| { 1; }——捕获项无类型无默认值且名字全局不可解析
+   预期: 登记期 lookup 容错 error（"use of undeclared identifier 's'"），
+        延期体不登记不执行 */
+TEST_F(ExecLiteralTest, ExecStmtDeferCaptureMissingDefaultRequiresResolution) {
+  node_t *node = make_stmt_defer_of(
+      a,
+      make_defer_captures_of(a, "s", NULL),
+      make_block_of(a, make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "1")));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value))
+      << "a capture without default must resolve the name at registration";
+  EXPECT_STREQ(error_message_of(value), "use of undeclared identifier 's'")
+      << "actual: " << error_message_of(value);
+  delete_node(&node);
+}
+
+/* 场景: comptime if (false) { 33; } else { 77; }——false 走 else 分支
+   预期: 语句值 77（与普通 if 的分派等价性覆盖 else 路径） */
+TEST_F(ExecLiteralTest, ExecStmtComptimeIfFalseRunsElseBranch) {
+  node_t *node = create_stmt_comptime_if_node(a);
+  stmt_if_node_set_condition(
+      node, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"));
+  stmt_if_node_set_then(
+      node,
+      make_block_of(a, make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "33")));
+  stmt_if_node_set_else(
+      node,
+      make_block_of(a, make_text_stmt(a, CLUX_NODE_LITERAL_NUMERIC, "77")));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(read_i32(value), 77)
+      << "comptime if must reuse the if dispatch and run the else branch";
+  delete_node(&node);
+}
+
+/* 场景: comptime foreach (var x of 空数组) { n = n + 1; }——零轮迭代
+   预期: 语句无值（NULL），n 保持 0（与普通 foreach 分派等价） */
+TEST_F(ExecLiteralTest, ExecStmtComptimeForeachOverEmptyArrayYieldsNull) {
+  ASSERT_NE(make_i32_array("arr_ce0", 0), nullptr);
+  node_t *n_decl =
+      make_stmt_var("n", (node_kind_t)0, NULL, CLUX_NODE_LITERAL_NUMERIC, "0");
+  ASSERT_FALSE(clux_value_is_error(exec_node(ctx, n_decl)));
+
+  node_t *body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(
+      body,
+      make_assign_stmt_of(
+          a,
+          "n",
+          make_binary_of(a,
+                         make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "n"),
+                         make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                         make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "1"))));
+  node_t *node = create_stmt_comptime_foreach_node(a);
+  stmt_foreach_node_set_keyword(node,
+                                make_text_node(a, CLUX_NODE_SYMBOL, "var"));
+  stmt_foreach_node_set_name(
+      node, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  stmt_foreach_node_set_iterable(
+      node, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "arr_ce0"));
+  stmt_foreach_node_set_body(node, body);
+  clux_value_t *value = exec_node(ctx, node);
+  EXPECT_EQ(value, nullptr) << "a zero-round comptime foreach must yield NULL";
+  EXPECT_EQ(read_i32(clux_context_lookup(ctx, "n", NULL)), 0)
+      << "the body must not run for an empty iterable";
+  delete_node(&node);
+  delete_node(&n_decl);
+}
+
+/* 场景: static_assert(false, MESSAGE 为数值字面量非 STR)——消息槽存在
+        但求值结果不是字符串
+   预期: 回退 "static assertion failed: <unknown>"（非 STR 消息不透传） */
+TEST_F(ExecLiteralTest, ExecStmtStaticAssertNonStringMessageFallsBack) {
+  node_t *node = create_stmt_static_assert_node(a);
+  stmt_static_assert_node_set_condition(
+      node, make_text_node(a, CLUX_NODE_LITERAL_BOOLEAN, "false"));
+  stmt_static_assert_node_set_message(
+      node, make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "7"));
+  clux_value_t *value = exec_node(ctx, node);
+  ASSERT_NE(value, nullptr);
+  ASSERT_TRUE(clux_value_is_error(value));
+  EXPECT_STREQ(error_message_of(value), "static assertion failed: <unknown>")
+      << "actual: " << error_message_of(value);
+  delete_node(&node);
 }

@@ -20,6 +20,23 @@ clux_value_t *exec_func_decl_define(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_func_decl_bind_captures(clux_context_t *ctx,
                                            clux_value_t *func,
                                            node_t *node);
+/* 捕获表构造/初始化公共体（defer 延期体与函数定义共用 FUNC_CAPTURES
+   布局）：capture_entry 并入一项捕获（|f: T| 标注 / |f| 名字推断 /
+   |h = expr| 默认值推断）；init_captures 按 captures_node 做定义点
+   捕获快照（node 仅提供位置上下文）。 */
+#include "engine/func.h"
+bool exec_func_decl_capture_entry(clux_context_t *ctx,
+                                  node_t *name_node,
+                                  node_t *type_node,
+                                  node_t *default_node,
+                                  size_t idx,
+                                  clux_func_capture_t *captures,
+                                  size_t *filled,
+                                  clux_value_t **out_fail);
+clux_value_t *exec_func_decl_init_captures(clux_context_t *ctx,
+                                           clux_value_t *func,
+                                           node_t *captures_node,
+                                           node_t *node);
 clux_value_t *exec_expr_union(clux_context_t *ctx, node_t *node);
 /* 匿名 union 值求值：不按名 define，供 union 装饰器包装路径使用。 */
 clux_value_t *exec_expr_union_value(clux_context_t *ctx, node_t *node);

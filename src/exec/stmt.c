@@ -1,11 +1,13 @@
 #include "exec/stmt.h"
 #include "core/allocator.h"
+#include "core/vec.h"
 #include "core/error.h"
 #include "core/location.h"
 #include "engine/context.h"
 #include "engine/error.h"
 #include "engine/array.h"
 #include "engine/context.h"
+#include "engine/func.h"
 #include "engine/interface.h"
 #include "engine/qualifier.h"
 #include "engine/scope.h"
@@ -19,9 +21,13 @@
 #include "parser/node.h"
 #include "parser/node_decorator.h"
 #include "parser/node_enum_decl.h"
+#include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
+#include "parser/node_func_param.h"
 #include "parser/node_interface_decl.h"
+#include "parser/node_stmt_assert.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_do_while.h"
 #include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
@@ -33,12 +39,15 @@
 #include "parser/node_stmt_interface.h"
 #include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_static_assert.h"
 #include "parser/node_stmt_struct.h"
+#include "parser/node_stmt_switch.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_struct_decl.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_stmt_while.h"
+#include "parser/node_switch_branch.h"
 #include "parser/node_union.h"
 #include <string.h>
 
@@ -494,6 +503,28 @@ clux_value_t *exec_stmt_block(clux_context_t *ctx, node_t *node) {
   } else if (result) {
     out = clux_context_clone(ctx, result, NULL);
   }
+  /* defer 出口协议：非 error 出口（return/break/continue/普通值/无值）
+     按登记逆序（LIFO）执行本块登记的 defer 延期体（0 参 invoke，帧协议
+     走 call.c 的 STMT_DEFER 分支）；任一 defer 产 error 替代块出口值并
+     中止后续。error 出口绕过 defer（与帧协议「error 出帧不走 defer」
+     一致）。defer 值本体与 defers 借用栈都归 block，执行必须排在
+     delete 之前；此时 scope 已 swap 到 outer，defer 产 error 在 outer
+     重建，天然越过块销毁存活。 */
+  vec_t *defers = clux_scope_get_defers(block);
+  if (defers && !(out && clux_value_is_error(out))) {
+    size_t defer_count = vec_get_size(defers);
+    for (size_t idx = defer_count; idx > 0; idx--) {
+      clux_value_t *deferred = vec_get(defers, idx - 1);
+      exec_call_install_executor(ctx);
+      clux_value_t *value =
+          clux_context_invoke(ctx, deferred, 0, NULL, node_get_location(node));
+      if (clux_value_is_error(value)) {
+        clux_error_t *err = *(clux_error_t **)clux_value_get_raw(value, 0);
+        out = clux_context_create_error(ctx, err);
+        break;
+      }
+    }
+  }
   delete_clux_scope(&block);
   return out;
 }
@@ -888,6 +919,292 @@ clux_value_t *exec_stmt_foreach(clux_context_t *ctx, node_t *node) {
   }
   allocator_free(allocator, (void **)&name);
   return out;
+}
+
+/* switch 语句 switch (value) { (p, ...) -> { body } ... default -> {...} }
+   （白皮书 §4.5）：VALUE 求值一次后逐分支逐模式比较——模式经
+   exec_operand 求值 + binary eq 读 bool，命中即执行该分支 body 并以
+   其值为语句值（同 if 协议），不 fallthrough；default 分支（PATTERNS
+   为 NULL）先记住，模式全扫完无命中才执行；无 default 无命中时语句
+   无值（NULL）。break 语义上属外层循环（白皮书 switch 不消费 break），
+   命中分支经 exec_node 执行，break signal 原样上抛给最近循环边界。 */
+static clux_value_t *stmt_switch_match_branch(clux_context_t *ctx,
+                                              clux_value_t *value,
+                                              node_t *branch,
+                                              bool *out_matched) {
+  node_t *patterns = switch_branch_node_get_patterns(branch);
+  if (!patterns) {
+    /* default 分支由调用方单独处理，此函数只面对模式分支。 */
+    *out_matched = false;
+    return NULL;
+  }
+  size_t pattern_count = switch_patterns_node_get_pattern_count(patterns);
+  for (size_t idx = 0; idx < pattern_count; idx++) {
+    node_t *pattern = switch_patterns_node_get_pattern(patterns, idx);
+    if (!pattern) {
+      *out_matched = false;
+      return clux_context_create_error_message(
+          ctx, node_get_location(branch), "switch pattern requires a value");
+    }
+    clux_value_t *candidate = exec_operand(ctx, pattern);
+    if (!candidate || clux_value_is_error(candidate)) {
+      *out_matched = false;
+      return clux_value_is_error(candidate)
+                 ? candidate
+                 : clux_context_create_error_message(
+                       ctx,
+                       node_get_location(pattern),
+                       "switch pattern requires a value");
+    }
+    clux_value_t *eq = clux_context_binary(
+        ctx, CLUX_OP_EQ, value, candidate, node_get_location(pattern));
+    if (!eq || clux_value_is_error(eq)) {
+      *out_matched = false;
+      return clux_value_is_error(eq)
+                 ? eq
+                 : clux_context_create_error_message(
+                       ctx,
+                       node_get_location(pattern),
+                       "switch pattern comparison requires a value");
+    }
+    if (clux_type_get_kind(clux_value_get_type(eq)) != CLUX_TYPE_BOOL) {
+      *out_matched = false;
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(pattern),
+          "switch pattern comparison requires a 'bool'");
+    }
+    if (*(bool *)clux_value_get_raw(eq, 0)) {
+      *out_matched = true;
+      return NULL;
+    }
+  }
+  *out_matched = false;
+  return NULL;
+}
+
+clux_value_t *exec_stmt_switch(clux_context_t *ctx, node_t *node) {
+  node_t *value_node = stmt_switch_node_get_value(node);
+  if (!value_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "switch statement requires a value");
+  }
+  node_t *body_node = stmt_switch_node_get_body(node);
+  if (!body_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "switch statement requires a body");
+  }
+  clux_value_t *value = exec_operand(ctx, value_node);
+  if (!value || clux_value_is_error(value)) {
+    return clux_value_is_error(value)
+               ? value
+               : clux_context_create_error_message(
+                     ctx,
+                     node_get_location(value_node),
+                     "switch statement requires a value");
+  }
+  if (node_get_kind(body_node) != CLUX_NODE_SWITCH_BRANCHES) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(body_node),
+        "switch statement requires a branch list");
+  }
+  size_t branch_count = switch_branches_node_get_branch_count(body_node);
+  /* 先扫模式分支（default 先记住），全无命中才落到 default。 */
+  node_t *default_branch = NULL;
+  for (size_t idx = 0; idx < branch_count; idx++) {
+    node_t *branch = switch_branches_node_get_branch(body_node, idx);
+    if (!branch) {
+      continue;
+    }
+    if (!switch_branch_node_get_patterns(branch)) {
+      default_branch = branch;
+      continue;
+    }
+    bool matched = false;
+    clux_value_t *fail = stmt_switch_match_branch(ctx, value, branch, &matched);
+    if (fail) {
+      return fail;
+    }
+    if (matched) {
+      node_t *branch_body = switch_branch_node_get_body(branch);
+      if (!branch_body) {
+        return clux_context_create_error_message(
+            ctx, node_get_location(branch), "switch branch requires a body");
+      }
+      return exec_node(ctx, branch_body);
+    }
+  }
+  if (default_branch) {
+    node_t *branch_body = switch_branch_node_get_body(default_branch);
+    if (!branch_body) {
+      return clux_context_create_error_message(
+          ctx,
+          node_get_location(default_branch),
+          "switch branch requires a body");
+    }
+    return exec_node(ctx, branch_body);
+  }
+  return NULL;
+}
+
+/* defer 语句 defer |captures|? { body }（白皮书 §4.12）：延期体落地为
+   无参 void 闭包函数值——捕获表复用 FUNC_CAPTURES 布局经
+   exec_func_decl_capture_entry 构造，类型名 "defer"（无参、void 返回）；
+   AST 挂 defer 节点本身（合成 FUNC_DECL 会因 setter 改 parent +
+   delete_node 递归删 children 而 double free，call.c 帧协议对
+   STMT_DEFER 分流 body）；捕获初值在 defer 语句执行点快照（白皮书
+   语义：登记时定格）。函数值匿名 define 进当前作用域（本体归
+   scope），再挂借用进 defers 栈——块出口非 error 路径按 LIFO invoke
+   （exec_stmt_block defer 出口协议）。defer 语句本身无值（NULL）。 */
+clux_value_t *exec_stmt_defer(clux_context_t *ctx, node_t *node) {
+  node_t *body_node = stmt_defer_node_get_body(node);
+  if (!body_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "defer statement requires a body");
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  const location_t *loc = node_get_location(node);
+  /* 捕获列表形态与函数定义共用：FUNC_CAPTURES 唯一子节点 FUNC_PARAMS，
+     内为 FUNC_PARAM（name[: type] [= default]）。 */
+  node_t *captures_node = stmt_defer_node_get_captures(node);
+  node_t *capture_params = NULL;
+  size_t capture_count = 0;
+  if (captures_node) {
+    capture_params = func_captures_node_get_capture(captures_node, 0);
+    if (capture_params &&
+        node_get_kind(capture_params) == CLUX_NODE_FUNC_PARAMS) {
+      capture_count = func_params_node_get_param_count(capture_params);
+    }
+  }
+  clux_func_capture_t captures[capture_count];
+  size_t filled = 0;
+  clux_value_t *fail = NULL;
+  for (size_t idx = 0; idx < capture_count && !fail; idx++) {
+    node_t *entry = func_params_node_get_param(capture_params, idx);
+    if (!entry || node_get_kind(entry) != CLUX_NODE_FUNC_PARAM) {
+      fail = clux_context_create_error_message(
+          ctx, loc, "generic capture is not supported yet");
+      break;
+    }
+    if (!exec_func_decl_capture_entry(ctx,
+                                      func_param_node_get_name(entry),
+                                      func_param_node_get_type(entry),
+                                      func_param_node_get_default(entry),
+                                      idx,
+                                      captures,
+                                      &filled,
+                                      &fail)) {
+      break;
+    }
+  }
+  clux_type_t *type = NULL;
+  if (!fail) {
+    type = clux_context_create_func_type(
+        ctx,
+        "defer",
+        captures,
+        filled,
+        NULL,
+        0,
+        clux_context_builtin_type(ctx, CLUX_TYPE_VOID));
+  }
+  for (size_t idx = 0; idx < filled; idx++) {
+    allocator_free(allocator, (void **)&captures[idx].name);
+  }
+  if (fail) {
+    return fail;
+  }
+  if (!type) {
+    return clux_context_create_error_message(
+        ctx, loc, "defer type creation failed");
+  }
+  clux_value_t *value = clux_context_create_func(ctx, type, NULL, loc);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  value = clux_context_func_set_ast(ctx, value, node, loc);
+  if (clux_value_is_error(value)) {
+    return value;
+  }
+  /* 登记点捕获快照（与函数定义点快照同一套写穿函数值存储的通道）。 */
+  clux_value_t *capture_fail =
+      exec_func_decl_init_captures(ctx, value, captures_node, node);
+  if (capture_fail) {
+    return capture_fail;
+  }
+  /* 值本体已由 create_func 经 create_value 的统一所有权通道匿名 track
+     进当前 scope（owned 向量），这里只需挂借用进 defers 栈。 */
+  clux_scope_t *scope = clux_context_get_scope(ctx);
+  clux_scope_add_defer(scope, value);
+  return NULL;
+}
+
+/* assert 语句 assert(expr);（白皮书 §11.3）：条件必须 bool——true 语句
+   无值（NULL）；false 产出 error，消息直接引用条件表达式源码片段
+   （SOURCE 槽 SOURCE_TEXT 节点的 location 指向原文）。 */
+clux_value_t *exec_stmt_assert(clux_context_t *ctx, node_t *node) {
+  node_t *cond_node = stmt_assert_node_get_condition(node);
+  if (!cond_node) {
+    return clux_context_create_error_message(
+        ctx, node_get_location(node), "assert statement requires a condition");
+  }
+  bool cond_bool = false;
+  clux_value_t *fail = stmt_loop_cond_of(ctx, cond_node, "assert", &cond_bool);
+  if (fail) {
+    return fail;
+  }
+  if (cond_bool) {
+    return NULL;
+  }
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  node_t *source = stmt_assert_node_get_source(node);
+  char *text =
+      source ? location_get(node_get_location(source), allocator) : NULL;
+  clux_value_t *err =
+      clux_context_create_error_message(ctx,
+                                        node_get_location(node),
+                                        "assertion failed: %s",
+                                        text ? text : "<unknown>");
+  allocator_free(allocator, (void **)&text);
+  return err;
+}
+
+/* static_assert 语句 static_assert(cond, "msg");（白皮书 §4.16）：exec
+   本质是 CTFE——条件在执行点求值，必须 bool；true 语句无值（NULL）；
+   false 产出 error，消息引用 MESSAGE 槽字符串字面量的求值文本
+   （非字符串/求值失败回退 <unknown>）。 */
+clux_value_t *exec_stmt_static_assert(clux_context_t *ctx, node_t *node) {
+  node_t *cond_node = stmt_static_assert_node_get_condition(node);
+  if (!cond_node) {
+    return clux_context_create_error_message(
+        ctx,
+        node_get_location(node),
+        "static assert statement requires a condition");
+  }
+  bool cond_bool = false;
+  clux_value_t *fail =
+      stmt_loop_cond_of(ctx, cond_node, "static assert", &cond_bool);
+  if (fail) {
+    return fail;
+  }
+  if (cond_bool) {
+    return NULL;
+  }
+  const char *msg = "<unknown>";
+  node_t *message_node = stmt_static_assert_node_get_message(node);
+  if (message_node) {
+    clux_value_t *message = exec_operand(ctx, message_node);
+    if (message && !clux_value_is_error(message) &&
+        clux_type_get_kind(clux_value_get_type(message)) == CLUX_TYPE_STR) {
+      char *text = *(char **)clux_value_get_raw(message, 0);
+      if (text) {
+        msg = text;
+      }
+    }
+  }
+  return clux_context_create_error_message(
+      ctx, node_get_location(node), "static assertion failed: %s", msg);
 }
 
 /* 函数语句 <decorator>* [export]? [comptime]? <func_decl>（白皮书 §3.3、
