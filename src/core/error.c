@@ -21,12 +21,20 @@ clux_error_t *create_error(allocator_t *allocator,
                            ...) {
   va_list args;
   va_start(args, fmt);
-  size_t len = vsnprintf(NULL, 0, fmt, args);
+  clux_error_t *err = create_errorv(allocator, loc, fmt, args);
   va_end(args);
+  return err;
+}
+clux_error_t *create_errorv(allocator_t *allocator,
+                            const location_t *loc,
+                            const char *fmt,
+                            va_list args) {
+  va_list copy;
+  va_copy(copy, args);
+  size_t len = vsnprintf(NULL, 0, fmt, copy);
+  va_end(copy);
   char *msg = allocator_alloc(allocator, len + 1);
-  va_start(args, fmt);
   (void)vsnprintf(msg, len + 1, fmt, args);
-  va_end(args);
   clux_error_t *err = allocator_alloc(allocator, sizeof(struct _clux_error_t));
   err->msg = msg;
   if (loc) {
@@ -148,8 +156,14 @@ static size_t line_number_of(const char *source, const char *line_start) {
 }
 
 string_t *error_to_string(clux_error_t *self, allocator_t *allocator) {
+  return error_to_string_level(self, allocator, "error");
+}
+string_t *error_to_string_level(clux_error_t *self,
+                                allocator_t *allocator,
+                                const char *level) {
   string_t *out = create_string(allocator);
-  string_append_cstr(out, "error: ");
+  string_append_cstr(out, level ? level : "error");
+  string_append_cstr(out, ": ");
   string_append_cstr(out, self->msg);
   string_append_char(out, '\n');
 

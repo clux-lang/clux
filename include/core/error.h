@@ -3,6 +3,7 @@
 #include "core/allocator.h"
 #include "core/location.h"
 #include "core/string.h"
+#include <stdarg.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -12,6 +13,11 @@ clux_error_t *create_error(allocator_t *allocator,
                            const location_t *loc,
                            const char *fmt,
                            ...);
+/* va_list 版本（diag 收集通道经它转发 printf 语义）。 */
+clux_error_t *create_errorv(allocator_t *allocator,
+                            const location_t *loc,
+                            const char *fmt,
+                            va_list args);
 const location_t *error_get_location(clux_error_t *self);
 const char *error_get_message(clux_error_t *self);
 /* 借用调用方源码，用于 error_to_string 打印源码行；不复制、不释放。 */
@@ -25,6 +31,11 @@ const char *error_get_source(clux_error_t *self);
        |     ^^^
    源码不可用时只输出前两行。返回的 string_t 由调用方释放。 */
 string_t *error_to_string(clux_error_t *self, allocator_t *allocator);
+/* 同上，但首行级别前缀由调用方指定（"error"/"warning"/"note"，
+   诊断收集通道多级别渲染用）。 */
+string_t *error_to_string_level(clux_error_t *self,
+                                allocator_t *allocator,
+                                const char *level);
 void delete_error(clux_error_t **error);
 #ifdef __cplusplus
 }

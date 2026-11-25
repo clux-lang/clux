@@ -6,6 +6,7 @@
 #include "core/safe_alloc.h"
 #include "engine/bitfield.h"
 #include "engine/cunion.h"
+#include "engine/diag.h"
 #include "engine/enum.h"
 #include "engine/func.h"
 #include "engine/interface.h"
@@ -554,6 +555,23 @@ clux_value_t *clux_context_create_error_message(clux_context_t *self,
                                                 const location_t *loc,
                                                 const char *fmt,
                                                 ...);
+/* ---- 语义诊断收集通道（sema 前置基础设施） ----
+   sema 阶段不一个错误立即返回：错误逐层抛出到 stmt 级节点，经
+   clux_context_diag 入列后从下一个 stmt 继续解析——一次编译产出全部
+   诊断。diag 本体归 context 的 diags 向量持有，与 error 值通道
+   （errors 向量）互不相交。 */
+void clux_context_diag(clux_context_t *self,
+                       clux_diag_level_t level,
+                       const location_t *loc,
+                       const char *fmt,
+                       ...);
+size_t clux_context_diag_count(const clux_context_t *self);
+bool clux_context_diag_has_error(const clux_context_t *self);
+/* 按下标借用诊断项（记录序）；越界返回 NULL。 */
+const clux_diag_t *clux_context_get_diag(const clux_context_t *self,
+                                         size_t idx);
+/* 清空诊断表（逐项销毁含 error 本体）；编译单元重跑/测试复位用。 */
+void clux_context_clear_diags(clux_context_t *self);
 clux_value_t *clux_context_safe_cast(clux_context_t *self,
                                      clux_value_t *value,
                                      clux_type_t *target,

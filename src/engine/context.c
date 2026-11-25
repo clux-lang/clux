@@ -23,6 +23,7 @@
 #include "engine/bitfield.h"
 #include "engine/cunion.h"
 #include "engine/error.h"
+#include "engine/diag.h"
 #include "engine/floating.h"
 #include "engine/func.h"
 #include "engine/optional.h"
@@ -42,6 +43,8 @@ struct _clux_context_t {
   allocator_t *allocator;
   safe_allocator_t *safe_allocator;
   vec_t *errors;
+  vec_t *diags; /* clux_diag_t*：语义诊断收集表（sema 逐 stmt 收集用），
+                   与 errors（error 值的本体通道）互不相交 */
   rbtree_t *strs;
   rbtree_t
       *modules; /* hash(name) -> vec_t*（桶：clux_module_t*，桶内精确匹配） */
@@ -113,6 +116,7 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->allocator = allocator;
   ctx->safe_allocator = create_safe_allocator(allocator);
   ctx->errors = create_vec(allocator);
+  ctx->diags = create_vec(allocator);
   ctx->strs = create_rbtree(allocator);
   ctx->modules = create_rbtree(allocator);
   ctx->current_module = NULL;
@@ -387,6 +391,11 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_break_signal);
   delete_clux_type(&ctx->builtin_types.type_continue_signal);
   delete_vec(&ctx->errors);
+  for (size_t idx = 0; idx < vec_get_size(ctx->diags); idx++) {
+    clux_diag_t *diag = vec_get(ctx->diags, idx);
+    delete_clux_diag(&diag);
+  }
+  delete_vec(&ctx->diags);
   rbtree_foreach(ctx->strs, (rbtree_callback_t)strs_dispose, ctx->allocator);
   delete_rbtree(&ctx->strs);
   delete_safe_allocator(&ctx->safe_allocator);
@@ -2672,6 +2681,57 @@ clux_value_t *clux_context_create_error_message(clux_context_t *self,
   clux_error_t *err = create_error(self->allocator, loc, "%s", msg);
   allocator_free(self->allocator, (void **)&msg);
   return clux_context_create_error(self, err);
+}
+/* 记录一条语义诊断（printf 语义）：sema 错误收集通道——错误逐层抛出
+   到 stmt 级节点后经此入列，然后从下一个 stmt 继续解析，一次编译
+   产出全部诊断。diag 本体归 diags 向量持有，与 error 值通道
+   （errors 向量）互不相交。 */
+void clux_context_diag(clux_context_t *self,
+                       clux_diag_level_t level,
+                       const location_t *loc,
+                       const char *fmt,
+                       ...) {
+  if (!self) {
+    return;
+  }
+  va_list args;
+  va_start(args, fmt);
+  clux_diag_t *diag = create_clux_diagv(self->allocator, level, loc, fmt, args);
+  va_end(args);
+  (void)vec_push(self->diags, diag);
+}
+size_t clux_context_diag_count(const clux_context_t *self) {
+  return self ? vec_get_size(self->diags) : 0;
+}
+bool clux_context_diag_has_error(const clux_context_t *self) {
+  if (!self) {
+    return false;
+  }
+  for (size_t idx = 0; idx < vec_get_size(self->diags); idx++) {
+    const clux_diag_t *diag = vec_get(self->diags, idx);
+    if (clux_diag_get_level(diag) == CLUX_DIAG_ERROR) {
+      return true;
+    }
+  }
+  return false;
+}
+/* 按下标借用诊断项（记录序）；越界返回 NULL。 */
+const clux_diag_t *clux_context_get_diag(const clux_context_t *self,
+                                         size_t idx) {
+  if (!self || idx >= vec_get_size(self->diags)) {
+    return NULL;
+  }
+  return vec_get(self->diags, idx);
+}
+/* 清空诊断表（逐项销毁含 error 本体）；编译单元重跑/测试复位用。 */
+void clux_context_clear_diags(clux_context_t *self) {
+  if (!self) {
+    return;
+  }
+  while (vec_get_size(self->diags) > 0) {
+    clux_diag_t *diag = vec_erase(self->diags, 0);
+    delete_clux_diag(&diag);
+  }
 }
 static const char *binary_op_name(clux_binary_op_t op) {
   switch (op) {

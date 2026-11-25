@@ -8600,3 +8600,123 @@ TEST(EngineTest, TemplateObjectEncodesAstModuleAndName) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* ---- 语义诊断收集通道（diag 托管表，sema 前置基础设施） ---- */
+
+/* 场景: sema 错误收集协议的核心契约——错误逐层抛出到 stmt 级节点经
+        clux_context_diag 入列，从下一个 stmt 继续解析，一次编译产出
+        全部诊断
+   预期: 三级别按记录序入列（count/按下标借用/level 回读）；printf
+         语义格式化；error 值通道（create_error_message）不产生 diag，
+         两通道互不相交；clear 后表空且 has_error 复位 */
+TEST(ContextDiagTest, CollectsLevelsInOrderAndClears) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  location_t loc;
+  memset(&loc, 0, sizeof(loc));
+  loc.filename = "test.clux";
+
+  clux_context_diag(ctx, CLUX_DIAG_ERROR, &loc, "unknown name '%s'", "x");
+  clux_context_diag(ctx, CLUX_DIAG_WARNING, NULL, "unused variable %d", 7);
+  clux_context_diag(ctx, CLUX_DIAG_NOTE, NULL, "plain note");
+
+  EXPECT_EQ(clux_context_diag_count(ctx), 3u);
+  EXPECT_TRUE(clux_context_diag_has_error(ctx));
+  const clux_diag_t *first = clux_context_get_diag(ctx, 0);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(clux_diag_get_level(first), CLUX_DIAG_ERROR);
+  EXPECT_STREQ(error_get_message((clux_error_t *)clux_diag_get_error(first)),
+               "unknown name 'x'");
+  const location_t *first_loc =
+      error_get_location((clux_error_t *)clux_diag_get_error(first));
+  ASSERT_NE(first_loc, nullptr);
+  EXPECT_STREQ(first_loc->filename, "test.clux");
+  const clux_diag_t *second = clux_context_get_diag(ctx, 1);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(clux_diag_get_level(second), CLUX_DIAG_WARNING);
+  EXPECT_STREQ(error_get_message((clux_error_t *)clux_diag_get_error(second)),
+               "unused variable 7");
+  const clux_diag_t *third = clux_context_get_diag(ctx, 2);
+  ASSERT_NE(third, nullptr);
+  EXPECT_EQ(clux_diag_get_level(third), CLUX_DIAG_NOTE);
+  EXPECT_EQ(clux_context_get_diag(ctx, 3), nullptr)
+      << "out-of-range index must borrow NULL";
+
+  /* error 值通道与本通道互不相交：error 值入列不产生 diag。 */
+  clux_value_t *err_value =
+      clux_context_create_error_message(ctx, &loc, "value channel");
+  EXPECT_NE(clux_value_is_error(err_value), false);
+  EXPECT_EQ(clux_context_diag_count(ctx), 3u)
+      << "the error-value channel must not feed the diag table";
+
+  clux_context_clear_diags(ctx);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  EXPECT_FALSE(clux_context_diag_has_error(ctx));
+  EXPECT_EQ(clux_context_get_diag(ctx, 0), nullptr);
+
+  /* clear 后表可继续使用（编译单元重跑场景）。 */
+  clux_context_diag(ctx, CLUX_DIAG_NOTE, NULL, "restarted");
+  EXPECT_EQ(clux_context_diag_count(ctx), 1u);
+  EXPECT_FALSE(clux_context_diag_has_error(ctx));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: has_error 仅对 ERROR 级成立——WARNING/NOTE 不终止编译；
+        to_string 渲染按级别出前缀（Rust 风格块复用 error 渲染主体）
+   预期: 纯 WARNING/NOTE 表 has_error 为 false；warning 渲染首行为
+         "warning: ..."，error 渲染首行为 "error: ..." */
+TEST(ContextDiagTest, HasErrorOnlyForErrorLevelAndLevelPrefixedRendering) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  location_t loc;
+  memset(&loc, 0, sizeof(loc));
+  loc.filename = "test.clux";
+
+  clux_context_diag(ctx, CLUX_DIAG_WARNING, &loc, "shadowed name");
+  clux_context_diag(ctx, CLUX_DIAG_NOTE, NULL, "consider renaming");
+  EXPECT_FALSE(clux_context_diag_has_error(ctx))
+      << "warnings and notes must not flip has_error";
+
+  clux_context_diag(ctx, CLUX_DIAG_ERROR, &loc, "type mismatch");
+  EXPECT_TRUE(clux_context_diag_has_error(ctx));
+
+  string_t *warn_text =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+  ASSERT_NE(warn_text, nullptr);
+  EXPECT_NE(strstr(string_get_data(warn_text), "warning: shadowed name\n"),
+            nullptr)
+      << "actual: " << string_get_data(warn_text);
+  delete_string(&warn_text);
+
+  string_t *err_text =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 2), a);
+  ASSERT_NE(err_text, nullptr);
+  EXPECT_NE(strstr(string_get_data(err_text), "error: type mismatch\n"),
+            nullptr)
+      << "actual: " << string_get_data(err_text);
+  delete_string(&err_text);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 场景: NULL 契约——NULL context 的查询入口零崩溃（0/false/NULL），
+        diag 记录入口 NULL 安全
+   预期: 对 NULL context 调用全部安全返回，不产生任何访问 */
+TEST(ContextDiagTest, NullContextQueriesAreSafe) {
+  EXPECT_EQ(clux_context_diag_count(NULL), 0u);
+  EXPECT_FALSE(clux_context_diag_has_error(NULL));
+  EXPECT_EQ(clux_context_get_diag(NULL, 0), nullptr);
+  clux_context_diag(NULL, CLUX_DIAG_ERROR, NULL, "never recorded");
+  clux_context_clear_diags(NULL);
+
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_context_diag(ctx, CLUX_DIAG_ERROR, NULL, "on real context");
+  EXPECT_EQ(clux_context_diag_count(ctx), 1u)
+      << "the NULL no-op above must not touch a real context";
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
