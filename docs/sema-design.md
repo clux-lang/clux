@@ -36,7 +36,8 @@ clux 编译器，不需要任何 sema 提示。
 sema 按序对模块做以下变换。每项变换的产物都在语言子集内。
 下文的"替换 / 改写 / 摘除"均为**产物 AST 中的形态描述**——按 §4 的
 三段式流程，sema 的产出是逆向编排重建的**全新 AST**，从不修改
-原 AST 节点。
+原 AST 节点。原 AST 只在 sema 过程中只读保留，最终随 engine 一同
+销毁（见 §4 所有权与生命周期）。
 
 ### 2.1 编译期计算 → 常量回填表达式
 
@@ -45,7 +46,8 @@ comptime var 求值、comptime func 调用、`#` 编译期内建求值的结果�
 
 - comptime var 定义语句从语句流摘除；所有引用点替换为折叠值的字面量
   或构造子树。
-- 求值内核直接复用 exec 层已验证的 CTFE 能力（engine 求值），
+- 求值走 sema 内嵌的 CTFE 内核（即 exec，见 §4 的关系定稿）：
+  在 current 上下文继承 sema 现状做真实计算。
   engine 值 → AST 的转换器是本项的新增边界件。
 
 ### 2.2 局部类型/函数提升到全局
@@ -68,8 +70,9 @@ var a: Test[i32, i32] = .{};   →   var a: Test$i32$i32 = .{};
   （不同模块各自实例化同名实例互不冲突，分属各自 program）。
 - 使用导入模块导出的实例时直接引用其名字，不重复实例化
   （沿用 GET_MEMBER 通道语义）。
-- 代换逻辑与 exec 层 `exec_generic_instantiate` 同构，只是产物
-  从 engine 对象换成 AST。
+- 实例化与 CTFE 是**同一机制而非同构**（见 §4）：实例体的类型检查
+  就是在代换后的 AST 上带实参 shadow 值再做一次 walk，只是最终
+  产物从 engine 对象换成 AST。
 
 ### 2.4 defer 脱糖
 
@@ -207,37 +210,61 @@ Name$arg1$arg2...
 
 ```
 parser 产出原始 AST（sema 只读，从不修改）
-        │ ① walk：求值消费方向
-        ▼
-sema 资源表（engine 管理：type / function / value）
-  + 作用域树 + 符号表（sema 私有，用完即毁）
+        │ ① walk：求值消费方向（全程 shadow 值）
+          ┌──────────── engine/scope/value 体系 ────────────┐
+          │  资源表（type / function / value：engine 管理）  │
+          │  作用域树 + 符号表：直接消费 engine/scope，不自建 │
+          │  exec = sema 内嵌的 CTFE 求值内核（继承 current  │
+          │  上下文临时做真实计算）                           │
+          └──────────────────────────────────────────────────┘
         │ ② 逆向编排：渲染方向（唯一新建节点的通道）
         ▼
-语义归一形新 AST（唯一交接物；未变换子树整段迁移）
+语义归一形 program_t 集合（唯一交接物；未变换子树整段克隆）
         ▼
-compiler（读 AST 出代码，零 sema/engine 依赖）
+compiler（读 program_t 出代码，零 sema/engine 依赖）
 ```
+
+**engine/scope 与 sema/exec 的关系**（2026-11-25 定稿）：engine/scope
+体系的本源消费者是 sema，不是 sema 复用 exec。sema 全程使用 shadow
+变量在 engine/scope 上建树、查名、做类型检查；exec 不是独立的运行时层，
+而是 sema 内嵌的 CTFE 求值内核——局部的编译期计算（常量折叠、comptime
+条件求值）在 current 上下文**继承 sema 现状**临时做真实计算：
+
+- CTFE 输入即 sema 现状：const 符号带真实值，var/参数是 shadow 值；
+- CTFE 途中碰到 shadow 值（常量表达式引用了运行期量）即为 diag；
+- 帧协议 global→module→closure→argument→body 正是"继承现状"的
+  机制化：walk 建好的作用域树就是帧链的前几层，CTFE 进函数体时
+  临时帧直接挂接。
 
 三段各自的角色：
 
 - **① walk（AST → 资源表）**：只读遍历原 AST，不断"创建-消费"——
   解析名字、求值类型、实例化泛型、CTFE 折叠 comptime，产物登记为
   engine 管理的 function / type / value，连同提升名 / 实例名 /
-  合成名一起进资源表。求值内核直接借用 engine（exec 层 CTFE 复用）。
+  合成名一起进资源表。错误逐层抛出到 stmt 级，经 context 的 diag
+  收集器入列，从下一个 stmt 继续（不 fast-fail）。
   原始 AST 上的任何节点在这一段都不可变。
 - **② 逆向编排（资源表 → 新 AST）**：从资源表出发重建全新 AST。
   **新建节点只有两条通道**——渲染器（engine 值/类型 → AST：常量
   回填、类型显式化、实例体、合成 struct、提升函数）与克隆器
   （原子树 deep clone：未变换的基础语句、未涉及推断的表达式）。
+  emit 对 sema 状态**只读**：纯渲染、无副作用、不回写资源表。
   原树完整保留只读，不做任何剪接迁移或原地改写。
-- **作用域树与符号表是 walk 的工作内存**：查遮蔽、登记提升与
-  实例化。sema 结束即销毁，不持久化。
+- **作用域树与符号表是 walk 的工作内存**：直接消费 engine/scope
+  体系查遮蔽、登记提升与实例化（不自建平行符号表）。sema 结束
+  即销毁，不持久化。
+
+**所有权与生命周期**：原 AST 归 parser（挂在 engine 的 allocator
+上），资源表与作用域树归 engine，两者随 engine 销毁一同消亡；
+逆向编排的产物分配在独立的 out_allocator 上——它是新 AST 的唯一
+分配来源，保证产物不夹带任何 engine 指针（I2/I3 由 allocator 分离
+直接物化，而非代码约定）。sema 是两者之间唯一的单向渡口。
+原树只读换来一条硬验证：sema 前后原 AST 的 to_json 完全一致。
 
 设计动机：in-place 修改原 AST 会在槽位管理、双父挂接、被摘除节点
 残留上反复出坑（AST 节点 children 手工维护，无自动防线）；重建路线
 让"读原树 → 产新树"单向流动，所有权链干净：原 AST 归 parser，
-资源表归 sema（随 sema 销毁），新 AST 是唯一交接物。原树只读换来
-一条硬验证：sema 前后原 AST 的 to_json 完全一致。
+资源表归 engine（随 engine 销毁），program_t 集合是唯一交接物。
 
 ## 5. 验证标准
 
@@ -265,3 +292,60 @@ compiler（读 AST 出代码，零 sema/engine 依赖）
 | 4 | defer 脱糖 + comptime if 剪枝 + 两类 foreach（§2.4–2.7） | 子集断言 |
 | 5 | 泛型实例化完整版（§2.3）+ 匿名构造具名化（§2.9）+ struct 成员/method_call 退化（§2.10） | 与 exec 实例化行为对齐 |
 | 6 | 纯度回归 + include 扫描 + 序列化往返（§5） | CI 常驻 |
+
+## 7. API 定稿（2026-11-25）
+
+### 7.1 接口
+
+```c
+clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator);
+int sema_walk(clux_sema_t *sema, node_t *program);
+bool sema_has_error(const clux_sema_t *sema);
+vec_t *sema_emit(clux_sema_t *sema);   /* 元素 program_t*，归调用方所有 */
+void sema_destroy(clux_sema_t **sema);
+```
+
+- `sema_walk`：阶段一。AST → engine/module 体系 + 资源表；shadow
+  值建树、逐 stmt 收 diag、按需内嵌 CTFE。可独立调用、独立验证。
+- `sema_has_error`：委托 context 的 diag 收集器（ERROR 级判定）。
+- `sema_emit`：阶段二。资源表 → program_t 集合。对 sema 状态只读、
+  无副作用，因而幂等。返回按 import 拓扑序排列的向量（被依赖者在
+  前，入口 module 在末尾）。
+
+**错误即终止协议**：walk 结束发现有 ERROR 级 diag → 不进 emit，
+直接渲染打印 diag、流程结束。错误程序唯一出口是诊断，不产半成品。
+
+### 7.2 program_t（交接物）
+
+```c
+/* include/core/program.h —— 中性交接物，零 engine 依赖 */
+typedef struct _program_t program_t;  /* opaque + getter */
+
+program_t *create_program(allocator_t *allocator);
+void delete_program(program_t **program);
+```
+
+- **粒度 per-module**：一个 module 一个 program_t；sema_emit 返回
+  它们的有序集合。模块间依赖信息即拓扑序本身，导入名单表暂不预置，
+  compiler 需要显式表时再加字段。
+- **最小字段集**（实现中发现缺失的所有权依赖/元信息再补，不预置）：
+  - `decls`：本 module 的 PROGRAM 顶层声明集（node_t*）
+  - `module_name` / `source_path`
+  - `strings`：常量字符串表（第一版做 intern 去重；后端数据段
+    布局用途后续定）
+- **放置位置**：core/。依赖 parser（node_t）与 core（string/vec/
+  allocator），不依赖任何 engine 头——compiler 消费 program_t 与
+  消费 clux_error_t 同一性质：纯数据、无引擎耦合，I2 的 include
+  白名单不需开口子。
+
+### 7.3 生命周期链
+
+```
+sema_create(ctx, out_allocator)
+    → sema_walk(program)          /* 旧 AST 只读遍历 */
+    → has_error ? 渲染打印 diag 并结束
+                : sema_emit()     /* 产出 program_t 集合（out_allocator）*/
+    → sema_destroy(&sema)
+    → delete_clux_context(&ctx)   /* 旧 AST / 资源表 / 作用域树消亡 */
+    → compiler 消费 program_t 集合（out_allocator 独立存活）
+```
