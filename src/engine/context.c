@@ -2576,6 +2576,18 @@ void clux_context_set_current_module(clux_context_t *self,
   self->current_scope =
       module ? clux_module_get_scope(module) : self->global_scope;
 }
+/* 临时切换 current_module（调用帧协议用）：只换模块指针、不动作用域
+   链——帧构造已把作用域挂到目标模块 scope 之下，这里补上模块上下文，
+   出口经返回值恢复调用方模块。 */
+clux_module_t *clux_context_swap_current_module(clux_context_t *self,
+                                                clux_module_t *module) {
+  if (!self) {
+    return NULL;
+  }
+  clux_module_t *previous = self->current_module;
+  self->current_module = module;
+  return previous;
+}
 clux_value_t *clux_context_declare_value(clux_context_t *self,
                                          clux_value_t *value,
                                          const char *name,

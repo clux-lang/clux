@@ -65,6 +65,8 @@
 #include "engine/interface_type.h"
 #include "engine/struct.h"
 #include "engine/scope.h"
+#include "engine/function.h"
+#include "engine/module.h"
 #include "exec/call.h"
 #include "parser/node_construct.h"
 #include "parser/node_construct_field.h"
@@ -21613,4 +21615,143 @@ TEST_F(ExecLiteralTest, ExecStmtStaticAssertNonStringMessageFallsBack) {
   EXPECT_STREQ(error_message_of(value), "static assertion failed: <unknown>")
       << "actual: " << error_message_of(value);
   delete_node(&node);
+}
+
+/* ---- exec_call_executor：调用帧 module 接入（作用域链严格为
+       global → module → closure → argument → body + current_module
+       帧内切换/出口恢复） ---- */
+
+/* 场景: 模块内函数（func_set_ast 发生在 current_module=m 之下，
+        function 对象携带 m）体内自由名字沿 parent 链解析到模块级名字；
+        调用方 global 层存在同名名字也不受影响——帧不挂调用方，杜绝
+        动态作用域漏洞
+   预期: function 对象编码定义模块 m；调用结果为模块级名字的 41（而非
+         调用方 global 层同名名字的 100）；调用出口 current_scope 恢复
+         global、current_module 恢复 NULL */
+TEST_F(ExecLiteralTest, CallFrameResolvesModuleScopeNamesOverCaller) {
+  clux_module_t *m = clux_context_create_module(ctx, "call_frame_m", NULL);
+  ASSERT_NE(m, nullptr);
+  clux_context_set_current_module(ctx, m);
+  clux_value_t *m_var = clux_context_create_i32(ctx, 41, NULL, NULL);
+  ASSERT_NE(m_var, nullptr);
+  ASSERT_FALSE(clux_value_is_error(
+      clux_context_declare_value(ctx, m_var, "shared_name", NULL)));
+
+  /* func get(): i32 { return shared_name; }——形参空表，body 只含
+     return identifier：体内 shared_name 必须经帧链的 module 层命中。 */
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "shared_name"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "get"),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_type_t *ret_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *func_type =
+      clux_context_create_func_type(ctx, "get", NULL, 0, NULL, 0, ret_type);
+  ASSERT_NE(func_type, nullptr);
+  clux_value_t *func = clux_context_create_func(ctx, func_type, NULL, NULL);
+  ASSERT_NE(func, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, func, decl, "get", NULL), func);
+  clux_function_t *function = clux_func_get_function(func);
+  ASSERT_NE(function, nullptr);
+  EXPECT_EQ(clux_function_get_module(function), m)
+      << "function defined under current_module=m must encode m";
+
+  /* 回到 global 模拟调用方：global 层同名名字声明为 100——帧内解析
+     必须命中模块级 41，同名调用方名字不可见（防动态作用域回归）。 */
+  clux_context_set_current_module(ctx, NULL);
+  clux_value_t *caller_var = clux_context_create_i32(ctx, 100, NULL, NULL);
+  ASSERT_NE(caller_var, nullptr);
+  ASSERT_FALSE(clux_value_is_error(
+      clux_context_declare_value(ctx, caller_var, "shared_name", NULL)));
+  clux_scope_t *caller_scope = clux_context_get_scope(ctx);
+  ASSERT_EQ(caller_scope, clux_context_get_global_scope(ctx));
+
+  exec_call_install_executor(ctx);
+  clux_value_t *result =
+      clux_context_invoke(ctx, func, 0, NULL, node_get_location(decl));
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 41)
+      << "module-level name must win over the caller's same-name binding";
+  EXPECT_EQ(clux_context_get_scope(ctx), caller_scope)
+      << "frame exit must restore the caller scope";
+  EXPECT_EQ(clux_context_get_current_module(ctx), nullptr)
+      << "frame exit must restore the caller module";
+  delete_node(&decl);
+}
+
+/* 场景: global 函数（定义时 current_module=NULL，function 不带模块）
+        在 current_module=m 的调用点被 invoke——帧链 global 函数无
+        module 层，体内自由名字沿 closure → global 解析，不挂调用方
+        所在模块 m；调用点作用域/模块上下文在出口完整恢复
+   预期: 体内 global_name 解析到 global 层 5（m 模块层无该名字）；调用
+         出口 current_scope 恢复为 m 的模块作用域、current_module
+         恢复为 m */
+TEST_F(ExecLiteralTest, CallFrameGlobalFunctionIgnoresCallerModule) {
+  /* global 层声明 global_name=5（定义先于进入模块上下文）。 */
+  clux_value_t *g_var = clux_context_create_i32(ctx, 5, NULL, NULL);
+  ASSERT_NE(g_var, nullptr);
+  ASSERT_FALSE(clux_value_is_error(
+      clux_context_declare_value(ctx, g_var, "global_name", NULL)));
+
+  /* func get_g(): i32 { return global_name; }——current_module 为 NULL
+     时 set_ast，function 不携带模块（帧挂 global）。 */
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      ret, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "global_name"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      create_func_params_node(a),
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "get_g"),
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+      body);
+  clux_type_t *ret_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *func_type =
+      clux_context_create_func_type(ctx, "get_g", NULL, 0, NULL, 0, ret_type);
+  ASSERT_NE(func_type, nullptr);
+  clux_value_t *func = clux_context_create_func(ctx, func_type, NULL, NULL);
+  ASSERT_NE(func, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, func, decl, "get_g", NULL), func);
+  clux_function_t *function = clux_func_get_function(func);
+  ASSERT_NE(function, nullptr);
+  EXPECT_EQ(clux_function_get_module(function), nullptr)
+      << "function defined outside any module must not encode one";
+
+  /* 进入模块 m 作调用方：模块层再声明一个同名 global_name=77——若帧
+     挂到调用方模块（动态作用域漏洞），体内会错误命中 77。 */
+  clux_module_t *m = clux_context_create_module(ctx, "call_frame_g", NULL);
+  ASSERT_NE(m, nullptr);
+  clux_context_set_current_module(ctx, m);
+  clux_value_t *m_var = clux_context_create_i32(ctx, 77, NULL, NULL);
+  ASSERT_NE(m_var, nullptr);
+  ASSERT_FALSE(clux_value_is_error(
+      clux_context_declare_value(ctx, m_var, "global_name", NULL)));
+  clux_scope_t *caller_scope = clux_context_get_scope(ctx);
+  ASSERT_EQ(caller_scope, clux_module_get_scope(m));
+
+  exec_call_install_executor(ctx);
+  clux_value_t *result =
+      clux_context_invoke(ctx, func, 0, NULL, node_get_location(decl));
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 5)
+      << "a global function must resolve names via global, never via the "
+         "caller's module";
+  EXPECT_EQ(clux_context_get_scope(ctx), caller_scope)
+      << "frame exit must restore the caller scope (module scope)";
+  EXPECT_EQ(clux_context_get_current_module(ctx), m)
+      << "frame exit must restore the caller module";
+  delete_node(&decl);
 }

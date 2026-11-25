@@ -59,6 +59,11 @@ clux_module_t *clux_context_get_current_module(clux_context_t *self);
    调用方须保证进入/离开按序平衡（借用约定）。 */
 void clux_context_set_current_module(clux_context_t *self,
                                      clux_module_t *module);
+/* 临时切换 current_module（调用帧协议用）：只换模块指针、不动作用域
+   链，返回调用方模块供出口恢复。帧构造已把作用域挂到目标模块 scope
+   之下，这里补上模块上下文。 */
+clux_module_t *clux_context_swap_current_module(clux_context_t *self,
+                                                clux_module_t *module);
 /* 将匿名值具名化加入当前作用域（var 声明的落地通道）：
    值是当前作用域的匿名持有时原地填名（声明即 move，零拷贝）；
    值是借用（对既有变量的引用）时按值拷贝落地为独立存储；
