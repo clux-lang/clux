@@ -35,6 +35,23 @@ typedef struct {
   location_t base_loc; /* base 名字节的 location（位置字段模板） */
 } sema_instant_t;
 
+/* 匿名构造条目（§2.9，walk 收集）：匿名构造点（EXPR_CONSTRUCT，
+   TYPE 槽 NULL）→ 合成名 nonamed$N。emit 克隆时命中节点在 TYPE 槽
+   回填名字 identifier，尾部按收集序合成具名 struct。 */
+typedef struct {
+  node_t *node; /* 借用：原树匿名构造点 */
+  char *name;   /* 合成名（ctx allocator），如 nonamed$1 */
+} sema_anon_t;
+
+/* 方法条目（§2.10，walk 收集）：struct 的 STMT_FUNC 成员 → 提升名
+   Type$name 与 self 形参形态。member_call 退化按表改写调用点。 */
+typedef struct {
+  char *struct_name; /* 所属 struct 名（ctx allocator） */
+  char *method_name; /* 方法原名（ctx allocator），匹配键 */
+  char *mangled;     /* 提升名 Type$name（ctx allocator），改写目标 */
+  int self_ptr;      /* self 形参类型为指针形态（*T 文本）→ receiver 包 .& */
+} sema_method_t;
+
 /* ---- comptime if 剪枝（§2.5） ---- */
 
 /* 剪枝决策条目（walk 收集）：条件 CTFE 求值后选中臂，emit 克隆时
@@ -117,7 +134,18 @@ sema_render_strip_suffix(const char *text, size_t len, size_t *num_len);
    - renames/skip：提升重编排（skip 内原树语句整条不进克隆）；
    - instants：命中使用点（EXPR_SUBSCRIPT）折叠为实例名节点（§2.3）；
    - consts：命中引用点（LITERAL_IDENTIFIER）折叠为常量字面量（§2.1）；
+   - anons（§2.9）：命中匿名构造点（EXPR_CONSTRUCT TYPE 槽 NULL）在
+     克隆体的 TYPE 槽回填合成名 identifier（具名 struct 由 emit 尾部
+     合成）；
+   - methods（§2.10）：member_call 调用点（callee 为 "." 成员访问）
+     退化为 Type$name(receiver, ...)——receiver 为方法所属类型的
+     具名构造时按 struct 名直匹配，否则方法名全表唯一才匹配；
+     指针 self 形态 receiver 追加 .& 后缀；
    - prunes：STMT_COMPTIME_IF 命中则替换为选中臂（§2.5，walk 已决策）；
+   - inst_params/inst_args + instantiate（§2.3 完整版）：实例体克隆态，
+     泛型形参引用代换为实参克隆、定义体内自引用使用点（base 命中
+     renames[0].from）整体折叠为代换后的实例名、GENERIC_PARAMS 槽
+     摘除（实例体非泛型）；
    - STMT_VAR 后处理（§2.8）：TYPE 槽 NULL 时按 VALUE 字面量回填类型；
    - 结构改写（§2.4/2.6/2.7）：STMT_DEFER → 立即捕获闭包 var + 退出点
      LIFO 调用；STMT_FOREACH → 索引 for；STMT_COMPTIME_FOREACH（ITERABLE
@@ -129,13 +157,18 @@ typedef struct {
   program_t *program;
   const sema_rename_t *renames;
   size_t rename_count;
-  vec_t *skip;    /* 借用：提升摘除集（原树 stmt 指针），可 NULL */
-  vec_t *instants; /* 借用：sema->instants，可 NULL */
-  vec_t *consts;   /* 借用：sema->const_uses，可 NULL */
-  vec_t *prunes;   /* 借用：sema->prunes，可 NULL */
+  vec_t *skip;            /* 借用：提升摘除集（原树 stmt 指针），可 NULL */
+  vec_t *instants;        /* 借用：sema->instants，可 NULL */
+  vec_t *consts;          /* 借用：sema->const_uses，可 NULL */
+  vec_t *prunes;          /* 借用：sema->prunes，可 NULL */
+  vec_t *anons;           /* 借用：sema->anons，可 NULL */
+  vec_t *methods;         /* 借用：sema->methods，可 NULL */
   const char *subst_name; /* §2.6 展开期迭代变量名 */
   node_t *subst_src;      /* §2.6 展开期当前元素源子树 */
-  size_t defer_counter;   /* __deferN 编号 */
+  vec_t *inst_params;     /* §2.3 实例体态：形参名表（char* 借用），可 NULL */
+  vec_t *inst_args;     /* §2.3 实例体态：实参节点表（原树指针借用），可 NULL */
+  int instantiate;      /* §2.3 实例体态：GENERIC_PARAMS→NULL + 自引用折叠 */
+  size_t defer_counter; /* __deferN 编号 */
 } sema_clone_env_t;
 
 /* env 初始化：out/program 随 emit 创建；renames/skip 由 emit 按 stmt

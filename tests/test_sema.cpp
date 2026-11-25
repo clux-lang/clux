@@ -7,7 +7,10 @@
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_builtin.h"
+#include "parser/node_binary.h"
 #include "parser/node_call.h"
+#include "parser/node_construct.h"
+#include "parser/node_field.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_program.h"
 #include "parser/node_stmt_block.h"
@@ -19,6 +22,7 @@
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_struct_decl.h"
+#include "parser/node_struct_member.h"
 #include "parser/node_subscript.h"
 #include "parser/parser.h"
 #include "parser/program.h"
@@ -1215,6 +1219,553 @@ TEST(SemaTest, ComptimeForeachNonTupleIterableIsDiagnosed) {
             nullptr);
   delete_string(&text);
   EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- Phase 5：泛型实例化完整版（§2.3） ---- */
+
+/* 深度优先取第一个 identifier 叶子（代换结果验证用）。 */
+static node_t *first_identifier_leaf(node_t *node) {
+  if (!node) {
+    return nullptr;
+  }
+  if (node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER) {
+    return node;
+  }
+  vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    node_t *found = first_identifier_leaf((node_t *)vec_get(children, idx));
+    if (found) {
+      return found;
+    }
+  }
+  return nullptr;
+}
+
+/* 泛型定义不进输出，尾部追加代换后的实例声明；同组合多使用点只产
+   一个实例体；GENERICS 槽摘除。 */
+TEST(SemaTest, GenericDefinitionIsReplacedBySubstitutedInstanceBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(
+      a, &p, "type List[T] = [4]T;\nvar a: List[i32];\nvar b: List[i32];\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  /* 定义被替代且同组合只产一个实例体：STMT_TYPE 恰一条。 */
+  node_t *inst = decls_nth_of_kind(decls, CLUX_NODE_STMT_TYPE, 0);
+  ASSERT_NE(inst, nullptr);
+  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_TYPE, 1), nullptr);
+  char *text = node_text(a, stmt_type_node_get_name(inst));
+  EXPECT_STREQ(text, "List$i32");
+  allocator_free(a, (void **)&text);
+  /* 实例体非泛型：GENERICS 槽摘除。 */
+  EXPECT_EQ(stmt_type_node_get_generics(inst), nullptr);
+  /* 体内形参 T 代换为 i32。 */
+  node_t *elem = first_identifier_leaf(stmt_type_node_get_value(inst));
+  ASSERT_NE(elem, nullptr);
+  text = node_text(a, elem);
+  EXPECT_STREQ(text, "i32");
+  allocator_free(a, (void **)&text);
+  /* 两个使用点都折叠为实例名。 */
+  node_t *a_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  node_t *b_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
+  ASSERT_NE(a_var, nullptr);
+  ASSERT_NE(b_var, nullptr);
+  text = node_text(a, stmt_var_node_get_type(a_var));
+  EXPECT_STREQ(text, "List$i32");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_type(b_var));
+  EXPECT_STREQ(text, "List$i32");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 多形参 struct 实例：字段类型逐一按序代换。 */
+TEST(SemaTest, GenericStructInstanceSubstitutesFieldTypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(
+      a,
+      &p,
+      "struct Pair[A, B] { first: A; second: B; }\nvar p: Pair[i32, f64];\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *inst = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 0);
+  ASSERT_NE(inst, nullptr);
+  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 1), nullptr);
+  node_t *struct_decl = stmt_struct_node_get_struct_decl(inst);
+  ASSERT_NE(struct_decl, nullptr);
+  char *text = node_text(a, struct_decl_node_get_name(struct_decl));
+  EXPECT_STREQ(text, "Pair$i32$f64");
+  allocator_free(a, (void **)&text);
+  EXPECT_EQ(struct_decl_node_get_generics(struct_decl), nullptr);
+  node_t *members = struct_decl_node_get_body(struct_decl);
+  ASSERT_NE(members, nullptr);
+  ASSERT_EQ(node_get_kind(members), CLUX_NODE_STRUCT_MEMBERS);
+  ASSERT_EQ(struct_members_node_get_member_count(members), 2u);
+  node_t *first = struct_members_node_get_member(members, 0);
+  node_t *second = struct_members_node_get_member(members, 1);
+  ASSERT_EQ(node_get_kind(first), CLUX_NODE_FIELD);
+  ASSERT_EQ(node_get_kind(second), CLUX_NODE_FIELD);
+  text = node_text(a, field_node_get_name(first));
+  EXPECT_STREQ(text, "first");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, field_node_get_type(first));
+  EXPECT_STREQ(text, "i32");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, field_node_get_name(second));
+  EXPECT_STREQ(text, "second");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, field_node_get_type(second));
+  EXPECT_STREQ(text, "f64");
+  allocator_free(a, (void **)&text);
+  node_t *p_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(p_var, nullptr);
+  text = node_text(a, stmt_var_node_get_type(p_var));
+  EXPECT_STREQ(text, "Pair$i32$f64");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 定义体内自引用（Node[T]）在实例体里折叠为代换后的实例名。 */
+TEST(SemaTest, GenericSelfReferenceFoldsToInstanceName) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(
+      a, &p, "struct Node[T] { next: *Node[T]; }\nvar n: Node[i32];\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *inst = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 0);
+  ASSERT_NE(inst, nullptr);
+  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 1), nullptr);
+  node_t *members =
+      struct_decl_node_get_body(stmt_struct_node_get_struct_decl(inst));
+  ASSERT_NE(members, nullptr);
+  node_t *next_field = struct_members_node_get_member(members, 0);
+  ASSERT_EQ(node_get_kind(next_field), CLUX_NODE_FIELD);
+  char *text = node_text(a, field_node_get_name(next_field));
+  EXPECT_STREQ(text, "next");
+  allocator_free(a, (void **)&text);
+  node_t *next_type = first_identifier_leaf(field_node_get_type(next_field));
+  ASSERT_NE(next_type, nullptr);
+  text = node_text(a, next_type);
+  EXPECT_STREQ(text, "Node$i32");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 实参数与形参数不一致 = 硬错误：ERROR diag，emit 阻断。 */
+TEST(SemaTest, GenericInstanceArityMismatchIsDiagnosed) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "type P[A, B] = [4]A;\nvar v: P[i32];\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  ASSERT_GE(clux_context_diag_count(ctx), 1u);
+  string_t *text =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+  EXPECT_NE(strstr(string_get_data(text),
+                   "generic 'P' expects 2 type arguments, got 1"),
+            nullptr);
+  delete_string(&text);
+  EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- Phase 5：匿名构造具名化（§2.9） ---- */
+
+/* 匿名构造点 TYPE 槽回填合成名，尾部追加 struct nonamed$1，字段类型
+   按字面量推断（无后缀整数默认 i32）。 */
+TEST(SemaTest, AnonymousConstructIsNamedAndSynthesized) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "var x = .{ .a = 1, .b = 2 };\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  /* 构造点 TYPE 槽回填 nonamed$1。 */
+  node_t *x_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(x_var, nullptr);
+  node_t *construct = stmt_var_node_get_value(x_var);
+  ASSERT_NE(construct, nullptr);
+  ASSERT_EQ(node_get_kind(construct), CLUX_NODE_EXPR_CONSTRUCT);
+  char *text = node_text(a, construct_node_get_type(construct));
+  EXPECT_STREQ(text, "nonamed$1");
+  allocator_free(a, (void **)&text);
+  /* 尾部合成 struct nonamed$1 { a: i32; b: i32; }。 */
+  node_t *synth = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 0);
+  ASSERT_NE(synth, nullptr);
+  node_t *struct_decl = stmt_struct_node_get_struct_decl(synth);
+  ASSERT_NE(struct_decl, nullptr);
+  text = node_text(a, struct_decl_node_get_name(struct_decl));
+  EXPECT_STREQ(text, "nonamed$1");
+  allocator_free(a, (void **)&text);
+  node_t *members = struct_decl_node_get_body(struct_decl);
+  ASSERT_NE(members, nullptr);
+  ASSERT_EQ(struct_members_node_get_member_count(members), 2u);
+  for (size_t idx = 0; idx < 2; idx++) {
+    node_t *field = struct_members_node_get_member(members, idx);
+    ASSERT_EQ(node_get_kind(field), CLUX_NODE_FIELD);
+    text = node_text(a, field_node_get_name(field));
+    EXPECT_STREQ(text, idx == 0 ? "a" : "b");
+    allocator_free(a, (void **)&text);
+    text = node_text(a, field_node_get_type(field));
+    EXPECT_STREQ(text, "i32");
+    allocator_free(a, (void **)&text);
+  }
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 多个匿名构造按发现序递增编号，各构造点指向各自合成名；布尔字段
+   推断 bool，带后缀数值以后缀定类型。 */
+TEST(SemaTest, MultipleAnonConstructsIncrementCounter) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(
+      a, &p, "var x = .{ .a = 1 };\nvar y = .{ .b = true, .c = 2u32 };\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *x_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  node_t *y_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
+  ASSERT_NE(x_var, nullptr);
+  ASSERT_NE(y_var, nullptr);
+  char *text =
+      node_text(a, construct_node_get_type(stmt_var_node_get_value(x_var)));
+  EXPECT_STREQ(text, "nonamed$1");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, construct_node_get_type(stmt_var_node_get_value(y_var)));
+  EXPECT_STREQ(text, "nonamed$2");
+  allocator_free(a, (void **)&text);
+  /* 合成体：nonamed$1（a:i32）与 nonamed$2（b:bool、c:u32）。 */
+  node_t *first = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 0);
+  node_t *second = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  node_t *first_members =
+      struct_decl_node_get_body(stmt_struct_node_get_struct_decl(first));
+  node_t *second_members =
+      struct_decl_node_get_body(stmt_struct_node_get_struct_decl(second));
+  ASSERT_EQ(struct_members_node_get_member_count(first_members), 1u);
+  ASSERT_EQ(struct_members_node_get_member_count(second_members), 2u);
+  text = node_text(
+      a, field_node_get_type(struct_members_node_get_member(first_members, 0)));
+  EXPECT_STREQ(text, "i32");
+  allocator_free(a, (void **)&text);
+  text = node_text(
+      a,
+      field_node_get_type(struct_members_node_get_member(second_members, 0)));
+  EXPECT_STREQ(text, "bool");
+  allocator_free(a, (void **)&text);
+  text = node_text(
+      a,
+      field_node_get_type(struct_members_node_get_member(second_members, 1)));
+  EXPECT_STREQ(text, "u32");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 位置元素（非 CONSTRUCT_FIELD）不进 struct 形态：合成体零字段，
+   构造点仍具名化。 */
+TEST(SemaTest, PositionalAnonConstructSynthesizesZeroFieldStruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "var q = .{ 1, 2 };\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *q_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(q_var, nullptr);
+  char *text =
+      node_text(a, construct_node_get_type(stmt_var_node_get_value(q_var)));
+  EXPECT_STREQ(text, "nonamed$1");
+  allocator_free(a, (void **)&text);
+  node_t *synth = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 0);
+  ASSERT_NE(synth, nullptr);
+  node_t *members =
+      struct_decl_node_get_body(stmt_struct_node_get_struct_decl(synth));
+  ASSERT_NE(members, nullptr);
+  EXPECT_EQ(struct_members_node_get_member_count(members), 0u);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- Phase 5：struct 成员退化 + member_call 退化（§2.10） ---- */
+
+/* struct 的 STMT_VAR/STMT_FUNC 成员提升为模块级 Type$name：members
+   只剩 FIELD，提升项追加尾部（func 与 var 均改名）。 */
+TEST(SemaTest, StructMembersAreHoistedToGlobals) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct AAA {\n"
+                           "  x: i32;\n"
+                           "  var count = 0;\n"
+                           "  func get(self: *AAA): i32 { return self.x; }\n"
+                           "  func helper(): i32 { return 1; }\n"
+                           "}\n"
+                           "var a = .AAA{ .x = 1 };\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  /* struct AAA 本体：members 只剩字段 x（var/func 成员已摘除）。 */
+  node_t *aaa = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 0);
+  ASSERT_NE(aaa, nullptr);
+  node_t *members =
+      struct_decl_node_get_body(stmt_struct_node_get_struct_decl(aaa));
+  ASSERT_NE(members, nullptr);
+  ASSERT_EQ(struct_members_node_get_member_count(members), 1u);
+  ASSERT_EQ(node_get_kind(struct_members_node_get_member(members, 0)),
+            CLUX_NODE_FIELD);
+  /* 提升的方法：AAA$get 与 AAA$helper（无参 func 也提升）。 */
+  node_t *get_fn = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  node_t *helper_fn = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 1);
+  ASSERT_NE(get_fn, nullptr);
+  ASSERT_NE(helper_fn, nullptr);
+  char *text = node_text(
+      a, func_decl_node_get_name(stmt_func_node_get_func_decl(get_fn)));
+  EXPECT_STREQ(text, "AAA$get");
+  allocator_free(a, (void **)&text);
+  text = node_text(
+      a, func_decl_node_get_name(stmt_func_node_get_func_decl(helper_fn)));
+  EXPECT_STREQ(text, "AAA$helper");
+  allocator_free(a, (void **)&text);
+  /* 提升的 var 成员：AAA$count。 */
+  node_t *count_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
+  ASSERT_NE(count_var, nullptr);
+  text = node_text(a, stmt_var_node_get_name(count_var));
+  EXPECT_STREQ(text, "AAA$count");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* receiver 为方法所属类型的具名构造 → 直匹配改写：callee 折叠为
+   AAA$get，首实参为构造克隆；指针 self（*AAA）→ receiver 包 .&。 */
+TEST(SemaTest, MemberCallOnNamedConstructReceiverIsDesugared) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(
+      a,
+      &p,
+      "struct Box { v: i32; func get(self: *Box): i32 { return self.v; } }\n"
+      "var r = .Box{ .v = 7 }.get();\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *r_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(r_var, nullptr);
+  node_t *call = stmt_var_node_get_value(r_var);
+  ASSERT_NE(call, nullptr);
+  ASSERT_EQ(node_get_kind(call), CLUX_NODE_EXPR_CALL);
+  /* callee：identifier 文本 Box$get。 */
+  node_t *callee = call_node_get_callee(call);
+  ASSERT_NE(callee, nullptr);
+  ASSERT_EQ(node_get_kind(callee), CLUX_NODE_LITERAL_IDENTIFIER);
+  char *text = node_text(a, callee);
+  EXPECT_STREQ(text, "Box$get");
+  allocator_free(a, (void **)&text);
+  /* 首实参：指针 self → 构造包 .&（binary，RIGHT NULL）。 */
+  ASSERT_EQ(call_node_get_arg_count(call), 1u);
+  node_t *self_arg = call_node_get_arg(call, 0);
+  ASSERT_NE(self_arg, nullptr);
+  ASSERT_EQ(node_get_kind(self_arg), CLUX_NODE_EXPR_BINARY);
+  vec_t *bin_children = node_get_children(self_arg);
+  ASSERT_EQ(node_get_kind((node_t *)vec_get(bin_children, 1)),
+            CLUX_NODE_SYMBOL);
+  text = node_text(a, (node_t *)vec_get(bin_children, 1));
+  EXPECT_STREQ(text, ".&");
+  allocator_free(a, (void **)&text);
+  node_t *inner = (node_t *)vec_get(bin_children, 0);
+  ASSERT_EQ(node_get_kind(inner), CLUX_NODE_EXPR_CONSTRUCT);
+  text = node_text(a, construct_node_get_type(inner));
+  EXPECT_STREQ(text, "Box");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 值 self（self: P）+ receiver 非构造：方法名全表唯一 → 改写，
+   receiver 直传不包 .&。 */
+TEST(SemaTest, MemberCallValueSelfAndUniqueName) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(
+      a,
+      &p,
+      "struct P { v: i32; func id(self: P): i32 { return self.v; } }\n"
+      "var b = .P{ .v = 3 };\n"
+      "var c = b.id();\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *c_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
+  ASSERT_NE(c_var, nullptr);
+  node_t *call = stmt_var_node_get_value(c_var);
+  ASSERT_NE(call, nullptr);
+  ASSERT_EQ(node_get_kind(call), CLUX_NODE_EXPR_CALL);
+  node_t *callee = call_node_get_callee(call);
+  ASSERT_EQ(node_get_kind(callee), CLUX_NODE_LITERAL_IDENTIFIER);
+  char *text = node_text(a, callee);
+  EXPECT_STREQ(text, "P$id");
+  allocator_free(a, (void **)&text);
+  /* 值 self：首实参就是 identifier b，不包 .&。 */
+  ASSERT_EQ(call_node_get_arg_count(call), 1u);
+  node_t *self_arg = call_node_get_arg(call, 0);
+  ASSERT_EQ(node_get_kind(self_arg), CLUX_NODE_LITERAL_IDENTIFIER);
+  text = node_text(a, self_arg);
+  EXPECT_STREQ(text, "b");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 跨 struct 同名方法 + receiver 非构造：全表不唯一 → 保持
+   member_call 原样（callee 仍是 "." binary），交类型检查分期兜底。 */
+TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct A { func tag(self: A): i32 { return 1; } }\n"
+                           "struct B { func tag(self: B): i32 { return 2; } }\n"
+                           "var a = .A{};\n"
+                           "var b = .B{};\n"
+                           "var t = b.tag();\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *t_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 2);
+  ASSERT_NE(t_var, nullptr);
+  node_t *call = stmt_var_node_get_value(t_var);
+  ASSERT_NE(call, nullptr);
+  ASSERT_EQ(node_get_kind(call), CLUX_NODE_EXPR_CALL);
+  node_t *callee = call_node_get_callee(call);
+  ASSERT_EQ(node_get_kind(callee), CLUX_NODE_EXPR_BINARY);
+  vec_t *bin_children = node_get_children(callee);
+  char *text = node_text(a, (node_t *)vec_get(bin_children, 1));
+  EXPECT_STREQ(text, ".");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, (node_t *)vec_get(bin_children, 2));
+  EXPECT_STREQ(text, "tag");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);

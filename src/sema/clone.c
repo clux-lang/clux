@@ -9,10 +9,13 @@
    - STMT_FOREACH → 索引 for 脱糖（§2.7）。 */
 #include "sema/sema_internal.h"
 #include "core/location.h"
+#include "core/string.h"
 #include "core/vec.h"
 #include "parser/node_assign.h"
 #include "parser/node_builtin.h"
+#include "parser/node_binary.h"
 #include "parser/node_call.h"
+#include "parser/node_construct.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
 #include "parser/node_stmt_block.h"
@@ -48,6 +51,108 @@ static node_t *sema_clone_instant(node_t *node, sema_clone_env_t *env) {
     return clone;
   }
   return NULL;
+}
+
+static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env);
+
+/* ---- §2.3 实例体克隆态 ----
+   instantiate 置位期间（emit 尾部克隆实例体）：
+   - 泛型形参引用（LITERAL_IDENTIFIER 命中形参名表）→ 实参子树克隆；
+   - 定义体内自引用使用点（EXPR_SUBSCRIPT base 命中 renames[0].from）
+     → 整体折叠为代换后的实例名（形参文本先换成实参文本再拼名）；
+   - GENERIC_PARAMS → NULL（实例体非泛型，GENERICS 槽置空）。 */
+
+/* 名字形态叶子（identifier 无孩子），inst 实参折叠的前置条件。 */
+static int sema_clone_is_identifier_leaf(node_t *node) {
+  return node && node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER &&
+         vec_get_size(node_get_children(node)) == 0;
+}
+
+/* 形参代换：文本命中 inst_params → 对应实参克隆（实参收口为名字形态
+   叶子，walk 已验证）。未命中返回 NULL。 */
+static node_t *sema_clone_param_subst(node_t *node, sema_clone_env_t *env) {
+  if (!env->inst_params || !env->inst_args) {
+    return NULL;
+  }
+  char *text = location_get(node_get_location(node), env->out);
+  if (!text) {
+    return NULL;
+  }
+  node_t *replacement = NULL;
+  size_t count = vec_get_size(env->inst_params);
+  for (size_t idx = 0; idx < count; idx++) {
+    const char *param = (const char *)vec_get(env->inst_params, idx);
+    if (!param || strcmp(param, text) != 0) {
+      continue;
+    }
+    node_t *arg = (node_t *)vec_get(env->inst_args, idx);
+    if (arg) {
+      replacement = sema_clone_impl(arg, env);
+    }
+    break;
+  }
+  allocator_free(env->out, (void **)&text);
+  return replacement;
+}
+
+/* 自引用折叠：SUBSCRIPT base 命中 renames[0].from（被实例化的泛型名）
+   → base$代换实参1$...（实参文本先经形参代换），intern 为实例名
+   identifier。任一实参非名字形态叶子不折叠（交由使用点原样克隆）。 */
+static node_t *sema_clone_self_instant(node_t *node, sema_clone_env_t *env) {
+  if (!env->renames || env->rename_count == 0) {
+    return NULL;
+  }
+  vec_t *children = node_get_children(node);
+  node_t *base =
+      vec_get_size(children) > 0 ? (node_t *)vec_get(children, 0) : NULL;
+  if (!sema_clone_is_identifier_leaf(base) ||
+      !location_is(node_get_location(base), env->renames[0].from)) {
+    return NULL;
+  }
+  string_t *joined = create_string(env->out);
+  string_append_cstr(joined, env->renames[0].from);
+  for (size_t idx = 1; idx < vec_get_size(children); idx++) {
+    node_t *arg = (node_t *)vec_get(children, idx);
+    if (!sema_clone_is_identifier_leaf(arg)) {
+      delete_string(&joined);
+      return NULL;
+    }
+    char *text = location_get(node_get_location(arg), env->out);
+    if (!text) {
+      delete_string(&joined);
+      return NULL;
+    }
+    /* 实参是泛型形参 → 换成实例化实参的文本。 */
+    for (size_t p = 0; env->inst_params && p < vec_get_size(env->inst_params);
+         p++) {
+      const char *param = (const char *)vec_get(env->inst_params, p);
+      if (param && strcmp(param, text) == 0) {
+        node_t *real_arg = (node_t *)vec_get(env->inst_args, p);
+        if (sema_clone_is_identifier_leaf(real_arg)) {
+          allocator_free(env->out, (void **)&text);
+          text = location_get(node_get_location(real_arg), env->out);
+        }
+        break;
+      }
+    }
+    if (!text) {
+      delete_string(&joined);
+      return NULL;
+    }
+    string_append_cstr(joined, "$");
+    string_append_cstr(joined, text);
+    allocator_free(env->out, (void **)&text);
+  }
+  size_t len = string_get_size(joined);
+  const char *text =
+      program_intern_string(env->program, string_get_data(joined), len);
+  delete_string(&joined);
+  node_t *clone = create_node(env->out, CLUX_NODE_LITERAL_IDENTIFIER);
+  location_t renamed = *node_get_location(base);
+  renamed.begin.offset = text;
+  renamed.end.offset = text + len;
+  node_set_location(clone, &renamed);
+  return clone;
 }
 
 /* 常量折叠（§2.1 最小版）：引用点（LITERAL_IDENTIFIER）命中常量表
@@ -504,6 +609,103 @@ sema_prune_lookup(node_t *node, sema_clone_env_t *env, sema_prune_t **out) {
   return -1;
 }
 
+/* §2.10 member_call 退化：callee 为 "." 成员访问（receiver.method）时
+   按方法表改写为 Type$name(receiver, ...)——receiver 为方法所属类型
+   的具名构造时按 struct 名直匹配，否则方法名全表唯一才匹配（防跨
+   类型同名方法误改写）。指针 self 形态（形参类型 *T 文本）receiver
+   先包 .&。未命中返回 NULL 走通用克隆。 */
+static node_t *sema_desugar_member_call(node_t *node, sema_clone_env_t *env) {
+  vec_t *children = node_get_children(node);
+  node_t *callee =
+      vec_get_size(children) > 0 ? (node_t *)vec_get(children, 0) : NULL;
+  if (!callee || node_get_kind(callee) != CLUX_NODE_EXPR_BINARY) {
+    return NULL;
+  }
+  vec_t *bin_children = node_get_children(callee);
+  node_t *receiver = vec_get_size(bin_children) > 0
+                         ? (node_t *)vec_get(bin_children, 0)
+                         : NULL;
+  node_t *symbol = vec_get_size(bin_children) > 1
+                       ? (node_t *)vec_get(bin_children, 1)
+                       : NULL;
+  node_t *method_ref = vec_get_size(bin_children) > 2
+                           ? (node_t *)vec_get(bin_children, 2)
+                           : NULL;
+  if (!receiver || !symbol || !sema_clone_is_identifier_leaf(method_ref)) {
+    return NULL;
+  }
+  /* 只处理 "."（"::" 命名空间访问同形，文本判别）。 */
+  char *op = location_get(node_get_location(symbol), env->out);
+  int is_member = op && strcmp(op, ".") == 0;
+  allocator_free(env->out, (void **)&op);
+  if (!is_member) {
+    return NULL;
+  }
+  char *method_name = location_get(node_get_location(method_ref), env->out);
+  if (!method_name) {
+    return NULL;
+  }
+  /* receiver 为具名构造时按 struct 名直匹配（方法表收集自原树，
+     method_ref 同样来自原树文本，不经 renames 改写）。 */
+  char *recv_type = NULL;
+  if (node_get_kind(receiver) == CLUX_NODE_EXPR_CONSTRUCT) {
+    node_t *type = construct_node_get_type(receiver);
+    if (sema_clone_is_identifier_leaf(type)) {
+      recv_type = location_get(node_get_location(type), env->out);
+    }
+  }
+  sema_method_t *hit = NULL;
+  int unique = 1;
+  for (size_t idx = 0; idx < vec_get_size(env->methods); idx++) {
+    sema_method_t *method = (sema_method_t *)vec_get(env->methods, idx);
+    if (strcmp(method->method_name, method_name) != 0) {
+      continue;
+    }
+    if (recv_type && strcmp(method->struct_name, recv_type) == 0) {
+      hit = method;
+      unique = 1;
+      break;
+    }
+    /* 非直匹配：方法名全表唯一才可改写（跨类型同名保持原样）。 */
+    hit = hit ? hit : method;
+    unique = hit == method;
+  }
+  allocator_free(env->out, (void **)&method_name);
+  allocator_free(env->out, (void **)&recv_type);
+  if (!hit || !unique) {
+    return NULL;
+  }
+  node_t *call = create_call_node(env->out);
+  node_set_location(call, node_get_location(node));
+  call_node_set_callee(call,
+                       sema_render_text_node(env->out,
+                                             env->program,
+                                             CLUX_NODE_LITERAL_IDENTIFIER,
+                                             hit->mangled,
+                                             node_get_location(method_ref)));
+  node_t *self_arg = sema_clone_impl(receiver, env);
+  if (hit->self_ptr) {
+    /* 指针 self：receiver 包 .&（后缀形态复用 binary，RIGHT 置 NULL）。 */
+    node_t *addr = create_binary_node(env->out);
+    node_set_location(addr, node_get_location(receiver));
+    binary_node_set_left(addr, self_arg);
+    binary_node_set_symbol(addr,
+                           sema_render_text_node(env->out,
+                                                 env->program,
+                                                 CLUX_NODE_SYMBOL,
+                                                 ".&",
+                                                 node_get_location(receiver)));
+    call_node_add_arg(call, addr);
+  } else {
+    call_node_add_arg(call, self_arg);
+  }
+  for (size_t idx = 1; idx < vec_get_size(children); idx++) {
+    call_node_add_arg(call,
+                      sema_clone_impl((node_t *)vec_get(children, idx), env));
+  }
+  return call;
+}
+
 /* 递归主体：全部通道经 env 注入。 */
 static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
   if (!node) {
@@ -525,6 +727,26 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
         env->subst_name = saved_name;
         env->subst_src = saved_src;
         return replacement;
+      }
+    }
+  }
+  /* §2.3 实例体克隆态：代换/自引用折叠/泛型表摘除（须先于使用点
+     instants 折叠——体内自引用使用点带形参文本，直接折叠会拼错名）。 */
+  if (env->instantiate) {
+    node_kind_t inst_kind = node_get_kind(node);
+    if (inst_kind == CLUX_NODE_GENERIC_PARAMS) {
+      return NULL; /* GENERICS 槽置 NULL：实例体非泛型 */
+    }
+    if (inst_kind == CLUX_NODE_LITERAL_IDENTIFIER) {
+      node_t *substituted = sema_clone_param_subst(node, env);
+      if (substituted) {
+        return substituted;
+      }
+    }
+    if (inst_kind == CLUX_NODE_EXPR_SUBSCRIPT) {
+      node_t *folded = sema_clone_self_instant(node, env);
+      if (folded) {
+        return folded;
       }
     }
   }
@@ -553,6 +775,12 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
       /* 未选臂不存在：空臂。块级语句位的摘除由 sema_clone_block 预判，
          此处兜底返回 NULL（固定槽位场景 NULL 槽合法）。 */
       return prune->arm ? sema_clone_impl(prune->arm, env) : NULL;
+    }
+  }
+  if (kind == CLUX_NODE_EXPR_CALL && env->methods) {
+    node_t *call = sema_desugar_member_call(node, env);
+    if (call) {
+      return call;
     }
   }
   vec_t *children = node_get_children(node);
@@ -631,6 +859,28 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
   if (node_get_kind(node) == CLUX_NODE_STMT_VAR) {
     sema_clone_var_fixup(clone, env->out, env->program);
   }
+  /* §2.9 匿名构造具名化：命中 anons 表的匿名构造点，TYPE 槽回填
+     合成名 identifier（具名 struct 由 emit 尾部合成）。 */
+  if (kind == CLUX_NODE_EXPR_CONSTRUCT && env->anons) {
+    for (size_t idx = 0; idx < vec_get_size(env->anons); idx++) {
+      sema_anon_t *anon = (sema_anon_t *)vec_get(env->anons, idx);
+      if (anon->node != node) {
+        continue;
+      }
+      vec_t *clone_children = node_get_children(clone);
+      if (vec_get_size(clone_children) > (size_t)CLUX_EXPR_CONSTRUCT_TYPE &&
+          vec_get(clone_children, CLUX_EXPR_CONSTRUCT_TYPE) == NULL) {
+        node_set_child(clone,
+                       CLUX_EXPR_CONSTRUCT_TYPE,
+                       sema_render_text_node(env->out,
+                                             env->program,
+                                             CLUX_NODE_LITERAL_IDENTIFIER,
+                                             anon->name,
+                                             node_get_location(node)));
+      }
+      break;
+    }
+  }
   return clone;
 }
 
@@ -645,11 +895,16 @@ void sema_clone_env_init(sema_clone_env_t *env,
   env->instants = instants;
   env->consts = consts;
   env->prunes = prunes;
+  env->anons = NULL;
+  env->methods = NULL;
   env->renames = NULL;
   env->rename_count = 0;
   env->skip = NULL;
   env->subst_name = NULL;
   env->subst_src = NULL;
+  env->inst_params = NULL;
+  env->inst_args = NULL;
+  env->instantiate = 0;
   env->defer_counter = 0;
 }
 

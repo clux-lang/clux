@@ -5,8 +5,13 @@
 #include "engine/diag.h"
 #include "engine/module.h"
 #include "parser/node_bitfield_decl.h"
+#include "parser/node_construct.h"
+#include "parser/node_construct_field.h"
 #include "parser/node_enum_decl.h"
+#include "parser/node_field.h"
 #include "parser/node_func_decl.h"
+#include "parser/node_func_param.h"
+#include "parser/node_generic_param.h"
 #include "parser/node_interface_decl.h"
 #include "parser/node_program.h"
 #include "parser/node_stmt_bitfield.h"
@@ -21,9 +26,11 @@
 #include "parser/node_stmt_var.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_struct_decl.h"
+#include "parser/node_struct_member.h"
 #include "parser/node_union.h"
 #include "parser/parser.h"
 #include "sema/sema_internal.h"
+#include <stdio.h>
 #include <string.h>
 
 struct _clux_sema_t {
@@ -33,12 +40,31 @@ struct _clux_sema_t {
   int walked;                 /* 0 未走 / 1 已走（walk 只允许一次） */
   vec_t *hoists;              /* sema_hoist_t*，engine allocator 持有 */
   vec_t *instants;            /* sema_instant_t*，模块级实例化表（§2.3） */
-  vec_t *generic_names;       /* char*，模块级泛型声明名集合（§2.3） */
+  vec_t *generic_defs;        /* sema_generic_def_t*，泛型名→定义（§2.3） */
+  vec_t *instance_bodies;     /* sema_instance_body_t*，实例体表（§2.3） */
   vec_t *const_defs; /* sema_const_def_t*，顶层 comptime 常量表（§2.1） */
   vec_t *const_uses; /* sema_const_use_t*，常量引用点表（§2.1） */
   vec_t *prunes;     /* sema_prune_t*，comptime if 剪枝决策表（§2.5） */
+  vec_t *anons;      /* sema_anon_t*，匿名构造表（§2.9） */
+  vec_t *methods;    /* sema_method_t*，struct 方法表（§2.10） */
   node_t *ast;       /* 借用：walk 入参 PROGRAM（emit 只读） */
 };
+
+/* 泛型定义条目（§2.3）：模块级泛型声明名 → 定义语句（借用原树）。 */
+typedef struct {
+  char *name;   /* 泛型名（ctx allocator），如 List */
+  node_t *stmt; /* 借用：泛型定义语句 */
+} sema_generic_def_t;
+
+/* 实例体条目（§2.3 完整版）：一个实参组合 → emit 尾部产出的实例声明
+   （定义深拷贝 + 代换）。param_names/args 即代换依据（同序对位）。 */
+typedef struct {
+  node_t *stmt;       /* 借用：泛型定义语句（克隆源） */
+  char *base;         /* 泛型名（ctx allocator），rename 匹配键 */
+  char *name;         /* 实例名（ctx allocator），如 List$i32 */
+  vec_t *param_names; /* char* 按序形参名（无名参数记 NULL） */
+  vec_t *args;        /* 借用：实参节点（原树指针），与形参同序 */
+} sema_instance_body_t;
 
 clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   if (!ctx || !out_allocator) {
@@ -52,10 +78,13 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->walked = 0;
   sema->hoists = create_vec(allocator);
   sema->instants = create_vec(allocator);
-  sema->generic_names = create_vec(allocator);
+  sema->generic_defs = create_vec(allocator);
+  sema->instance_bodies = create_vec(allocator);
   sema->const_defs = create_vec(allocator);
   sema->const_uses = create_vec(allocator);
   sema->prunes = create_vec(allocator);
+  sema->anons = create_vec(allocator);
+  sema->methods = create_vec(allocator);
   sema->ast = NULL;
   return sema;
 }
@@ -81,11 +110,27 @@ void sema_destroy(clux_sema_t **sema) {
     allocator_free(allocator, (void **)&instant);
   }
   delete_vec(&self->instants);
-  for (size_t idx = 0; idx < vec_get_size(self->generic_names); idx++) {
-    char *name = (char *)vec_get(self->generic_names, idx);
-    allocator_free(allocator, (void **)&name);
+  for (size_t idx = 0; idx < vec_get_size(self->generic_defs); idx++) {
+    sema_generic_def_t *def =
+        (sema_generic_def_t *)vec_get(self->generic_defs, idx);
+    allocator_free(allocator, (void **)&def->name);
+    allocator_free(allocator, (void **)&def);
   }
-  delete_vec(&self->generic_names);
+  delete_vec(&self->generic_defs);
+  for (size_t idx = 0; idx < vec_get_size(self->instance_bodies); idx++) {
+    sema_instance_body_t *body =
+        (sema_instance_body_t *)vec_get(self->instance_bodies, idx);
+    allocator_free(allocator, (void **)&body->base);
+    allocator_free(allocator, (void **)&body->name);
+    for (size_t p = 0; p < vec_get_size(body->param_names); p++) {
+      char *param = (char *)vec_get(body->param_names, p);
+      allocator_free(allocator, (void **)&param);
+    }
+    delete_vec(&body->param_names);
+    delete_vec(&body->args); /* 实参节点借用原树，只释放 vec 外壳 */
+    allocator_free(allocator, (void **)&body);
+  }
+  delete_vec(&self->instance_bodies);
   for (size_t idx = 0; idx < vec_get_size(self->const_defs); idx++) {
     sema_const_def_t *def = (sema_const_def_t *)vec_get(self->const_defs, idx);
     allocator_free(allocator, (void **)&def->name);
@@ -102,6 +147,20 @@ void sema_destroy(clux_sema_t **sema) {
     allocator_free(allocator, (void **)&prune);
   }
   delete_vec(&self->prunes);
+  for (size_t idx = 0; idx < vec_get_size(self->anons); idx++) {
+    sema_anon_t *anon = (sema_anon_t *)vec_get(self->anons, idx);
+    allocator_free(allocator, (void **)&anon->name);
+    allocator_free(allocator, (void **)&anon);
+  }
+  delete_vec(&self->anons);
+  for (size_t idx = 0; idx < vec_get_size(self->methods); idx++) {
+    sema_method_t *method = (sema_method_t *)vec_get(self->methods, idx);
+    allocator_free(allocator, (void **)&method->struct_name);
+    allocator_free(allocator, (void **)&method->method_name);
+    allocator_free(allocator, (void **)&method->mangled);
+    allocator_free(allocator, (void **)&method);
+  }
+  delete_vec(&self->methods);
   allocator_free(allocator, (void **)sema);
 }
 
@@ -318,10 +377,11 @@ static void sema_hoist_block(clux_sema_t *sema,
   }
 }
 
-/* ---- 实例化名回填（§2.3 最小版：只类型） ----
+/* ---- 实例化（§2.3 完整版：类型定义） ----
    模块级泛型声明名 → 使用点（EXPR_SUBSCRIPT）合成实例名
    base$arg1$arg2...；module_declare 天然去重（同组合首次登记成功，
-   之后静默）。实例体深拷贝代换是 Phase 5。 */
+   之后静默）。首登组合同步登记实例体条目：emit 从定义语句深拷贝 +
+   形参代换产出实例声明，追加 PROGRAM 尾部，泛型定义本身不进输出。 */
 
 /* 语句 → 泛型参数表节点（TYPE/STRUCT/UNION；func/interface 的
    实例化随后续分期）。无泛型返回 NULL。 */
@@ -338,7 +398,13 @@ static int sema_node_is_name_form(node_t *node) {
           node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER);
 }
 
-/* 带泛型表的声明 → 声明名入模块级泛型名集合（去重后入表）。
+/* 带非空泛型参数表的声明语句 = 泛型定义（§2.3）。 */
+static int sema_stmt_is_generic_def(node_t *stmt) {
+  node_t *generics = sema_stmt_generics_node(stmt);
+  return generics && vec_get_size(node_get_children(generics)) > 0;
+}
+
+/* 带泛型表的声明 → 泛型定义条目（名+语句，去重后入表）。
    收集的是声明名（如 List），不是泛型参数名（T）。 */
 static void sema_generic_names_collect(clux_sema_t *sema, node_t *stmt) {
   node_t *generics = sema_stmt_generics_node(stmt);
@@ -352,27 +418,90 @@ static void sema_generic_names_collect(clux_sema_t *sema, node_t *stmt) {
   if (!name) {
     return;
   }
-  for (size_t idx = 0; idx < vec_get_size(sema->generic_names); idx++) {
-    if (strcmp((char *)vec_get(sema->generic_names, idx), name) == 0) {
+  for (size_t idx = 0; idx < vec_get_size(sema->generic_defs); idx++) {
+    sema_generic_def_t *def =
+        (sema_generic_def_t *)vec_get(sema->generic_defs, idx);
+    if (strcmp(def->name, name) == 0) {
       allocator_free(allocator, (void **)&name);
       return;
     }
   }
-  vec_push(sema->generic_names, name);
+  sema_generic_def_t *def =
+      allocator_alloc(allocator, sizeof(sema_generic_def_t));
+  def->name = name;
+  def->stmt = stmt;
+  vec_push(sema->generic_defs, def);
 }
 
 static int sema_name_is_generic(clux_sema_t *sema, const char *name) {
-  for (size_t idx = 0; idx < vec_get_size(sema->generic_names); idx++) {
-    if (strcmp((char *)vec_get(sema->generic_names, idx), name) == 0) {
+  for (size_t idx = 0; idx < vec_get_size(sema->generic_defs); idx++) {
+    sema_generic_def_t *def =
+        (sema_generic_def_t *)vec_get(sema->generic_defs, idx);
+    if (strcmp(def->name, name) == 0) {
       return 1;
     }
   }
   return 0;
 }
 
+/* 新组合首登 → 登记实例体：查泛型定义，实参数与形参数一致才入表
+   （emit 尾部从定义深拷贝代换产出）；不一致报 ERROR（emit 被阻断）。 */
+static void sema_instance_body_register(clux_sema_t *sema,
+                                        node_t *use,
+                                        const char *base_name) {
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  sema_generic_def_t *def = NULL;
+  for (size_t idx = 0; idx < vec_get_size(sema->generic_defs); idx++) {
+    sema_generic_def_t *cur =
+        (sema_generic_def_t *)vec_get(sema->generic_defs, idx);
+    if (strcmp(cur->name, base_name) == 0) {
+      def = cur;
+      break;
+    }
+  }
+  if (!def) {
+    return; /* 防御：使用点收集时已验证泛型名 */
+  }
+  node_t *generics = sema_stmt_generics_node(def->stmt);
+  vec_t *params = generics ? node_get_children(generics) : NULL;
+  size_t param_count = params ? vec_get_size(params) : 0;
+  vec_t *args = node_get_children(use);
+  size_t arg_count = vec_get_size(args) - 1;
+  if (param_count != arg_count) {
+    clux_context_diag(sema->ctx,
+                      CLUX_DIAG_ERROR,
+                      node_get_location(use),
+                      "generic '%s' expects %zu type arguments, got %zu",
+                      base_name,
+                      param_count,
+                      arg_count);
+    return;
+  }
+  sema_instance_body_t *body =
+      allocator_alloc(allocator, sizeof(sema_instance_body_t));
+  body->stmt = def->stmt;
+  body->base =
+      location_get(node_get_location((node_t *)vec_get(args, 0)), allocator);
+  body->name = NULL;
+  body->param_names = create_vec(allocator);
+  body->args = create_vec(allocator);
+  for (size_t idx = 0; idx < param_count; idx++) {
+    node_t *param = (node_t *)vec_get(params, idx);
+    node_t *param_name = node_get_kind(param) == CLUX_NODE_GENERIC_PARAM
+                             ? generic_param_node_get_name(param)
+                             : NULL;
+    char *text = sema_node_is_name_form(param_name)
+                     ? location_get(node_get_location(param_name), allocator)
+                     : NULL; /* 无名参数（rest 等）记 NULL，不参与代换 */
+    vec_push(body->param_names, text);
+    vec_push(body->args, (node_t *)vec_get(args, idx + 1));
+  }
+  vec_push(sema->instance_bodies, body);
+}
+
 /* 登记：使用点 + base 名 → 实例名 base$arg1$...。args 已由调用方
    验证全部名字形态，此处按原序拼名。module_declare 失败=同组合
-   已登记，静默去重。 */
+   已登记，静默去重；首登成功同步登记实例体（§2.3 完整版）。 */
 static void sema_instant_register(clux_sema_t *sema,
                                   node_t *use,
                                   node_t *base,
@@ -395,9 +524,20 @@ static void sema_instant_register(clux_sema_t *sema,
   char *name = allocator_alloc(allocator, len + 1);
   memcpy(name, data, len + 1);
   delete_string(&joined);
-  /* 符号表登记（同组合第二次 declare 失败即去重，静默）；instants 是
-     按使用点的表，每个使用点各一条（emit 按原树 node 指针匹配折叠）。*/
-  clux_module_declare(sema->module, name, false);
+  /* 符号表登记（同组合第二次 declare 失败即去重，静默）；首登成功
+     同步登记实例体（§2.3 完整版——body->name 独立拷贝，name 本身归
+     本使用点条目所有）。instants 是按使用点的表，每个使用点各一条
+     （emit 按原树 node 指针匹配折叠）。 */
+  if (clux_module_declare(sema->module, name, false)) {
+    size_t body_count = vec_get_size(sema->instance_bodies);
+    sema_instance_body_register(sema, use, base_name);
+    if (vec_get_size(sema->instance_bodies) > body_count) {
+      sema_instance_body_t *body =
+          (sema_instance_body_t *)vec_get(sema->instance_bodies, body_count);
+      body->name = allocator_alloc(allocator, len + 1);
+      memcpy(body->name, name, len + 1);
+    }
+  }
   sema_instant_t *instant = allocator_alloc(allocator, sizeof(sema_instant_t));
   instant->node = use;
   instant->name = name;
@@ -590,6 +730,110 @@ static void sema_prune_collect(clux_sema_t *sema, node_t *node) {
   }
 }
 
+/* ---- 匿名构造具名化（§2.9，walk 收集） ----
+   整树递归收集 TYPE 槽为 NULL 的 EXPR_CONSTRUCT：按发现序登记
+   nonamed$N（计数器模块内唯一，$ 专属编译器合成与用户名天然隔离），
+   符号表登记参与查重；元素内嵌套的匿名构造继续各自登记。 */
+
+static void sema_anon_collect(clux_sema_t *sema, node_t *node) {
+  if (!node) {
+    return;
+  }
+  if (node_get_kind(node) == CLUX_NODE_EXPR_CONSTRUCT &&
+      construct_node_get_type(node) == NULL) {
+    allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+    char buf[32];
+    int written = snprintf(
+        buf, sizeof(buf), "nonamed$%zu", vec_get_size(sema->anons) + 1);
+    if (written > 0 && (size_t)written < sizeof(buf)) {
+      char *name = allocator_alloc(allocator, (size_t)written + 1);
+      memcpy(name, buf, (size_t)written + 1);
+      clux_module_declare(sema->module, name, false);
+      sema_anon_t *anon = allocator_alloc(allocator, sizeof(sema_anon_t));
+      anon->node = node;
+      anon->name = name;
+      vec_push(sema->anons, anon);
+    }
+  }
+  vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    sema_anon_collect(sema, (node_t *)vec_get(children, idx));
+  }
+}
+
+/* ---- struct 成员退化（§2.10，walk 收集） ----
+   非泛型 struct 的 STMT_FUNC/STMT_VAR 成员提升为模块级 Type$name：
+   提升表负责 emit 重编排（成员从 struct_members 摘除、尾部追加声明），
+   方法表负责 member_call 退化改写（Type$name(receiver, ...)）。首形参
+   为 FUNC_PARAM 的 func 成员登记方法条目，self 形参类型为指针形态
+   （*T 文本）时 receiver 需包 .&。泛型 struct 成员不提升——实例体
+   克隆与成员提升的组合随后续分期。 */
+static void
+sema_struct_member_hoist(clux_sema_t *sema, node_t *stmt, const char *prefix) {
+  node_t *decl = stmt_struct_node_get_struct_decl(stmt);
+  node_t *body = decl ? struct_decl_node_get_body(decl) : NULL;
+  if (!body) {
+    return;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  size_t count = struct_members_node_get_member_count(body);
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *member = struct_members_node_get_member(body, idx);
+    if (!member) {
+      continue;
+    }
+    node_kind_t mkind = node_get_kind(member);
+    if (mkind != CLUX_NODE_STMT_FUNC && mkind != CLUX_NODE_STMT_VAR) {
+      continue;
+    }
+    node_t *name_node = sema_stmt_name_node(member);
+    if (!sema_node_is_name_form(name_node)) {
+      continue;
+    }
+    sema_hoist_register(sema, member, stmt, prefix, name_node);
+    if (mkind != CLUX_NODE_STMT_FUNC) {
+      continue;
+    }
+    /* 登记失败（查重 diag 已报）→ 提升表无此条目，方法条目不入表，
+       与提升保持同一可见性。 */
+    size_t hoist_count = vec_get_size(sema->hoists);
+    sema_hoist_t *hoisted =
+        hoist_count > 0 ? (sema_hoist_t *)vec_get(sema->hoists, hoist_count - 1)
+                        : NULL;
+    if (!hoisted || hoisted->stmt != member) {
+      continue;
+    }
+    node_t *func_decl = stmt_func_node_get_func_decl(member);
+    node_t *params = func_decl ? func_decl_node_get_params(func_decl) : NULL;
+    node_t *first = params && func_params_node_get_param_count(params) > 0
+                        ? func_params_node_get_param(params, 0)
+                        : NULL;
+    /* 无形参 / rest 形态不是方法（无 self 接收者），只提升不改写。 */
+    if (!first || node_get_kind(first) != CLUX_NODE_FUNC_PARAM) {
+      continue;
+    }
+    node_t *self_type = func_param_node_get_type(first);
+    char *type_text =
+        self_type ? location_get(node_get_location(self_type), allocator)
+                  : NULL;
+    sema_method_t *method = allocator_alloc(allocator, sizeof(sema_method_t));
+    method->method_name = location_get(node_get_location(name_node), allocator);
+    if (!method->method_name) {
+      allocator_free(allocator, (void **)&method);
+      continue;
+    }
+    size_t len = strlen(prefix);
+    method->struct_name = allocator_alloc(allocator, len + 1);
+    memcpy(method->struct_name, prefix, len + 1);
+    len = strlen(hoisted->mangled);
+    method->mangled = allocator_alloc(allocator, len + 1);
+    memcpy(method->mangled, hoisted->mangled, len + 1);
+    method->self_ptr = type_text && type_text[0] == '*';
+    allocator_free(allocator, (void **)&type_text);
+    vec_push(sema->methods, method);
+  }
+}
+
 int sema_walk(clux_sema_t *sema, node_t *program) {
   if (!sema) {
     return -1;
@@ -659,10 +903,22 @@ int sema_walk(clux_sema_t *sema, node_t *program) {
         sema_hoist_block(sema, body, stmt, name);
       }
     }
+    /* §2.10：struct 成员提升 + 方法表收集（泛型 struct 跳过）。 */
+    if (node_get_kind(stmt) == CLUX_NODE_STMT_STRUCT &&
+        !sema_stmt_is_generic_def(stmt)) {
+      sema_struct_member_hoist(sema, stmt, name);
+    }
     allocator_free(allocator, (void **)&name);
   }
+  /* §2.3：泛型定义体内不收使用点——体内形参文本（如 Node[T] 的 T）
+     不是真实实例组合，真正的代换发生在实例体克隆期；定义体外的
+     使用点才登记实例。 */
   for (size_t idx = 0; idx < count; idx++) {
-    sema_instant_collect(sema, program_node_get_stmt(program, idx));
+    node_t *stmt = program_node_get_stmt(program, idx);
+    if (sema_stmt_is_generic_def(stmt)) {
+      continue;
+    }
+    sema_instant_collect(sema, stmt);
   }
   /* 常量回填（§2.1）：先按源码序求值成表，才能收集引用点
      （含函数体内的引用——整棵顶层语句树递归）。 */
@@ -674,6 +930,15 @@ int sema_walk(clux_sema_t *sema, node_t *program) {
      foreach 可展开性校验（整棵顶层语句树递归）。 */
   for (size_t idx = 0; idx < count; idx++) {
     sema_prune_collect(sema, program_node_get_stmt(program, idx));
+  }
+  /* 匿名构造具名化（§2.9）：整树收集匿名构造点。泛型定义体内不收
+     ——体内字段可能引用泛型形参，实例体克隆期的合成随后续分期。 */
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *stmt = program_node_get_stmt(program, idx);
+    if (sema_stmt_is_generic_def(stmt)) {
+      continue;
+    }
+    sema_anon_collect(sema, stmt);
   }
   clux_context_set_current_module(sema->ctx, NULL);
   return 0;
@@ -710,6 +975,29 @@ sema_emit_skip_for(clux_sema_t *sema, node_t *owner, allocator_t *out) {
   return skip;
 }
 
+/* emit 侧：声明是否为提升 owner（顶层函数体 / struct 成员），决定
+   是否走 rename + skip 重编排通道。 */
+static int sema_emit_has_hoists_for(clux_sema_t *sema, node_t *owner) {
+  for (size_t idx = 0; idx < vec_get_size(sema->hoists); idx++) {
+    if (((sema_hoist_t *)vec_get(sema->hoists, idx))->owner == owner) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* emit 侧：定义语句已有实例体（§2.3）→ 不进输出（尾部由实例体替代；
+   复合实参等不可实例化的定义保持原样）。 */
+static int sema_emit_generic_replaced(clux_sema_t *sema, node_t *stmt) {
+  for (size_t idx = 0; idx < vec_get_size(sema->instance_bodies); idx++) {
+    if (((sema_instance_body_t *)vec_get(sema->instance_bodies, idx))->stmt ==
+        stmt) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 vec_t *sema_emit(clux_sema_t *sema) {
   if (!sema || !sema->walked || sema_has_error(sema)) {
     return NULL;
@@ -730,6 +1018,8 @@ vec_t *sema_emit(clux_sema_t *sema) {
   sema_clone_env_t env;
   sema_clone_env_init(
       &env, out, program, sema->instants, sema->const_uses, sema->prunes);
+  env.anons = sema->anons;
+  env.methods = sema->methods;
   sema_rename_t *renames = NULL;
   vec_t *skip = NULL;
   for (size_t idx = 0; idx < program_node_get_stmt_count(sema->ast); idx++) {
@@ -757,7 +1047,14 @@ vec_t *sema_emit(clux_sema_t *sema) {
       }
       continue;
     }
-    if (stmt && node_get_kind(stmt) == CLUX_NODE_STMT_FUNC && hoist_total > 0) {
+    /* §2.3 完整版：实例化的泛型定义不进输出（emit 尾部按实例体
+       逐组合产出替代声明）。 */
+    if (sema_emit_generic_replaced(sema, stmt)) {
+      continue;
+    }
+    /* 提升 owner（§2.2 顶层函数 / §2.10 struct 成员）：rename + skip
+       双通道重编排——体内引用点改提升名、原声明语句摘除。 */
+    if (hoist_total > 0 && stmt && sema_emit_has_hoists_for(sema, stmt)) {
       renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
       env.renames = renames;
       env.rename_count =
@@ -790,6 +1087,101 @@ vec_t *sema_emit(clux_sema_t *sema) {
     env.renames = NULL;
     env.rename_count = 0;
     env.skip = NULL;
+  }
+  /* §2.3 完整版实例体：定义深拷贝 + 形参代换——renames 单条
+     base→实例名改声明名与体内裸引用，inst_params/inst_args 代换
+     泛型形参，instantiate 态摘除 GENERICS 槽并折叠自引用使用点。 */
+  for (size_t idx = 0; idx < vec_get_size(sema->instance_bodies); idx++) {
+    sema_instance_body_t *body =
+        (sema_instance_body_t *)vec_get(sema->instance_bodies, idx);
+    sema_rename_t inst_rename;
+    inst_rename.from = body->base;
+    inst_rename.to = body->name;
+    env.renames = &inst_rename;
+    env.rename_count = 1;
+    env.inst_params = body->param_names;
+    env.inst_args = body->args;
+    env.instantiate = 1;
+    program_node_add_stmt(ast, sema_clone_node_renamed(body->stmt, &env));
+    env.renames = NULL;
+    env.rename_count = 0;
+    env.inst_params = NULL;
+    env.inst_args = NULL;
+    env.instantiate = 0;
+  }
+  /* §2.9 匿名构造具名化：按收集序合成 struct nonamed$N { ... }。
+     字段取自 CONSTRUCT_FIELD（NAME 渲染 identifier，TYPE 按 VALUE
+     字面量推断：bool / 带后缀数值以后缀定类型 / 无后缀整数默认 i32，
+     非字面量 TYPE 置 NULL 等类型检查分期）；位置元素与 rest 不进
+     struct 形态（构造点 TYPE 槽已回填名，元素保持原样）。 */
+  for (size_t idx = 0; idx < vec_get_size(sema->anons); idx++) {
+    sema_anon_t *anon = (sema_anon_t *)vec_get(sema->anons, idx);
+    const location_t *loc = node_get_location(anon->node);
+    node_t *members = create_struct_members_node(out);
+    vec_t *elems = node_get_children(anon->node);
+    for (size_t e = (size_t)CLUX_EXPR_CONSTRUCT_FIRST_ELEM;
+         e < vec_get_size(elems);
+         e++) {
+      node_t *elem = (node_t *)vec_get(elems, e);
+      if (!elem || node_get_kind(elem) != CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+        continue;
+      }
+      node_t *name_src = construct_field_node_get_name(elem);
+      node_t *value = construct_field_node_get_value(elem);
+      char *field_name = sema_node_is_name_form(name_src)
+                             ? location_get(node_get_location(name_src), out)
+                             : NULL;
+      const char *type_name = NULL;
+      if (value && node_get_kind(value) == CLUX_NODE_LITERAL_BOOLEAN) {
+        type_name = "bool";
+      } else if (value && node_get_kind(value) == CLUX_NODE_LITERAL_NUMERIC) {
+        char *text = location_get(node_get_location(value), out);
+        if (text) {
+          size_t num_len = 0;
+          const char *suffix =
+              sema_render_strip_suffix(text, strlen(text), &num_len);
+          type_name = suffix ? suffix : "i32";
+          allocator_free(out, (void **)&text);
+        }
+      }
+      node_t *field = create_field_node(out);
+      node_set_location(field, node_get_location(elem));
+      field_node_set_name(
+          field,
+          field_name ? sema_render_text_node(out,
+                                             program,
+                                             CLUX_NODE_LITERAL_IDENTIFIER,
+                                             field_name,
+                                             node_get_location(name_src))
+                     : NULL);
+      field_node_set_type(
+          field,
+          type_name ? sema_render_text_node(out,
+                                            program,
+                                            CLUX_NODE_LITERAL_IDENTIFIER,
+                                            type_name,
+                                            node_get_location(value))
+                    : NULL);
+      struct_members_node_add_member(members, field);
+      allocator_free(out, (void **)&field_name);
+    }
+    node_t *decl = create_struct_decl_node(out);
+    node_set_location(decl, loc);
+    struct_decl_node_set_keyword(
+        decl,
+        sema_render_text_node(out, program, CLUX_NODE_SYMBOL, "struct", loc));
+    struct_decl_node_set_name(
+        decl,
+        sema_render_text_node(
+            out, program, CLUX_NODE_LITERAL_IDENTIFIER, anon->name, loc));
+    struct_decl_node_set_generics(decl, NULL);
+    struct_decl_node_set_implements(decl, NULL);
+    struct_decl_node_set_body(decl, members);
+    node_t *stmt = create_stmt_struct_node(out);
+    node_set_location(stmt, loc);
+    stmt_struct_node_set_struct_decl(stmt, decl);
+    stmt_struct_node_set_export(stmt, NULL);
+    program_node_add_stmt(ast, stmt);
   }
   program_set_decls(program, ast);
   vec_push(programs, program);
