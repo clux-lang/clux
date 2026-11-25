@@ -35,6 +35,7 @@ aux_source_directory(src/parser PARSER_SOURCE)
 aux_source_directory(src/cmd CMD_SOURCE)
 aux_source_directory(src/engine ENGINE_SOURCE)
 aux_source_directory(src/exec EXEC_SOURCE)
+aux_source_directory(src/sema SEMA_SOURCE)
 
 # ---------------------------------------------------------------------------
 # Code coverage (opt-in)
@@ -65,7 +66,7 @@ function(clux_enable_coverage target)
   target_link_options(${target} PRIVATE -fprofile-instr-generate)
 endfunction()
 
-add_executable(clux src/main.c ${CORE_SOURCE} ${PARSER_SOURCE} ${CMD_SOURCE} ${ENGINE_SOURCE} ${EXEC_SOURCE})
+add_executable(clux src/main.c ${CORE_SOURCE} ${PARSER_SOURCE} ${CMD_SOURCE} ${ENGINE_SOURCE} ${EXEC_SOURCE} ${SEMA_SOURCE})
 clux_target_warnings(clux)
 clux_enable_coverage(clux)
 
@@ -102,7 +103,7 @@ if(BUILD_TESTS)
   set(CLUX_TEST_TMP_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp")
   file(MAKE_DIRECTORY "${CLUX_TEST_TMP_DIR}")
 
-  add_executable(clux_test ${TEST_SOURCES} ${CORE_SOURCE} ${PARSER_SOURCE} ${ENGINE_SOURCE} ${EXEC_SOURCE})
+  add_executable(clux_test ${TEST_SOURCES} ${CORE_SOURCE} ${PARSER_SOURCE} ${ENGINE_SOURCE} ${EXEC_SOURCE} ${SEMA_SOURCE})
   target_include_directories(clux_test PRIVATE include)
   target_include_directories(clux_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
   target_compile_definitions(clux_test PRIVATE
