@@ -5,6 +5,8 @@
 #include "sema/sema_internal.h"
 #include "core/location.h"
 #include "core/vec.h"
+#include "parser/node_stmt_var.h"
+#include <stdio.h>
 #include <string.h>
 
 /* 实例名折叠（§2.3 最小版）：使用点（EXPR_SUBSCRIPT）替换为单个
@@ -34,17 +36,98 @@ static node_t *sema_clone_instant(node_t *node,
   return NULL;
 }
 
-/* 递归主体：命名与摘除判定由调用方经 renames/skip/instants 注入，
-   三者均可为空。 */
+/* 常量折叠（§2.1 最小版）：引用点（LITERAL_IDENTIFIER）命中常量表
+   → 渲染为字面量节点（intern 文本，位置字段沿引用点）。命中即止。 */
+static node_t *sema_clone_const_fold(node_t *node,
+                                     allocator_t *out,
+                                     program_t *program,
+                                     vec_t *consts) {
+  if (!consts || node_get_kind(node) != CLUX_NODE_LITERAL_IDENTIFIER) {
+    return NULL;
+  }
+  for (size_t idx = 0; idx < vec_get_size(consts); idx++) {
+    sema_const_use_t *use = (sema_const_use_t *)vec_get(consts, idx);
+    if (use->node != node) {
+      continue;
+    }
+    return sema_render_const(
+        out, program, &use->def->value, node_get_location(node));
+  }
+  return NULL;
+}
+
+/* 推断显式化（§2.8 最小版）：TYPE 槽缺失时按 VALUE 字面量回填——
+   带后缀整数以后缀定类型；无后缀整数默认 i32 且文本补 i32 后缀
+   （浮点后缀由语法层强制）；布尔为 bool。VALUE 非字面量（调用、
+   未折叠引用等）不动，等类型检查分期。补后缀只改 VALUE 节点的
+   location（指向 intern 文本），不替换节点，避免孤儿分配。 */
+static void
+sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
+  vec_t *children = node_get_children(clone);
+  if (vec_get_size(children) < (size_t)CLUX_STMT_VAR_FIRST_DECORATOR) {
+    return;
+  }
+  node_t *type_child = (node_t *)vec_get(children, CLUX_STMT_VAR_TYPE);
+  node_t *value_child = (node_t *)vec_get(children, CLUX_STMT_VAR_VALUE);
+  if (type_child || !value_child) {
+    return;
+  }
+  const location_t *loc = node_get_location(value_child);
+  const char *type_name = NULL;
+  if (node_get_kind(value_child) == CLUX_NODE_LITERAL_BOOLEAN) {
+    type_name = "bool";
+  } else if (node_get_kind(value_child) == CLUX_NODE_LITERAL_NUMERIC) {
+    char *text = location_get(loc, out);
+    if (!text) {
+      return;
+    }
+    size_t num_len = 0;
+    const char *suffix = sema_render_strip_suffix(text, strlen(text), &num_len);
+    if (suffix) {
+      type_name = suffix;
+    } else {
+      /* 无后缀整数默认 i32：文本补后缀（intern，原地改 location）。 */
+      char suffixed[64];
+      if (snprintf(suffixed, sizeof(suffixed), "%si32", text) >=
+          (int)sizeof(suffixed)) {
+        allocator_free(out, (void **)&text);
+        return;
+      }
+      size_t len = strlen(suffixed);
+      const char *stored = program_intern_string(program, suffixed, len);
+      location_t relocated = *loc;
+      relocated.begin.offset = stored;
+      relocated.end.offset = stored + len;
+      node_set_location(value_child, &relocated);
+      type_name = "i32";
+    }
+    allocator_free(out, (void **)&text);
+  }
+  if (!type_name) {
+    return;
+  }
+  /* 类型名与 identifier 合一（白皮书 §2.1）→ LITERAL_IDENTIFIER。 */
+  node_t *type_node = sema_render_text_node(
+      out, program, CLUX_NODE_LITERAL_IDENTIFIER, type_name, loc);
+  node_set_child(clone, CLUX_STMT_VAR_TYPE, type_node);
+}
+
+/* 递归主体：命名与摘除判定由调用方经 renames/skip/instants/consts
+   注入，均可为空。 */
 static node_t *sema_clone_impl(node_t *node,
                                allocator_t *out,
                                program_t *program,
                                const sema_rename_t *renames,
                                size_t rename_count,
                                vec_t *skip,
-                               vec_t *instants) {
+                               vec_t *instants,
+                               vec_t *consts) {
   if (!node) {
     return NULL;
+  }
+  node_t *const_clone = sema_clone_const_fold(node, out, program, consts);
+  if (const_clone) {
+    return const_clone;
   }
   node_t *instant_clone = sema_clone_instant(node, out, program, instants);
   if (instant_clone) {
@@ -110,11 +193,15 @@ static node_t *sema_clone_impl(node_t *node,
                                     renames,
                                     rename_count,
                                     skip,
-                                    instants);
+                                    instants,
+                                    consts);
     node_add_child(clone, child);
   }
   if (children != node_get_children(node)) {
     delete_vec(&children);
+  }
+  if (node_get_kind(node) == CLUX_NODE_STMT_VAR) {
+    sema_clone_var_fixup(clone, out, program);
   }
   return clone;
 }
@@ -125,7 +212,8 @@ node_t *sema_clone_node_renamed(node_t *node,
                                 const sema_rename_t *renames,
                                 size_t rename_count,
                                 vec_t *skip,
-                                vec_t *instants) {
+                                vec_t *instants,
+                                vec_t *consts) {
   return sema_clone_impl(
-      node, out, program, renames, rename_count, skip, instants);
+      node, out, program, renames, rename_count, skip, instants, consts);
 }

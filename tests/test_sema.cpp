@@ -9,6 +9,7 @@
 #include "parser/node_program.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_func.h"
+#include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_var.h"
@@ -510,6 +511,221 @@ TEST(SemaTest, CompositeInstantArgumentIsNotFolded) {
   ASSERT_NE(type_slot, nullptr);
   EXPECT_EQ(node_get_kind(type_slot), CLUX_NODE_EXPR_SUBSCRIPT);
   dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- Phase 3：常量回填（§2.1）+ 推断显式化（§2.8） ---- */
+
+/* comptime var 求值后定义语句摘除、引用点折叠为字面量；
+   未经类型注解的 var 同时完成推断显式化（TYPE 槽回填）。 */
+TEST(SemaTest, ComptimeVarIsFoldedIntoUseSites) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "comptime var X = 2 + 3;\nvar a = X;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  /* comptime var 摘除后只剩 var a。 */
+  node_t *var_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(var_clone, nullptr);
+  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1), nullptr);
+  char *text = node_text(a, stmt_var_node_get_name(var_clone));
+  EXPECT_STREQ(text, "a");
+  allocator_free(a, (void **)&text);
+  /* 引用点 X 折叠为 5i32，TYPE 槽回填 i32（§2.8 联动）。 */
+  node_t *value = stmt_var_node_get_value(var_clone);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(node_get_kind(value), CLUX_NODE_LITERAL_NUMERIC);
+  text = node_text(a, value);
+  EXPECT_STREQ(text, "5i32");
+  allocator_free(a, (void **)&text);
+  node_t *type_slot = stmt_var_node_get_type(var_clone);
+  ASSERT_NE(type_slot, nullptr);
+  EXPECT_EQ(node_get_kind(type_slot), CLUX_NODE_LITERAL_IDENTIFIER);
+  text = node_text(a, type_slot);
+  EXPECT_STREQ(text, "i32");
+  allocator_free(a, (void **)&text);
+  /* 原 AST 只读：X 定义语句仍在原树。 */
+  size_t orig_comptime = 0;
+  for (size_t idx = 0; idx < program_node_get_stmt_count(ast); idx++) {
+    node_t *stmt = program_node_get_stmt(ast, idx);
+    if (stmt && node_get_kind(stmt) == CLUX_NODE_STMT_VAR &&
+        stmt_var_node_get_comptime(stmt)) {
+      orig_comptime++;
+    }
+  }
+  EXPECT_EQ(orig_comptime, 1u);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 引用链：后定义引用先定义（A → A+2），函数体内引用顶层常量同样折叠。 */
+TEST(SemaTest, ComptimeReferenceChainAndFuncBodyUse) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "comptime var A = 1;\n"
+                           "comptime var B = A + 2;\n"
+                           "func f(): i32 { return B; }\n"
+                           "var c = B;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  /* 两个 comptime var 均摘除，业务 var 只剩 c。 */
+  node_t *c_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(c_var, nullptr);
+  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1), nullptr);
+  char *text = node_text(a, stmt_var_node_get_value(c_var));
+  EXPECT_STREQ(text, "3i32");
+  allocator_free(a, (void **)&text);
+  /* 函数体 return B 的 B 折叠为 3i32。 */
+  node_t *f_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  ASSERT_NE(f_clone, nullptr);
+  node_t *body = func_body_of(f_clone);
+  ASSERT_NE(body, nullptr);
+  ASSERT_EQ(body_stmt_count(body), 1u);
+  node_t *ret = body_nth_stmt(body, 0);
+  ASSERT_EQ(node_get_kind(ret), CLUX_NODE_STMT_RETURN);
+  node_t *ret_value = node_get_child(ret, CLUX_STMT_RETURN_VALUE);
+  ASSERT_NE(ret_value, nullptr);
+  EXPECT_EQ(node_get_kind(ret_value), CLUX_NODE_LITERAL_NUMERIC);
+  text = node_text(a, ret_value);
+  EXPECT_STREQ(text, "3i32");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 推断显式化（§2.8）：var a = 1 → var a: i32 = 1i32；
+   布尔推导为 bool 且文本不补后缀。 */
+TEST(SemaTest, InferenceExplicitizesUnsuffixedLiterals) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast =
+      parse_clux(a, &p, "var a = 1;\nvar b = true;\nvar f = 1.5f64;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *a_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(a_var, nullptr);
+  char *text = node_text(a, stmt_var_node_get_type(a_var));
+  EXPECT_STREQ(text, "i32");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_value(a_var));
+  EXPECT_STREQ(text, "1i32");
+  allocator_free(a, (void **)&text);
+  node_t *b_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
+  ASSERT_NE(b_var, nullptr);
+  text = node_text(a, stmt_var_node_get_type(b_var));
+  EXPECT_STREQ(text, "bool");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_value(b_var));
+  EXPECT_STREQ(text, "true");
+  allocator_free(a, (void **)&text);
+  /* 后缀字面量直接定类型，文本不再补。 */
+  node_t *f_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 2);
+  ASSERT_NE(f_var, nullptr);
+  text = node_text(a, stmt_var_node_get_type(f_var));
+  EXPECT_STREQ(text, "f64");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_value(f_var));
+  EXPECT_STREQ(text, "1.5f64");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 显式 TYPE 不回填、已带后缀的 VALUE 文本不动（§2.8 只补缺失）。 */
+TEST(SemaTest, InferenceDoesNotTouchExplicitTypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "var x: i32 = 1;\nvar y: i64 = 2i64;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *x_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(x_var, nullptr);
+  char *text = node_text(a, stmt_var_node_get_value(x_var));
+  EXPECT_STREQ(text, "1");
+  allocator_free(a, (void **)&text);
+  node_t *y_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
+  ASSERT_NE(y_var, nullptr);
+  text = node_text(a, stmt_var_node_get_value(y_var));
+  EXPECT_STREQ(text, "2i64");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 不可求值（引用普通 var）与除零：各报一条 ERROR diag，不 emit。 */
+TEST(SemaTest, NonConstantOrDivZeroComptimeIsDiagnosed) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var y: i32 = 1;\n"
+                           "comptime var X = y;\n"
+                           "comptime var Z = 1 / 0;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  ASSERT_EQ(clux_context_diag_count(ctx), 2u);
+  string_t *text =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+  EXPECT_NE(strstr(string_get_data(text), "'y' is not a comptime value"),
+            nullptr);
+  delete_string(&text);
+  text = clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 1), a);
+  EXPECT_NE(strstr(string_get_data(text), "division by zero"), nullptr);
+  delete_string(&text);
+  EXPECT_EQ(sema_emit(sema), nullptr);
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);
