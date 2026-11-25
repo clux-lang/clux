@@ -100,60 +100,94 @@ bool sema_has_error(const clux_sema_t *sema) {
   return sema ? clux_context_diag_has_error(sema->ctx) : false;
 }
 
+/* ---- 声明元数据表（kind 为行、pass 为列） ----
+   同一组声明 kind 的元数据查询（名字槽/泛型槽/可提升）收敛为一张
+   静态表：新增声明种类只填一行，漏填即查询返回 NULL（与原 switch
+   default 等价），不会静默漂移。行 = node kind，列 = 各查询通道；
+   后续全节点 walk（类型校验/DFA/CFA）作为新列挂表，不另起 switch。 */
+static node_t *sema_func_name_of(node_t *stmt) {
+  node_t *decl = stmt_func_node_get_func_decl(stmt);
+  return decl ? func_decl_node_get_name(decl) : NULL;
+}
+
+static node_t *sema_struct_name_of(node_t *stmt) {
+  node_t *decl = stmt_struct_node_get_struct_decl(stmt);
+  return decl ? struct_decl_node_get_name(decl) : NULL;
+}
+
+static node_t *sema_struct_generics_of(node_t *stmt) {
+  node_t *decl = stmt_struct_node_get_struct_decl(stmt);
+  return decl ? struct_decl_node_get_generics(decl) : NULL;
+}
+
+static node_t *sema_enum_name_of(node_t *stmt) {
+  node_t *decl = stmt_enum_node_get_enum_decl(stmt);
+  return decl ? enum_decl_node_get_name(decl) : NULL;
+}
+
+static node_t *sema_union_name_of(node_t *stmt) {
+  node_t *decl = stmt_union_node_get_union_decl(stmt);
+  return decl ? union_node_get_name(decl) : NULL;
+}
+
+static node_t *sema_union_generics_of(node_t *stmt) {
+  node_t *decl = stmt_union_node_get_union_decl(stmt);
+  return decl ? union_node_get_generics(decl) : NULL;
+}
+
+static node_t *sema_bitfield_name_of(node_t *stmt) {
+  node_t *decl = stmt_bitfield_node_get_bitfield_decl(stmt);
+  return decl ? bitfield_decl_node_get_name(decl) : NULL;
+}
+
+static node_t *sema_interface_name_of(node_t *stmt) {
+  node_t *decl = stmt_interface_node_get_interface_decl(stmt);
+  return decl ? interface_decl_node_get_name(decl) : NULL;
+}
+
+typedef struct {
+  node_t *(*name_of)(node_t *stmt);
+  node_t *(*generics_of)(node_t *stmt);
+  int hoistable;
+} sema_decl_meta_t;
+
+/* VAR 是声明但不提升（原位置克隆）、无泛型，仅挂名通道。 */
+static const sema_decl_meta_t g_sema_decl_meta[] = {
+    [CLUX_NODE_STMT_VAR] = {stmt_var_node_get_name, NULL, 0},
+    [CLUX_NODE_STMT_TYPE] = {stmt_type_node_get_name,
+                             stmt_type_node_get_generics,
+                             1},
+    [CLUX_NODE_STMT_FUNC] = {sema_func_name_of, NULL, 1},
+    [CLUX_NODE_STMT_STRUCT] = {sema_struct_name_of, sema_struct_generics_of, 1},
+    [CLUX_NODE_STMT_ENUM] = {sema_enum_name_of, NULL, 1},
+    [CLUX_NODE_STMT_UNION] = {sema_union_name_of, sema_union_generics_of, 1},
+    [CLUX_NODE_STMT_BITFIELD] = {sema_bitfield_name_of, NULL, 1},
+    [CLUX_NODE_STMT_INTERFACE] = {sema_interface_name_of, NULL, 1},
+};
+
+/* 越界 / 未登记 kind 返回 NULL 行（等价于原 switch default）。 */
+static const sema_decl_meta_t *sema_decl_meta_of(node_t *stmt) {
+  node_kind_t kind = node_get_kind(stmt);
+  if ((size_t)kind >= sizeof(g_sema_decl_meta) / sizeof(g_sema_decl_meta[0])) {
+    return NULL;
+  }
+  return g_sema_decl_meta[kind].name_of ? &g_sema_decl_meta[kind] : NULL;
+}
+
 /* 顶层声明语句 → 名字节点。Phase 1 覆盖七类具名声明；无名 / 未覆盖
    的顶层语句（test/import/reexport/extern/assert/表达式语句等）暂不
    参与模块级查重，随各变换分期落地。 */
 static node_t *sema_stmt_name_node(node_t *stmt) {
-  switch (node_get_kind(stmt)) {
-  case CLUX_NODE_STMT_VAR:
-    return stmt_var_node_get_name(stmt);
-  case CLUX_NODE_STMT_FUNC: {
-    node_t *decl = stmt_func_node_get_func_decl(stmt);
-    return decl ? func_decl_node_get_name(decl) : NULL;
-  }
-  case CLUX_NODE_STMT_TYPE:
-    return stmt_type_node_get_name(stmt);
-  case CLUX_NODE_STMT_STRUCT: {
-    node_t *decl = stmt_struct_node_get_struct_decl(stmt);
-    return decl ? struct_decl_node_get_name(decl) : NULL;
-  }
-  case CLUX_NODE_STMT_ENUM: {
-    node_t *decl = stmt_enum_node_get_enum_decl(stmt);
-    return decl ? enum_decl_node_get_name(decl) : NULL;
-  }
-  case CLUX_NODE_STMT_UNION: {
-    node_t *decl = stmt_union_node_get_union_decl(stmt);
-    return decl ? union_node_get_name(decl) : NULL;
-  }
-  case CLUX_NODE_STMT_BITFIELD: {
-    node_t *decl = stmt_bitfield_node_get_bitfield_decl(stmt);
-    return decl ? bitfield_decl_node_get_name(decl) : NULL;
-  }
-  case CLUX_NODE_STMT_INTERFACE: {
-    node_t *decl = stmt_interface_node_get_interface_decl(stmt);
-    return decl ? interface_decl_node_get_name(decl) : NULL;
-  }
-  default:
-    return NULL;
-  }
+  const sema_decl_meta_t *meta = sema_decl_meta_of(stmt);
+  return meta && meta->name_of ? meta->name_of(stmt) : NULL;
 }
 
 /* 提升（§2.2）：函数体内声明的类型/函数登记为待提升项，mangled 名
    = enclosing链$原名（最近具名函数边界，嵌套递归拼接）。var 不提升
    （仍在原位置克隆）。 */
 static int sema_stmt_is_hoistable(node_t *stmt) {
-  switch (node_get_kind(stmt)) {
-  case CLUX_NODE_STMT_TYPE:
-  case CLUX_NODE_STMT_FUNC:
-  case CLUX_NODE_STMT_STRUCT:
-  case CLUX_NODE_STMT_ENUM:
-  case CLUX_NODE_STMT_UNION:
-  case CLUX_NODE_STMT_BITFIELD:
-  case CLUX_NODE_STMT_INTERFACE:
-    return 1;
-  default:
-    return 0;
-  }
+  const sema_decl_meta_t *meta = sema_decl_meta_of(stmt);
+  return meta ? meta->hoistable : 0;
 }
 
 /* 登记：同函数内同名（作用域遮蔽）Phase 2 不支持，直接 diag；
@@ -283,20 +317,8 @@ static void sema_hoist_block(clux_sema_t *sema,
 /* 语句 → 泛型参数表节点（TYPE/STRUCT/UNION；func/interface 的
    实例化随后续分期）。无泛型返回 NULL。 */
 static node_t *sema_stmt_generics_node(node_t *stmt) {
-  switch (node_get_kind(stmt)) {
-  case CLUX_NODE_STMT_TYPE:
-    return stmt_type_node_get_generics(stmt);
-  case CLUX_NODE_STMT_STRUCT: {
-    node_t *decl = stmt_struct_node_get_struct_decl(stmt);
-    return decl ? struct_decl_node_get_generics(decl) : NULL;
-  }
-  case CLUX_NODE_STMT_UNION: {
-    node_t *decl = stmt_union_node_get_union_decl(stmt);
-    return decl ? union_node_get_generics(decl) : NULL;
-  }
-  default:
-    return NULL;
-  }
+  const sema_decl_meta_t *meta = sema_decl_meta_of(stmt);
+  return meta && meta->generics_of ? meta->generics_of(stmt) : NULL;
 }
 
 /* 名字形态：携带文本的无孩子叶子（用户名/类型引用 LITERAL_IDENTIFIER，
