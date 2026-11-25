@@ -5,15 +5,21 @@
 #include "engine/context.h"
 #include "engine/diag.h"
 #include "parser/node.h"
+#include "parser/node_assign.h"
+#include "parser/node_builtin.h"
+#include "parser/node_call.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_program.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_for.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_struct_decl.h"
+#include "parser/node_subscript.h"
 #include "parser/parser.h"
 #include "parser/program.h"
 #include "sema/sema.h"
@@ -724,6 +730,489 @@ TEST(SemaTest, NonConstantOrDivZeroComptimeIsDiagnosed) {
   delete_string(&text);
   text = clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 1), a);
   EXPECT_NE(strstr(string_get_data(text), "division by zero"), nullptr);
+  delete_string(&text);
+  EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- Phase 4：defer 脱糖（§2.4）+ comptime if 剪枝（§2.5）+
+   comptime foreach 展开（§2.6）+ foreach 脱糖（§2.7） ---- */
+
+/* helper：STMT_EXPR(EXPR_CALL) 语句的 callee 文本（defer 调用断言）。 */
+static char *call_stmt_callee_text(allocator_t *a, node_t *stmt) {
+  node_t *expr = stmt_expr_node_get_expr(stmt);
+  if (!expr || node_get_kind(expr) != CLUX_NODE_EXPR_CALL) {
+    return NULL;
+  }
+  return node_text(a, call_node_get_callee(expr));
+}
+
+/* comptime if 剪枝：真臂保留为块、假臂无 else 整条摘除、
+   假臂有 else 替换为 else 块（块语句位，不残留 COMPTIME_IF）。 */
+TEST(SemaTest, ComptimeIfPrunesToSelectedArm) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast =
+      parse_clux(a,
+                 &p,
+                 "func f(): void {\n"
+                 "  comptime if (true) { var a = 1; }\n"
+                 "  comptime if (false) { var b = 2; }\n"
+                 "  comptime if (false) { var c = 3; } else { var d = 4; }\n"
+                 "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *f_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  ASSERT_NE(f_clone, nullptr);
+  node_t *body = func_body_of(f_clone);
+  /* 假臂无 else 整条摘除：只剩两个臂块。 */
+  ASSERT_EQ(body_stmt_count(body), 2u);
+  node_t *arm0 = body_nth_stmt(body, 0);
+  ASSERT_EQ(node_get_kind(arm0), CLUX_NODE_STMT_BLOCK);
+  ASSERT_EQ(body_stmt_count(arm0), 1u);
+  node_t *a_var = body_nth_stmt(arm0, 0);
+  ASSERT_EQ(node_get_kind(a_var), CLUX_NODE_STMT_VAR);
+  char *text = node_text(a, stmt_var_node_get_name(a_var));
+  EXPECT_STREQ(text, "a");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_value(a_var));
+  EXPECT_STREQ(text, "1i32");
+  allocator_free(a, (void **)&text);
+  node_t *arm1 = body_nth_stmt(body, 1);
+  ASSERT_EQ(node_get_kind(arm1), CLUX_NODE_STMT_BLOCK);
+  node_t *d_var = body_nth_stmt(arm1, 0);
+  ASSERT_EQ(node_get_kind(d_var), CLUX_NODE_STMT_VAR);
+  text = node_text(a, stmt_var_node_get_name(d_var));
+  EXPECT_STREQ(text, "d");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* else-if 链：外假 → ELSE 槽嵌套 comptime if（真）→ 最终选中第二臂。 */
+TEST(SemaTest, ComptimeIfElseIfChainSelectsInnerArm) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  comptime if (false) { var a = 1; }"
+                           " else comptime if (true) { var b = 2; }"
+                           " else { var c = 3; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *f_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  ASSERT_NE(f_clone, nullptr);
+  node_t *body = func_body_of(f_clone);
+  ASSERT_EQ(body_stmt_count(body), 1u);
+  node_t *arm = body_nth_stmt(body, 0);
+  ASSERT_EQ(node_get_kind(arm), CLUX_NODE_STMT_BLOCK);
+  ASSERT_EQ(body_stmt_count(arm), 1u);
+  node_t *b_var = body_nth_stmt(arm, 0);
+  ASSERT_EQ(node_get_kind(b_var), CLUX_NODE_STMT_VAR);
+  char *text = node_text(a, stmt_var_node_get_name(b_var));
+  EXPECT_STREQ(text, "b");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 顶层 comptime if：选中臂是块，声明逐条拼进 PROGRAM（升为模块级）；
+   假臂无 else 整条消失。 */
+TEST(SemaTest, TopLevelComptimeIfSplicesArmToProgram) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "comptime if (true) { struct S { a: i32; } }\n"
+                           "comptime if (false) { var dead = 1; }\n"
+                           "var live = 2i32;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *s_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_STRUCT, 0);
+  ASSERT_NE(s_clone, nullptr);
+  char *text = node_text(
+      a, struct_decl_node_get_name(stmt_struct_node_get_struct_decl(s_clone)));
+  EXPECT_STREQ(text, "S");
+  allocator_free(a, (void **)&text);
+  /* dead 不存在，业务 var 只剩 live。 */
+  node_t *live_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  ASSERT_NE(live_var, nullptr);
+  text = node_text(a, stmt_var_node_get_name(live_var));
+  EXPECT_STREQ(text, "live");
+  allocator_free(a, (void **)&text);
+  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1), nullptr);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 条件不可求值（引用普通 var）= 硬错误：ERROR diag，emit 阻断。 */
+TEST(SemaTest, UnevaluableComptimeIfConditionIsDiagnosed) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast =
+      parse_clux(a,
+                 &p,
+                 "var y = 1;\n"
+                 "func f(): void { comptime if (y) { var a = 1; } }\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  string_t *text =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+  EXPECT_NE(strstr(string_get_data(text), "'y' is not a comptime value"),
+            nullptr);
+  delete_string(&text);
+  EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* defer 脱糖：定义点换 var __deferN = 匿名闭包（(): void { body }），
+   块尾追加 __deferN(); 调用（STMT_EXPR 包 EXPR_CALL）。 */
+TEST(SemaTest, DeferDesugarsToClosureAndTailCall) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  defer { var t = 1; }\n"
+                           "  var x = 2;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *f_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  ASSERT_NE(f_clone, nullptr);
+  node_t *body = func_body_of(f_clone);
+  /* 闭包 var、x、尾调用：三条。 */
+  ASSERT_EQ(body_stmt_count(body), 3u);
+  node_t *defer_var = body_nth_stmt(body, 0);
+  ASSERT_EQ(node_get_kind(defer_var), CLUX_NODE_STMT_VAR);
+  char *text = node_text(a, stmt_var_node_get_name(defer_var));
+  EXPECT_STREQ(text, "__defer0");
+  allocator_free(a, (void **)&text);
+  node_t *fn = stmt_var_node_get_value(defer_var);
+  ASSERT_NE(fn, nullptr);
+  EXPECT_EQ(node_get_kind(fn), CLUX_NODE_EXPR_FUNC_DECL);
+  /* 匿名闭包：NAME 槽 NULL，RETURN 为 void，body 是原 defer 体克隆。 */
+  EXPECT_EQ(func_decl_node_get_name(fn), nullptr);
+  text = node_text(a, func_decl_node_get_return(fn));
+  EXPECT_STREQ(text, "void");
+  allocator_free(a, (void **)&text);
+  node_t *fn_body = func_decl_node_get_body(fn);
+  ASSERT_NE(fn_body, nullptr);
+  ASSERT_EQ(body_stmt_count(fn_body), 1u);
+  node_t *t_var = body_nth_stmt(fn_body, 0);
+  ASSERT_EQ(node_get_kind(t_var), CLUX_NODE_STMT_VAR);
+  text = node_text(a, stmt_var_node_get_name(t_var));
+  EXPECT_STREQ(text, "t");
+  allocator_free(a, (void **)&text);
+  /* 中间 var x 原样保留。 */
+  node_t *x_var = body_nth_stmt(body, 1);
+  ASSERT_EQ(node_get_kind(x_var), CLUX_NODE_STMT_VAR);
+  text = node_text(a, stmt_var_node_get_name(x_var));
+  EXPECT_STREQ(text, "x");
+  allocator_free(a, (void **)&text);
+  /* 尾部：__defer0(); 调用。 */
+  node_t *tail = body_nth_stmt(body, 2);
+  ASSERT_EQ(node_get_kind(tail), CLUX_NODE_STMT_EXPR);
+  text = call_stmt_callee_text(a, tail);
+  ASSERT_NE(text, nullptr);
+  EXPECT_STREQ(text, "__defer0");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 双 defer 的 LIFO：先 __defer1(); 再 __defer0();；语句流中直接子级
+   return 前同样逆序插入调用。 */
+TEST(SemaTest, DeferLifoOrderAndReturnPreCalls) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  defer { var a = 1; }\n"
+                           "  defer { var b = 2; }\n"
+                           "  return;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *f_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  ASSERT_NE(f_clone, nullptr);
+  node_t *body = func_body_of(f_clone);
+  /* 闭包 var ×2 + return 前调用 ×2 + return。 */
+  ASSERT_EQ(body_stmt_count(body), 5u);
+  char *text = node_text(a, stmt_var_node_get_name(body_nth_stmt(body, 0)));
+  EXPECT_STREQ(text, "__defer0");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_name(body_nth_stmt(body, 1)));
+  EXPECT_STREQ(text, "__defer1");
+  allocator_free(a, (void **)&text);
+  /* LIFO：return 前先调 __defer1 再调 __defer0。 */
+  node_t *call1 = body_nth_stmt(body, 2);
+  ASSERT_EQ(node_get_kind(call1), CLUX_NODE_STMT_EXPR);
+  text = call_stmt_callee_text(a, call1);
+  EXPECT_STREQ(text, "__defer1");
+  allocator_free(a, (void **)&text);
+  node_t *call0 = body_nth_stmt(body, 3);
+  ASSERT_EQ(node_get_kind(call0), CLUX_NODE_STMT_EXPR);
+  text = call_stmt_callee_text(a, call0);
+  EXPECT_STREQ(text, "__defer0");
+  allocator_free(a, (void **)&text);
+  EXPECT_EQ(node_get_kind(body_nth_stmt(body, 4)), CLUX_NODE_STMT_RETURN);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* foreach 脱糖（§2.7）：{ var __i: i32 = 0i32;
+   for (; __i < #len(items); __i = __i + 1) { var x = items[__i]; <body>; } } */
+TEST(SemaTest, ForeachDesugarsToIndexedFor) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  foreach (x of items) { var y = x; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *f_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  ASSERT_NE(f_clone, nullptr);
+  node_t *body = func_body_of(f_clone);
+  /* 脱糖产物整体是一个外包块。 */
+  ASSERT_EQ(body_stmt_count(body), 1u);
+  node_t *wrap = body_nth_stmt(body, 0);
+  ASSERT_EQ(node_get_kind(wrap), CLUX_NODE_STMT_BLOCK);
+  ASSERT_EQ(body_stmt_count(wrap), 2u);
+  /* var __i = 0（§2.8 联动回填 i32）。 */
+  node_t *idx_var = body_nth_stmt(wrap, 0);
+  ASSERT_EQ(node_get_kind(idx_var), CLUX_NODE_STMT_VAR);
+  char *text = node_text(a, stmt_var_node_get_name(idx_var));
+  EXPECT_STREQ(text, "__i");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_value(idx_var));
+  EXPECT_STREQ(text, "0i32");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_type(idx_var));
+  EXPECT_STREQ(text, "i32");
+  allocator_free(a, (void **)&text);
+  /* for：INIT NULL、COND 为 __i < #len(items)、UPDATE 为
+     __i = __i + 1、BODY 含 item var（items[__i]）。 */
+  node_t *loop = body_nth_stmt(wrap, 1);
+  ASSERT_EQ(node_get_kind(loop), CLUX_NODE_STMT_FOR);
+  EXPECT_EQ(stmt_for_node_get_init(loop), nullptr);
+  node_t *cond = stmt_for_node_get_condition(loop);
+  ASSERT_NE(cond, nullptr);
+  EXPECT_EQ(node_get_kind(cond), CLUX_NODE_EXPR_BINARY);
+  text = node_text(a, node_get_child(cond, 0));
+  EXPECT_STREQ(text, "__i");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, node_get_child(cond, 1));
+  EXPECT_STREQ(text, "<");
+  allocator_free(a, (void **)&text);
+  node_t *len = node_get_child(cond, 2);
+  ASSERT_NE(len, nullptr);
+  EXPECT_EQ(node_get_kind(len), CLUX_NODE_EXPR_BUILTIN);
+  text = node_text(a, builtin_node_get_name(len));
+  EXPECT_STREQ(text, "len");
+  allocator_free(a, (void **)&text);
+  ASSERT_EQ(builtin_node_get_arg_count(len), 1u);
+  text = node_text(a, builtin_node_get_arg(len, 0));
+  EXPECT_STREQ(text, "items");
+  allocator_free(a, (void **)&text);
+  node_t *update = stmt_for_node_get_update(loop);
+  ASSERT_NE(update, nullptr);
+  EXPECT_EQ(node_get_kind(update), CLUX_NODE_EXPR_ASSIGN);
+  text = node_text(a, assign_node_get_left(update));
+  EXPECT_STREQ(text, "__i");
+  allocator_free(a, (void **)&text);
+  node_t *step = assign_node_get_value(update);
+  ASSERT_NE(step, nullptr);
+  EXPECT_EQ(node_get_kind(step), CLUX_NODE_EXPR_BINARY);
+  text = node_text(a, node_get_child(step, 1));
+  EXPECT_STREQ(text, "+");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, node_get_child(step, 2));
+  EXPECT_STREQ(text, "1");
+  allocator_free(a, (void **)&text);
+  /* 循环体：var x = items[__i]; + 原 body 块。 */
+  node_t *loop_body = stmt_for_node_get_body(loop);
+  ASSERT_NE(loop_body, nullptr);
+  EXPECT_EQ(node_get_kind(loop_body), CLUX_NODE_STMT_BLOCK);
+  ASSERT_EQ(body_stmt_count(loop_body), 2u);
+  node_t *item_var = body_nth_stmt(loop_body, 0);
+  ASSERT_EQ(node_get_kind(item_var), CLUX_NODE_STMT_VAR);
+  text = node_text(a, stmt_var_node_get_name(item_var));
+  EXPECT_STREQ(text, "x");
+  allocator_free(a, (void **)&text);
+  node_t *index = stmt_var_node_get_value(item_var);
+  ASSERT_NE(index, nullptr);
+  EXPECT_EQ(node_get_kind(index), CLUX_NODE_EXPR_SUBSCRIPT);
+  text = node_text(a, subscript_node_get_base(index));
+  EXPECT_STREQ(text, "items");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, subscript_node_get_arg(index, 0));
+  EXPECT_STREQ(text, "__i");
+  allocator_free(a, (void **)&text);
+  node_t *inner_body = body_nth_stmt(loop_body, 1);
+  ASSERT_EQ(node_get_kind(inner_body), CLUX_NODE_STMT_BLOCK);
+  ASSERT_EQ(body_stmt_count(inner_body), 1u);
+  node_t *y_var = body_nth_stmt(inner_body, 0);
+  ASSERT_EQ(node_get_kind(y_var), CLUX_NODE_STMT_VAR);
+  text = node_text(a, stmt_var_node_get_name(y_var));
+  EXPECT_STREQ(text, "y");
+  allocator_free(a, (void **)&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* comptime foreach 展开（§2.6）：元组字面按元素逐份拷贝 body，
+   迭代变量引用替换为元素克隆（§2.8 联动回填类型）。 */
+TEST(SemaTest, ComptimeForeachExpandsTupleWithSubstitution) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  comptime foreach (x of <1, 2>) { var y = x; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  node_t *decls = program_get_decls(program);
+  node_t *f_clone = decls_nth_of_kind(decls, CLUX_NODE_STMT_FUNC, 0);
+  ASSERT_NE(f_clone, nullptr);
+  node_t *body = func_body_of(f_clone);
+  /* 两份 body 展开块。 */
+  ASSERT_EQ(body_stmt_count(body), 2u);
+  const char *expected[] = {"1i32", "2i32"};
+  for (size_t idx = 0; idx < 2; idx++) {
+    node_t *copy = body_nth_stmt(body, idx);
+    ASSERT_EQ(node_get_kind(copy), CLUX_NODE_STMT_BLOCK);
+    ASSERT_EQ(body_stmt_count(copy), 1u);
+    node_t *y_var = body_nth_stmt(copy, 0);
+    ASSERT_EQ(node_get_kind(y_var), CLUX_NODE_STMT_VAR);
+    char *text = node_text(a, stmt_var_node_get_name(y_var));
+    EXPECT_STREQ(text, "y");
+    allocator_free(a, (void **)&text);
+    /* 迭代变量 x 已替换为元素字面量并回填 i32。 */
+    text = node_text(a, stmt_var_node_get_value(y_var));
+    EXPECT_STREQ(text, expected[idx]);
+    allocator_free(a, (void **)&text);
+    text = node_text(a, stmt_var_node_get_type(y_var));
+    EXPECT_STREQ(text, "i32");
+    allocator_free(a, (void **)&text);
+  }
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* comptime foreach 的 iterable 非元组字面 = 硬错误：ERROR diag，emit 阻断。 */
+TEST(SemaTest, ComptimeForeachNonTupleIterableIsDiagnosed) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  comptime foreach (x of items) { var y = x; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  ASSERT_GE(clux_context_diag_count(ctx), 1u);
+  string_t *text =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+  EXPECT_NE(strstr(string_get_data(text),
+                   "comptime foreach requires a tuple literal"),
+            nullptr);
   delete_string(&text);
   EXPECT_EQ(sema_emit(sema), nullptr);
   sema_destroy(&sema);

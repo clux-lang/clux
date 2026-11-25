@@ -35,6 +35,16 @@ typedef struct {
   location_t base_loc; /* base 名字节的 location（位置字段模板） */
 } sema_instant_t;
 
+/* ---- comptime if 剪枝（§2.5） ---- */
+
+/* 剪枝决策条目（walk 收集）：条件 CTFE 求值后选中臂，emit 克隆时
+   comptime if 整体替换为选中臂的克隆（arm 为源树 THEN/ELSE 块）；
+   假臂无 else 时 arm=NULL，语句整体摘除（父块语句位跳过）。 */
+typedef struct {
+  node_t *stmt; /* 借用：原树 STMT_COMPTIME_IF */
+  node_t *arm;  /* 借用：选中臂块，NULL=整体摘除 */
+} sema_prune_t;
+
 /* ---- 常量回填（§2.1 最小版） ---- */
 
 /* 常量值：comptime var 的 CTFE 求值结果。整数按 magnitude+negative
@@ -103,23 +113,41 @@ sema_render_strip_suffix(const char *text, size_t len, size_t *num_len);
 
 /* 克隆器通道（逆向编排两条通道中的克隆器）：按 children vec 原序逐槽
    复制（NULL 槽保留下标），loc 按值浅拷，parent 由添加顺序重建。
-   返回全新子树，分配全部来自 out。
-   - renames：SYMBOL/IDENTIFIER 文本命中即改指 to 的 intern 文本；
-   - skip：集合内的原树语句整条不进入克隆（提升声明原位置摘除）；
-   - instants：命中使用点（EXPR_SUBSCRIPT）折叠为单个实例名节点
-     （§2.3 最小版），折叠需 intern，因此依赖 program；
-   - consts：命中引用点（LITERAL_IDENTIFIER）折叠为常量字面量节点
-     （§2.1 最小版）；
-   - STMT_VAR 后处理（§2.8）：TYPE 槽 NULL 时按 VALUE 字面量回填
-     类型并补无后缀整数的 i32 后缀。
-   参数均可为空，纯克隆即全传空。 */
-node_t *sema_clone_node_renamed(node_t *node,
-                                allocator_t *out,
-                                program_t *program,
-                                const sema_rename_t *renames,
-                                size_t rename_count,
-                                vec_t *skip,
-                                vec_t *instants,
-                                vec_t *consts);
+   返回全新子树，分配全部来自 out。变换通道全部经 env 注入：
+   - renames/skip：提升重编排（skip 内原树语句整条不进克隆）；
+   - instants：命中使用点（EXPR_SUBSCRIPT）折叠为实例名节点（§2.3）；
+   - consts：命中引用点（LITERAL_IDENTIFIER）折叠为常量字面量（§2.1）；
+   - prunes：STMT_COMPTIME_IF 命中则替换为选中臂（§2.5，walk 已决策）；
+   - STMT_VAR 后处理（§2.8）：TYPE 槽 NULL 时按 VALUE 字面量回填类型；
+   - 结构改写（§2.4/2.6/2.7）：STMT_DEFER → 立即捕获闭包 var + 退出点
+     LIFO 调用；STMT_FOREACH → 索引 for；STMT_COMPTIME_FOREACH（ITERABLE
+     为 EXPR_TUPLE）→ 按元素逐份展开并替换迭代变量引用
+     （subst_name/subst_src 是展开期的临时替换态，由展开函数进出配对置位）；
+   - defer_counter：__deferN 编号，emit 全程单调递增保证模块内唯一。 */
+typedef struct {
+  allocator_t *out;
+  program_t *program;
+  const sema_rename_t *renames;
+  size_t rename_count;
+  vec_t *skip;    /* 借用：提升摘除集（原树 stmt 指针），可 NULL */
+  vec_t *instants; /* 借用：sema->instants，可 NULL */
+  vec_t *consts;   /* 借用：sema->const_uses，可 NULL */
+  vec_t *prunes;   /* 借用：sema->prunes，可 NULL */
+  const char *subst_name; /* §2.6 展开期迭代变量名 */
+  node_t *subst_src;      /* §2.6 展开期当前元素源子树 */
+  size_t defer_counter;   /* __deferN 编号 */
+} sema_clone_env_t;
+
+/* env 初始化：out/program 随 emit 创建；renames/skip 由 emit 按 stmt
+   覆写；subst_* 初始 NULL。instants/consts/prunes 为 sema 整个 walk
+   期的收集表（可空）。 */
+void sema_clone_env_init(sema_clone_env_t *env,
+                         allocator_t *out,
+                         program_t *program,
+                         vec_t *instants,
+                         vec_t *consts,
+                         vec_t *prunes);
+
+node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env);
 
 #endif

@@ -11,7 +11,9 @@
 #include "parser/node_program.h"
 #include "parser/node_stmt_bitfield.h"
 #include "parser/node_stmt_enum.h"
+#include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
+#include "parser/node_stmt_if.h"
 #include "parser/node_stmt_interface.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
@@ -34,6 +36,7 @@ struct _clux_sema_t {
   vec_t *generic_names;       /* char*，模块级泛型声明名集合（§2.3） */
   vec_t *const_defs; /* sema_const_def_t*，顶层 comptime 常量表（§2.1） */
   vec_t *const_uses; /* sema_const_use_t*，常量引用点表（§2.1） */
+  vec_t *prunes;     /* sema_prune_t*，comptime if 剪枝决策表（§2.5） */
   node_t *ast;       /* 借用：walk 入参 PROGRAM（emit 只读） */
 };
 
@@ -52,6 +55,7 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->generic_names = create_vec(allocator);
   sema->const_defs = create_vec(allocator);
   sema->const_uses = create_vec(allocator);
+  sema->prunes = create_vec(allocator);
   sema->ast = NULL;
   return sema;
 }
@@ -93,6 +97,11 @@ void sema_destroy(clux_sema_t **sema) {
     allocator_free(allocator, (void **)&use);
   }
   delete_vec(&self->const_uses);
+  for (size_t idx = 0; idx < vec_get_size(self->prunes); idx++) {
+    sema_prune_t *prune = (sema_prune_t *)vec_get(self->prunes, idx);
+    allocator_free(allocator, (void **)&prune);
+  }
+  delete_vec(&self->prunes);
   allocator_free(allocator, (void **)sema);
 }
 
@@ -518,6 +527,69 @@ static void sema_const_use_collect(clux_sema_t *sema, node_t *node) {
   }
 }
 
+/* ---- Phase 4 决策收集（§2.5 剪枝 + §2.6 校验，walk 期） ---- */
+
+/* CTFE 结果判真：INT magnitude 恒非负存储，非零即真；FLOAT 按数值，
+   BOOL 按布尔值。 */
+static int sema_const_truthy(const sema_const_t *value) {
+  switch (value->kind) {
+  case SEMA_CONST_BOOL:
+    return value->bool_value != 0;
+  case SEMA_CONST_INT:
+    return value->magnitude != 0;
+  case SEMA_CONST_FLOAT:
+    return value->float_value != 0.0;
+  }
+  return 0;
+}
+
+/* comptime if 剪枝决策（§2.5）：条件 CTFE 求值 → prunes 表（选中臂源
+   指针，假臂无 else 记 NULL=整体摘除）；选中臂内嵌套 comptime if 递归
+   决策（else-if 链经 ELSE 槽的嵌套 COMPTIME_IF 一并命中）。条件不可
+   求值 = 硬错误（ctfe 已报 ERROR diag，不登记，emit 被 has_error 阻断），
+   未选臂整棵丢弃无需决策。 */
+static void sema_prune_collect(clux_sema_t *sema, node_t *node) {
+  if (!node) {
+    return;
+  }
+  if (node_get_kind(node) == CLUX_NODE_STMT_COMPTIME_IF) {
+    node_t *cond = stmt_if_node_get_condition(node);
+    sema_const_t value;
+    if (cond &&
+        sema_ctfe_eval(sema->ctx, sema->const_defs, cond, &value) == 0) {
+      allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+      sema_prune_t *prune = allocator_alloc(allocator, sizeof(sema_prune_t));
+      prune->stmt = node;
+      prune->arm = sema_const_truthy(&value) ? stmt_if_node_get_then(node)
+                                             : stmt_if_node_get_else(node);
+      vec_push(sema->prunes, prune);
+      sema_prune_collect(sema, prune->arm);
+    }
+    return;
+  }
+  /* §2.6 可展开性校验：iterable 必须元组字面、迭代变量必须名字形态，
+     不可展开 = 硬错误（emit 被 has_error 阻断）。 */
+  if (node_get_kind(node) == CLUX_NODE_STMT_COMPTIME_FOREACH) {
+    node_t *iterable = stmt_foreach_node_get_iterable(node);
+    if (!iterable || node_get_kind(iterable) != CLUX_NODE_EXPR_TUPLE) {
+      clux_context_diag(sema->ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(node),
+                        "comptime foreach requires a tuple literal iterable");
+    } else if (!sema_node_is_name_form(stmt_foreach_node_get_name(node))) {
+      clux_context_diag(sema->ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(node),
+                        "comptime foreach requires an identifier iteration "
+                        "variable");
+    }
+  }
+  vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    sema_prune_collect(sema, (node_t *)vec_get(children, idx));
+  }
+}
+
 int sema_walk(clux_sema_t *sema, node_t *program) {
   if (!sema) {
     return -1;
@@ -598,6 +670,11 @@ int sema_walk(clux_sema_t *sema, node_t *program) {
   for (size_t idx = 0; idx < count; idx++) {
     sema_const_use_collect(sema, program_node_get_stmt(program, idx));
   }
+  /* Phase 4 决策收集（§2.5/§2.6）：comptime if 剪枝决策 + comptime
+     foreach 可展开性校验（整棵顶层语句树递归）。 */
+  for (size_t idx = 0; idx < count; idx++) {
+    sema_prune_collect(sema, program_node_get_stmt(program, idx));
+  }
   clux_context_set_current_module(sema->ctx, NULL);
   return 0;
 }
@@ -647,6 +724,12 @@ vec_t *sema_emit(clux_sema_t *sema) {
   program_set_module_name(program, clux_module_get_name(sema->module));
   node_t *ast = create_program_node(out);
   size_t hoist_total = vec_get_size(sema->hoists);
+  /* 克隆器通道环境：instants/consts/prunes 整个 walk 期收集表一次注入；
+     renames/skip 按 stmt 覆写；defer_counter 跨 stmt 单调递增保证
+     __deferN 模块内唯一。 */
+  sema_clone_env_t env;
+  sema_clone_env_init(
+      &env, out, program, sema->instants, sema->const_uses, sema->prunes);
   sema_rename_t *renames = NULL;
   vec_t *skip = NULL;
   for (size_t idx = 0; idx < program_node_get_stmt_count(sema->ast); idx++) {
@@ -656,52 +739,57 @@ vec_t *sema_emit(clux_sema_t *sema) {
     if (sema_stmt_is_comptime_var(stmt)) {
       continue;
     }
-    if (stmt && node_get_kind(stmt) == CLUX_NODE_STMT_FUNC && hoist_total > 0) {
-      renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
-      size_t count = sema_emit_renames_for(sema, stmt, renames, hoist_total);
-      skip = sema_emit_skip_for(sema, stmt, out);
-      node_t *cloned = sema_clone_node_renamed(stmt,
-                                               out,
-                                               program,
-                                               renames,
-                                               count,
-                                               skip,
-                                               sema->instants,
-                                               sema->const_uses);
-      program_node_add_stmt(ast, cloned);
-      allocator_free(out, (void **)&renames);
-      delete_vec(&skip);
+    /* 顶层 comptime if（§2.5）：克隆器解析选中臂（假臂无 else 返回
+       NULL 整条摘除）；臂是块语句，内含声明升为模块级逐条拼接。 */
+    if (stmt && node_get_kind(stmt) == CLUX_NODE_STMT_COMPTIME_IF) {
+      node_t *resolved = sema_clone_node_renamed(stmt, &env);
+      if (resolved) {
+        vec_t *arm_children = node_get_children(resolved);
+        for (size_t a = 0; a < vec_get_size(arm_children); a++) {
+          node_t *arm_stmt = (node_t *)vec_get(arm_children, a);
+          if (arm_stmt) {
+            program_node_add_stmt(ast, arm_stmt);
+          }
+        }
+        /* 臂语句已移交 ast，外壳块清空 children 后只释放自身。 */
+        node_resize_children(resolved, 0);
+        delete_node(&resolved);
+      }
       continue;
     }
-    program_node_add_stmt(ast,
-                          sema_clone_node_renamed(stmt,
-                                                  out,
-                                                  program,
-                                                  NULL,
-                                                  0,
-                                                  NULL,
-                                                  sema->instants,
-                                                  sema->const_uses));
+    if (stmt && node_get_kind(stmt) == CLUX_NODE_STMT_FUNC && hoist_total > 0) {
+      renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
+      env.renames = renames;
+      env.rename_count =
+          sema_emit_renames_for(sema, stmt, renames, hoist_total);
+      skip = sema_emit_skip_for(sema, stmt, out);
+      env.skip = skip;
+      program_node_add_stmt(ast, sema_clone_node_renamed(stmt, &env));
+      allocator_free(out, (void **)&renames);
+      delete_vec(&skip);
+      env.renames = NULL;
+      env.rename_count = 0;
+      env.skip = NULL;
+      continue;
+    }
+    program_node_add_stmt(ast, sema_clone_node_renamed(stmt, &env));
   }
   /* 提升项本体：同一 owner 的 rename/skip 同样适用（body 内引用兄弟
      声明改名、更深层提升项摘除），name SYMBOL 由 rename 表改写。 */
   for (size_t idx = 0; idx < hoist_total; idx++) {
     sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
     renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
-    size_t count =
+    env.renames = renames;
+    env.rename_count =
         sema_emit_renames_for(sema, hoist->owner, renames, hoist_total);
     skip = sema_emit_skip_for(sema, hoist->owner, out);
-    node_t *cloned = sema_clone_node_renamed(hoist->stmt,
-                                             out,
-                                             program,
-                                             renames,
-                                             count,
-                                             skip,
-                                             sema->instants,
-                                             sema->const_uses);
-    program_node_add_stmt(ast, cloned);
+    env.skip = skip;
+    program_node_add_stmt(ast, sema_clone_node_renamed(hoist->stmt, &env));
     allocator_free(out, (void **)&renames);
     delete_vec(&skip);
+    env.renames = NULL;
+    env.rename_count = 0;
+    env.skip = NULL;
   }
   program_set_decls(program, ast);
   vec_push(programs, program);

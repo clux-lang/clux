@@ -1,32 +1,46 @@
 /* 克隆器：逆向编排（设计文档 §4 ②）两条新建通道之一——未变换子树的
    deep clone。产物分配在 out_allocator，与原树无任何共享节点；
    loc 按值浅拷（position 的 offset 仍可借用 parser 源码缓冲，
-   与原树同源，program_t 不因此持有 engine 指针）。 */
+   与原树同源，program_t 不因此持有 engine 指针）。
+   Phase 4 变换（§2.4–2.7）在克隆通道内做结构改写：
+   - STMT_DEFER → 立即捕获闭包 var __deferN + 退出点 LIFO 调用（§2.4）；
+   - STMT_COMPTIME_IF → walk 期 CTFE 决策的选中臂（§2.5，prunes 表）；
+   - STMT_COMPTIME_FOREACH → EXPR_TUPLE 字面序列逐元素展开（§2.6）；
+   - STMT_FOREACH → 索引 for 脱糖（§2.7）。 */
 #include "sema/sema_internal.h"
 #include "core/location.h"
 #include "core/vec.h"
+#include "parser/node_assign.h"
+#include "parser/node_builtin.h"
+#include "parser/node_call.h"
+#include "parser/node_func_decl.h"
+#include "parser/node_func_param.h"
+#include "parser/node_stmt_block.h"
+#include "parser/node_stmt_defer.h"
+#include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_for.h"
+#include "parser/node_stmt_foreach.h"
+#include "parser/node_stmt_if.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_subscript.h"
 #include <stdio.h>
 #include <string.h>
 
 /* 实例名折叠（§2.3 最小版）：使用点（EXPR_SUBSCRIPT）替换为单个
    名字节点，location 区间指向 intern 的实例名（line/col/filename
    沿 base 的值）。命中即整棵子树不再递归。 */
-static node_t *sema_clone_instant(node_t *node,
-                                  allocator_t *out,
-                                  program_t *program,
-                                  vec_t *instants) {
-  if (!instants || node_get_kind(node) != CLUX_NODE_EXPR_SUBSCRIPT) {
+static node_t *sema_clone_instant(node_t *node, sema_clone_env_t *env) {
+  if (!env->instants || node_get_kind(node) != CLUX_NODE_EXPR_SUBSCRIPT) {
     return NULL;
   }
-  for (size_t idx = 0; idx < vec_get_size(instants); idx++) {
-    sema_instant_t *instant = (sema_instant_t *)vec_get(instants, idx);
+  for (size_t idx = 0; idx < vec_get_size(env->instants); idx++) {
+    sema_instant_t *instant = (sema_instant_t *)vec_get(env->instants, idx);
     if (instant->node != node) {
       continue;
     }
     size_t len = strlen(instant->name);
-    const char *text = program_intern_string(program, instant->name, len);
-    node_t *clone = create_node(out, CLUX_NODE_LITERAL_IDENTIFIER);
+    const char *text = program_intern_string(env->program, instant->name, len);
+    node_t *clone = create_node(env->out, CLUX_NODE_LITERAL_IDENTIFIER);
     location_t renamed = instant->base_loc;
     renamed.begin.offset = text;
     renamed.end.offset = text + len;
@@ -38,20 +52,17 @@ static node_t *sema_clone_instant(node_t *node,
 
 /* 常量折叠（§2.1 最小版）：引用点（LITERAL_IDENTIFIER）命中常量表
    → 渲染为字面量节点（intern 文本，位置字段沿引用点）。命中即止。 */
-static node_t *sema_clone_const_fold(node_t *node,
-                                     allocator_t *out,
-                                     program_t *program,
-                                     vec_t *consts) {
-  if (!consts || node_get_kind(node) != CLUX_NODE_LITERAL_IDENTIFIER) {
+static node_t *sema_clone_const_fold(node_t *node, sema_clone_env_t *env) {
+  if (!env->consts || node_get_kind(node) != CLUX_NODE_LITERAL_IDENTIFIER) {
     return NULL;
   }
-  for (size_t idx = 0; idx < vec_get_size(consts); idx++) {
-    sema_const_use_t *use = (sema_const_use_t *)vec_get(consts, idx);
+  for (size_t idx = 0; idx < vec_get_size(env->consts); idx++) {
+    sema_const_use_t *use = (sema_const_use_t *)vec_get(env->consts, idx);
     if (use->node != node) {
       continue;
     }
     return sema_render_const(
-        out, program, &use->def->value, node_get_location(node));
+        env->out, env->program, &use->def->value, node_get_location(node));
   }
   return NULL;
 }
@@ -112,30 +123,441 @@ sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
   node_set_child(clone, CLUX_STMT_VAR_TYPE, type_node);
 }
 
-/* 递归主体：命名与摘除判定由调用方经 renames/skip/instants/consts
-   注入，均可为空。 */
-static node_t *sema_clone_impl(node_t *node,
-                               allocator_t *out,
-                               program_t *program,
-                               const sema_rename_t *renames,
-                               size_t rename_count,
-                               vec_t *skip,
-                               vec_t *instants,
-                               vec_t *consts) {
+/* ---- §2.4 defer 脱糖 ---- */
+
+/* 已登记 defer 的回执（name 为 intern 文本，loc 借用源 defer 语句）。 */
+typedef struct {
+  const char *name;
+  const location_t *loc;
+} sema_defer_ref_t;
+
+static int sema_stmt_is_exit_point(node_t *stmt) {
+  node_kind_t kind = node_get_kind(stmt);
+  return kind == CLUX_NODE_STMT_RETURN || kind == CLUX_NODE_STMT_BREAK ||
+         kind == CLUX_NODE_STMT_CONTINUE;
+}
+
+static int
+sema_prune_lookup(node_t *node, sema_clone_env_t *env, sema_prune_t **out);
+
+/* 语句位 comptime if 解析：沿 else-if 链（ELSE 槽为嵌套 COMPTIME_IF）
+   追到最终选中臂；假臂无 else 的链节点返回 NULL=整条摘除。未命中
+   决策表（walk 被阻断的路径，正常 emit 不可达）原样返回。 */
+static node_t *sema_resolve_prune_stmt(node_t *stmt, sema_clone_env_t *env) {
+  node_t *cur = stmt;
+  while (cur && node_get_kind(cur) == CLUX_NODE_STMT_COMPTIME_IF) {
+    sema_prune_t *prune = NULL;
+    if (sema_prune_lookup(cur, env, &prune) != 0) {
+      return cur;
+    }
+    if (!prune->arm) {
+      return NULL;
+    }
+    cur = prune->arm;
+  }
+  return cur;
+}
+
+static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env);
+
+/* 退出点调用 __deferN(); —— STMT_EXPR(EXPR_CALL)。 */
+static node_t *sema_defer_call(const sema_defer_ref_t *ref,
+                               sema_clone_env_t *env) {
+  node_t *call = create_call_node(env->out);
+  node_set_location(call, ref->loc);
+  node_t *callee = sema_render_text_node(env->out,
+                                         env->program,
+                                         CLUX_NODE_LITERAL_IDENTIFIER,
+                                         ref->name,
+                                         ref->loc);
+  call_node_set_callee(call, callee);
+  node_t *wrap = create_stmt_expr_node(env->out);
+  node_set_location(wrap, ref->loc);
+  stmt_expr_node_set_expr(wrap, call);
+  return wrap;
+}
+
+/* defer → var __deferN = func |captures| (空形参): void { body };
+   捕获一律 copy（值语义），捕获值在定义点（原 defer 位置）克隆求值。 */
+static node_t *sema_defer_def_synth(node_t *src,
+                                    sema_clone_env_t *env,
+                                    sema_defer_ref_t *ref) {
+  const location_t *loc = node_get_location(src);
+  char buf[32];
+  int written = snprintf(buf, sizeof(buf), "__defer%zu", env->defer_counter++);
+  if (written <= 0 || (size_t)written >= sizeof(buf)) {
+    return NULL;
+  }
+  ref->name = program_intern_string(env->program, buf, (size_t)written);
+  ref->loc = loc;
+  /* 闭包：func |captures| (): void { body }（捕获项带 DEFAULT，
+     经通用克隆通道——内部引用点照常折叠/改名）。构造器均预置槽位，
+     须经槽位 setter 填充，不可 node_add_child 追加。 */
+  node_t *fn = create_func_decl_node(env->out);
+  node_set_location(fn, loc);
+  node_set_child(fn,
+                 CLUX_EXPR_FUNC_DECL_KEYWORD,
+                 sema_render_text_node(
+                     env->out, env->program, CLUX_NODE_SYMBOL, "func", loc));
+  node_set_child(fn, CLUX_EXPR_FUNC_DECL_NAME, NULL); /* 匿名闭包 */
+  node_set_child(fn, CLUX_EXPR_FUNC_DECL_GENERICS, NULL);
+  node_set_child(fn,
+                 CLUX_EXPR_FUNC_DECL_CAPTURES,
+                 sema_clone_impl(stmt_defer_node_get_captures(src), env));
+  node_set_child(
+      fn, CLUX_EXPR_FUNC_DECL_PARAMS, create_func_params_node(env->out));
+  node_set_child(
+      fn,
+      CLUX_EXPR_FUNC_DECL_RETURN,
+      sema_render_text_node(
+          env->out, env->program, CLUX_NODE_LITERAL_IDENTIFIER, "void", loc));
+  node_set_child(fn,
+                 CLUX_EXPR_FUNC_DECL_BODY,
+                 sema_clone_impl(stmt_defer_node_get_body(src), env));
+  /* var __deferN = <闭包>；槽序 KEYWORD/NAME/TYPE/VALUE/EXPORT/COMPTIME。 */
+  node_t *var = create_stmt_var_node(env->out);
+  node_set_location(var, loc);
+  node_set_child(var,
+                 CLUX_STMT_VAR_KEYWORD,
+                 sema_render_text_node(
+                     env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
+  node_set_child(var,
+                 CLUX_STMT_VAR_NAME,
+                 sema_render_text_node(env->out,
+                                       env->program,
+                                       CLUX_NODE_LITERAL_IDENTIFIER,
+                                       ref->name,
+                                       loc));
+  node_set_child(var, CLUX_STMT_VAR_TYPE, NULL); /* 由闭包推断 */
+  node_set_child(var, CLUX_STMT_VAR_VALUE, fn);
+  node_set_child(var, CLUX_STMT_VAR_EXPORT, NULL);
+  node_set_child(var, CLUX_STMT_VAR_COMPTIME, NULL);
+  return var;
+}
+
+/* 块级改写：defer 定义点换形态、LIFO 登记退出调用（块尾 + 语句流中
+   直接子级的 return/break/continue 前——退出点链当前只覆盖本块直接
+   子语句，深层嵌套退出点（如 if 臂内 return 触发外层块 defer）随后续
+   分期落地）；comptime if 按剪枝决策替换/摘除。 */
+static void sema_expand_comptime_foreach_into(node_t *src,
+                                              node_t *into,
+                                              sema_clone_env_t *env);
+static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
+  node_t *clone = create_stmt_block_node(env->out);
+  node_set_location(clone, node_get_location(node));
+  vec_t *children = node_get_children(node);
+  size_t count = vec_get_size(children);
+  vec_t *deferred = create_vec(env->out);
+  int ends_in_exit = 0;
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *child = (node_t *)vec_get(children, idx);
+    if (!child) {
+      node_add_child(clone, NULL);
+      continue;
+    }
+    /* 提升（§2.2）：块语句位命中 skip 集 → 整条摘除（原逻辑在通用
+       克隆路径，块通道接管后须自持）。 */
+    if (env->skip) {
+      int dropped = 0;
+      for (size_t s = 0; s < vec_get_size(env->skip); s++) {
+        if (child == (node_t *)vec_get(env->skip, s)) {
+          dropped = 1;
+          break;
+        }
+      }
+      if (dropped) {
+        continue;
+      }
+    }
+    /* §2.5 语句位 comptime if：解析 else-if 链后替换为选中臂克隆，
+       假臂无 else 整条摘除（不占语句位）。 */
+    if (node_get_kind(child) == CLUX_NODE_STMT_COMPTIME_IF) {
+      node_t *arm = sema_resolve_prune_stmt(child, env);
+      if (arm) {
+        node_add_child(clone, sema_clone_impl(arm, env));
+      }
+      continue;
+    }
+    /* §2.6 语句位 comptime foreach：逐元素展开直接拼接（不包块，
+       保持语句位一一对应）。 */
+    if (node_get_kind(child) == CLUX_NODE_STMT_COMPTIME_FOREACH) {
+      sema_expand_comptime_foreach_into(child, clone, env);
+      continue;
+    }
+    /* 直接子级退出点：已登记 defer 逆序先执行（LIFO）。 */
+    ends_in_exit = sema_stmt_is_exit_point(child);
+    if (ends_in_exit) {
+      for (size_t d = vec_get_size(deferred); d > 0; d--) {
+        node_add_child(
+            clone,
+            sema_defer_call((sema_defer_ref_t *)vec_get(deferred, d - 1), env));
+      }
+      node_add_child(clone, sema_clone_impl(child, env));
+      continue;
+    }
+    if (node_get_kind(child) == CLUX_NODE_STMT_DEFER) {
+      sema_defer_ref_t *ref =
+          allocator_alloc(env->out, sizeof(sema_defer_ref_t));
+      node_t *synth = sema_defer_def_synth(child, env, ref);
+      if (!synth) {
+        allocator_free(env->out, (void **)&ref);
+        continue;
+      }
+      node_add_child(clone, synth);
+      vec_push(deferred, ref);
+      continue;
+    }
+    node_add_child(clone, sema_clone_impl(child, env));
+  }
+  /* 块尾正常退出：全部已登记 defer 逆序执行；末语句已是退出点时
+     块尾不可达，不再补调用（defer 调用已在退出点前插入）。 */
+  if (!ends_in_exit) {
+    for (size_t d = vec_get_size(deferred); d > 0; d--) {
+      node_add_child(
+          clone,
+          sema_defer_call((sema_defer_ref_t *)vec_get(deferred, d - 1), env));
+    }
+  }
+  /* ref 结构体归块通道所有（name 为 program 内串、loc 指向源树，均
+     借用不拥有），vec 是 non-own，须手动逐个释放。 */
+  for (size_t d = 0; d < vec_get_size(deferred); d++) {
+    sema_defer_ref_t *ref = (sema_defer_ref_t *)vec_get(deferred, d);
+    allocator_free(env->out, (void **)&ref);
+  }
+  delete_vec(&deferred);
+  return clone;
+}
+
+/* ---- §2.7 foreach 脱糖 ----
+   foreach ([var] name [: type]? of iterable) { body }
+   → { var __i = 0;
+       for (; __i < #len(iterable); __i = __i + 1) {
+           var name [: type]? = iterable[__i];
+           <body 块>;
+       } }
+   #len 与下标是现有语言能力，零新构造；iterable 按设计文本在
+   #len 与下标两处各自求值。无 var 关键字的只读性由使用点检查承担，
+   脱糖形态统一为 var。 */
+
+static node_t *sema_foreach_ident(const char *name,
+                                  const location_t *loc,
+                                  sema_clone_env_t *env) {
+  return sema_render_text_node(
+      env->out, env->program, CLUX_NODE_LITERAL_IDENTIFIER, name, loc);
+}
+
+static node_t *sema_foreach_binary(const char *op,
+                                   node_t *left,
+                                   node_t *right,
+                                   const location_t *loc,
+                                   sema_clone_env_t *env) {
+  node_t *binary = create_node(env->out, CLUX_NODE_EXPR_BINARY);
+  node_set_location(binary, loc);
+  node_add_child(binary, left);
+  node_add_child(
+      binary,
+      sema_render_text_node(env->out, env->program, CLUX_NODE_SYMBOL, op, loc));
+  node_add_child(binary, right);
+  return binary;
+}
+
+static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
+  const location_t *loc = node_get_location(src);
+  node_t *len_iter = sema_clone_impl(stmt_foreach_node_get_iterable(src), env);
+  node_t *idx_iter = sema_clone_impl(stmt_foreach_node_get_iterable(src), env);
+  /* var __i = 0;（§2.8 回填 i32） */
+  node_t *idx_var = create_stmt_var_node(env->out);
+  node_set_location(idx_var, loc);
+  node_set_child(idx_var,
+                 CLUX_STMT_VAR_KEYWORD,
+                 sema_render_text_node(
+                     env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
+  node_set_child(
+      idx_var, CLUX_STMT_VAR_NAME, sema_foreach_ident("__i", loc, env));
+  node_set_child(idx_var, CLUX_STMT_VAR_TYPE, NULL);
+  node_set_child(
+      idx_var,
+      CLUX_STMT_VAR_VALUE,
+      sema_render_text_node(
+          env->out, env->program, CLUX_NODE_LITERAL_NUMERIC, "0", loc));
+  node_set_child(idx_var, CLUX_STMT_VAR_EXPORT, NULL);
+  node_set_child(idx_var, CLUX_STMT_VAR_COMPTIME, NULL);
+  sema_clone_var_fixup(idx_var, env->out, env->program);
+  /* for (; __i < #len(iterable); __i = __i + 1) */
+  node_t *len = create_builtin_node(env->out);
+  node_set_location(len, loc);
+  builtin_node_set_name(
+      len,
+      sema_render_text_node(
+          env->out, env->program, CLUX_NODE_SYMBOL, "len", loc));
+  builtin_node_add_arg(len, len_iter);
+  node_t *cond = sema_foreach_binary(
+      "<", sema_foreach_ident("__i", loc, env), len, loc, env);
+  node_t *step = create_assign_node(env->out);
+  node_set_location(step, loc);
+  assign_node_set_left(step, sema_foreach_ident("__i", loc, env));
+  assign_node_set_symbol(
+      step,
+      sema_render_text_node(
+          env->out, env->program, CLUX_NODE_SYMBOL, "=", loc));
+  assign_node_set_value(
+      step,
+      sema_foreach_binary(
+          "+",
+          sema_foreach_ident("__i", loc, env),
+          sema_render_text_node(
+              env->out, env->program, CLUX_NODE_LITERAL_NUMERIC, "1", loc),
+          loc,
+          env));
+  /* 循环体：var name = iterable[__i]; <body 块>; */
+  node_t *body_block = create_stmt_block_node(env->out);
+  node_set_location(body_block, loc);
+  node_t *item_var = create_stmt_var_node(env->out);
+  node_set_location(item_var,
+                    node_get_location(stmt_foreach_node_get_name(src)));
+  node_set_child(item_var,
+                 CLUX_STMT_VAR_KEYWORD,
+                 sema_render_text_node(
+                     env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
+  node_set_child(item_var,
+                 CLUX_STMT_VAR_NAME,
+                 sema_clone_impl(stmt_foreach_node_get_name(src), env));
+  node_set_child(item_var,
+                 CLUX_STMT_VAR_TYPE,
+                 sema_clone_impl(stmt_foreach_node_get_type(src), env));
+  node_t *index = create_subscript_node(env->out);
+  node_set_location(index, loc);
+  subscript_node_set_base(index, idx_iter);
+  subscript_node_add_arg(index, sema_foreach_ident("__i", loc, env));
+  node_set_child(item_var, CLUX_STMT_VAR_VALUE, index);
+  node_set_child(item_var, CLUX_STMT_VAR_EXPORT, NULL);
+  node_set_child(item_var, CLUX_STMT_VAR_COMPTIME, NULL);
+  node_add_child(body_block, item_var);
+  node_add_child(body_block,
+                 sema_clone_impl(stmt_foreach_node_get_body(src), env));
+  /* for 槽序 INIT/CONDITION/UPDATE/BODY。 */
+  node_t *loop = create_stmt_for_node(env->out);
+  node_set_location(loop, loc);
+  node_set_child(loop, CLUX_STMT_FOR_INIT, NULL); /* __i 在块首声明 */
+  node_set_child(loop, CLUX_STMT_FOR_CONDITION, cond);
+  node_set_child(loop, CLUX_STMT_FOR_UPDATE, step);
+  node_set_child(loop, CLUX_STMT_FOR_BODY, body_block);
+  /* 外层块：{ var __i = 0; for (...); } */
+  node_t *block = create_stmt_block_node(env->out);
+  node_set_location(block, loc);
+  node_add_child(block, idx_var);
+  node_add_child(block, loop);
+  return block;
+}
+
+/* ---- §2.6 comptime foreach 展开 ----
+   ITERABLE 为 EXPR_TUPLE 字面序列（walk 已校验，不可展开已在 walk 报
+   硬错误）：循环体按元素逐份拷贝，迭代变量引用替换为元素源子树克隆
+   （文本匹配，最小版不做遮蔽分析）。 */
+static void sema_expand_comptime_foreach_into(node_t *src,
+                                              node_t *into,
+                                              sema_clone_env_t *env) {
+  node_t *iterable = stmt_foreach_node_get_iterable(src);
+  node_t *body = stmt_foreach_node_get_body(src);
+  if (!iterable || !body) {
+    return;
+  }
+  char *name = location_get(node_get_location(stmt_foreach_node_get_name(src)),
+                            env->out);
+  vec_t *elems = node_get_children(iterable);
+  size_t count = vec_get_size(elems);
+  for (size_t idx = 0; idx < count; idx++) {
+    env->subst_name = name;
+    env->subst_src = (node_t *)vec_get(elems, idx);
+    node_t *copy = sema_clone_impl(body, env);
+    env->subst_name = NULL;
+    env->subst_src = NULL;
+    if (copy) {
+      node_add_child(into, copy);
+    }
+  }
+  allocator_free(env->out, (void **)&name);
+}
+
+static node_t *sema_expand_comptime_foreach(node_t *src,
+                                            sema_clone_env_t *env) {
+  node_t *block = create_stmt_block_node(env->out);
+  node_set_location(block, node_get_location(src));
+  sema_expand_comptime_foreach_into(src, block, env);
+  return block;
+}
+
+/* §2.5 剪枝决策查询：comptime if 命中 → 选中臂（NULL=整体摘除在
+   父块语句位处理）；未命中返回 -1。 */
+static int
+sema_prune_lookup(node_t *node, sema_clone_env_t *env, sema_prune_t **out) {
+  if (!env->prunes || node_get_kind(node) != CLUX_NODE_STMT_COMPTIME_IF) {
+    return -1;
+  }
+  for (size_t idx = 0; idx < vec_get_size(env->prunes); idx++) {
+    sema_prune_t *prune = (sema_prune_t *)vec_get(env->prunes, idx);
+    if (prune->stmt == node) {
+      *out = prune;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+/* 递归主体：全部通道经 env 注入。 */
+static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
   if (!node) {
     return NULL;
   }
-  node_t *const_clone = sema_clone_const_fold(node, out, program, consts);
+  /* §2.6 展开期迭代变量替换：命中即换为当前元素源子树的克隆
+     （克隆元素期间挂起替换态，避免自引用）。 */
+  if (env->subst_name && node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER) {
+    char *text = location_get(node_get_location(node), env->out);
+    if (text) {
+      int match = strcmp(text, env->subst_name) == 0;
+      allocator_free(env->out, (void **)&text);
+      if (match) {
+        const char *saved_name = env->subst_name;
+        node_t *saved_src = env->subst_src;
+        env->subst_name = NULL;
+        env->subst_src = NULL;
+        node_t *replacement = sema_clone_impl(saved_src, env);
+        env->subst_name = saved_name;
+        env->subst_src = saved_src;
+        return replacement;
+      }
+    }
+  }
+  node_t *const_clone = sema_clone_const_fold(node, env);
   if (const_clone) {
     return const_clone;
   }
-  node_t *instant_clone = sema_clone_instant(node, out, program, instants);
+  node_t *instant_clone = sema_clone_instant(node, env);
   if (instant_clone) {
     return instant_clone;
   }
+  /* 结构改写（§2.4–2.7）：命中即返回全新形态，不落通用克隆。 */
+  node_kind_t kind = node_get_kind(node);
+  if (kind == CLUX_NODE_STMT_BLOCK) {
+    return sema_clone_block(node, env);
+  }
+  if (kind == CLUX_NODE_STMT_FOREACH) {
+    return sema_desugar_foreach(node, env);
+  }
+  if (kind == CLUX_NODE_STMT_COMPTIME_FOREACH) {
+    return sema_expand_comptime_foreach(node, env);
+  }
+  if (kind == CLUX_NODE_STMT_COMPTIME_IF) {
+    sema_prune_t *prune = NULL;
+    if (sema_prune_lookup(node, env, &prune) == 0) {
+      /* 未选臂不存在：空臂。块级语句位的摘除由 sema_clone_block 预判，
+         此处兜底返回 NULL（固定槽位场景 NULL 槽合法）。 */
+      return prune->arm ? sema_clone_impl(prune->arm, env) : NULL;
+    }
+  }
   vec_t *children = node_get_children(node);
   size_t count = vec_get_size(children);
-  if (skip && count > 0) {
+  if (env->skip && count > 0) {
     /* 块内语句逐位判重：被提升的声明语句（skip 集合）整条不进入克隆。
        skip 只在块语句位命中——提升语句只作为 stmt 出现在块中。 */
     vec_t *kept = NULL;
@@ -143,10 +565,17 @@ static node_t *sema_clone_impl(node_t *node,
       node_t *child = (node_t *)vec_get(children, idx);
       int dropped = 0;
       if (child) {
-        for (size_t s = 0; s < vec_get_size(skip); s++) {
-          if (child == (node_t *)vec_get(skip, s)) {
+        for (size_t s = 0; s < vec_get_size(env->skip); s++) {
+          if (child == (node_t *)vec_get(env->skip, s)) {
             dropped = 1;
             break;
+          }
+        }
+        /* §2.5 假臂无 else 的 comptime if：语句位整条摘除。 */
+        if (!dropped) {
+          sema_prune_t *prune = NULL;
+          if (sema_prune_lookup(child, env, &prune) == 0 && !prune->arm) {
+            dropped = 1;
           }
         }
       }
@@ -154,7 +583,7 @@ static node_t *sema_clone_impl(node_t *node,
         continue;
       }
       if (!kept) {
-        kept = create_vec(out);
+        kept = create_vec(env->out);
       }
       vec_push(kept, child);
     }
@@ -163,22 +592,22 @@ static node_t *sema_clone_impl(node_t *node,
       count = vec_get_size(kept);
     }
   }
-  node_t *clone = create_node(out, node_get_kind(node));
+  node_t *clone = create_node(env->out, node_get_kind(node));
   node_set_location(clone, node_get_location(node));
   /* 改写目标：LITERAL_IDENTIFIER（名字/类型引用）、SYMBOL（关键字，
      不会与用户声明名同文本，条件覆盖仅为统一）。 */
-  node_kind_t kind = node_get_kind(node);
   if ((kind == CLUX_NODE_SYMBOL || kind == CLUX_NODE_LITERAL_IDENTIFIER) &&
-      renames && rename_count > 0) {
+      env->renames && env->rename_count > 0) {
     const location_t *loc = node_get_location(node);
-    for (size_t idx = 0; idx < rename_count; idx++) {
-      if (!location_is(loc, renames[idx].from)) {
+    for (size_t idx = 0; idx < env->rename_count; idx++) {
+      if (!location_is(loc, env->renames[idx].from)) {
         continue;
       }
       /* 命中：文本区间改指 intern 的提升名（line/col/filename 保留
          原 SYMBOL 的值，to_json 的 text 即提升名，span 无地址）。 */
-      size_t len = strlen(renames[idx].to);
-      const char *text = program_intern_string(program, renames[idx].to, len);
+      size_t len = strlen(env->renames[idx].to);
+      const char *text =
+          program_intern_string(env->program, env->renames[idx].to, len);
       location_t renamed = *loc;
       renamed.begin.offset = text;
       renamed.end.offset = text + len;
@@ -187,33 +616,43 @@ static node_t *sema_clone_impl(node_t *node,
     }
   }
   for (size_t idx = 0; idx < count; idx++) {
-    node_t *child = sema_clone_impl((node_t *)vec_get(children, idx),
-                                    out,
-                                    program,
-                                    renames,
-                                    rename_count,
-                                    skip,
-                                    instants,
-                                    consts);
-    node_add_child(clone, child);
+    node_t *child = (node_t *)vec_get(children, idx);
+    /* §2.5：语句位 comptime if 命中剪枝 → 换克隆选中臂（drop 已在
+       kept 过滤中移除，这里只剩 arm 替换）。 */
+    sema_prune_t *prune = NULL;
+    if (child && sema_prune_lookup(child, env, &prune) == 0 && prune->arm) {
+      child = prune->arm;
+    }
+    node_add_child(clone, sema_clone_impl(child, env));
   }
   if (children != node_get_children(node)) {
     delete_vec(&children);
   }
   if (node_get_kind(node) == CLUX_NODE_STMT_VAR) {
-    sema_clone_var_fixup(clone, out, program);
+    sema_clone_var_fixup(clone, env->out, env->program);
   }
   return clone;
 }
 
-node_t *sema_clone_node_renamed(node_t *node,
-                                allocator_t *out,
-                                program_t *program,
-                                const sema_rename_t *renames,
-                                size_t rename_count,
-                                vec_t *skip,
-                                vec_t *instants,
-                                vec_t *consts) {
-  return sema_clone_impl(
-      node, out, program, renames, rename_count, skip, instants, consts);
+void sema_clone_env_init(sema_clone_env_t *env,
+                         allocator_t *out,
+                         program_t *program,
+                         vec_t *instants,
+                         vec_t *consts,
+                         vec_t *prunes) {
+  env->out = out;
+  env->program = program;
+  env->instants = instants;
+  env->consts = consts;
+  env->prunes = prunes;
+  env->renames = NULL;
+  env->rename_count = 0;
+  env->skip = NULL;
+  env->subst_name = NULL;
+  env->subst_src = NULL;
+  env->defer_counter = 0;
+}
+
+node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env) {
+  return sema_clone_impl(node, env);
 }
