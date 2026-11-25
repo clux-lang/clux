@@ -33,6 +33,7 @@
 #include "engine/struct.h"
 #include "engine/void.h"
 #include "engine/template.h"
+#include "engine/template_object.h"
 #include "engine/type_value.h"
 #include "engine/tuple.h"
 #include "engine/union.h"
@@ -45,6 +46,9 @@ struct _clux_context_t {
   rbtree_t
       *modules; /* hash(name) -> vec_t*（桶：clux_module_t*，桶内精确匹配） */
   clux_module_t *current_module; /* 借用：modules 表中的当前模块 */
+  vec_t *functions;    /* clux_function_t*：func 值头部封装对象的托管表 */
+  rbtree_t *templates; /* hash(name) -> vec_t*（桶：clux_template_t*，
+                          匿名模板 key 为 0；type/func 模板共用） */
   clux_scope_t *global_scope;
   clux_scope_t *current_scope;
   /* AST 执行器（栈帧协议入口）：engine 只透传，帧语义住执行层。 */
@@ -112,6 +116,8 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->strs = create_rbtree(allocator);
   ctx->modules = create_rbtree(allocator);
   ctx->current_module = NULL;
+  ctx->functions = create_vec(allocator);
+  ctx->templates = create_rbtree(allocator);
   ctx->global_scope = create_clux_scope(allocator, NULL);
   ctx->current_scope = ctx->global_scope;
   ctx->named_types = create_vec(allocator);
@@ -312,6 +318,17 @@ static void module_bucket_dispose(uintptr_t key, void *value, void *user_data) {
   }
   delete_vec(&bucket);
 }
+static void
+template_bucket_dispose(uintptr_t key, void *value, void *user_data) {
+  (void)key;
+  (void)user_data;
+  vec_t *bucket = value;
+  for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+    clux_template_t *template = vec_get(bucket, idx);
+    delete_clux_template(&template);
+  }
+  delete_vec(&bucket);
+}
 void delete_clux_context(clux_context_t **self) {
   if (!self || !*self) {
     return;
@@ -323,6 +340,17 @@ void delete_clux_context(clux_context_t **self) {
   rbtree_foreach(ctx->modules, module_bucket_dispose, NULL);
   delete_rbtree(&ctx->modules);
   ctx->current_module = NULL;
+  /* function 对象三指针全借用（AST 树 / modules / strs），此处只释放
+     本体；必须在 strs 驻留表销毁之前完成（name 借用它）。 */
+  for (size_t idx = 0; idx < vec_get_size(ctx->functions); idx++) {
+    clux_function_t *function = vec_get(ctx->functions, idx);
+    delete_clux_function(&function);
+  }
+  delete_vec(&ctx->functions);
+  /* template 对象与 function 同构（三指针全借用），此处只释放本体；
+     同样必须在 strs 驻留表销毁之前完成（name 借用它）。 */
+  rbtree_foreach(ctx->templates, template_bucket_dispose, NULL);
+  delete_rbtree(&ctx->templates);
   while (ctx->current_scope != ctx->global_scope) {
     clux_context_pop_scope(ctx);
   }
@@ -561,10 +589,12 @@ clux_value_t *clux_context_create_type_value(clux_context_t *self,
   return create_integer_value(
       self, self->builtin_types.type_type, &type, name, loc);
 }
-/* 模板值（type_template / func_template）：data 只存原始 AST 指针
-   （定长平点位图），参数表不驻留——每次实例化时从 AST 重新计算。
-   ast 须非空，否则返回 error。与 type value 一样经 scope define
-   进词法命名空间。 */
+/* 模板值（type_template / func_template）：data 存模板对象指针
+   （定长平点位图，大小不变）。对象封装声明 AST + 定义模块 + 名字，
+   结构对齐 clux_function_t；按名 hash 分桶托管进 templates 表
+   （匿名模板入 key 0 桶），每次创建模板值时新建。参数表不驻留——
+   每次实例化时从 AST 重新计算。ast 须非空，否则返回 error。
+   与 type value 一样经 scope define 进词法命名空间。 */
 static clux_value_t *create_template_value(clux_context_t *self,
                                            clux_type_t *type,
                                            void *ast,
@@ -574,7 +604,24 @@ static clux_value_t *create_template_value(clux_context_t *self,
     return clux_context_create_error_message(
         self, loc, "template creation requires an AST node");
   }
-  return create_integer_value(self, type, &ast, name, loc);
+  /* 名字经 strs 驻留后由模板对象借用（匿名模板传 NULL）。 */
+  const char *template_name = NULL;
+  if (name) {
+    size_t len = strlen(name);
+    char *interned = clux_context_alloc_str(self, len);
+    (void)memcpy(interned, name, len);
+    template_name = interned;
+  }
+  clux_template_t *template = create_clux_template(
+      self->allocator, ast, self->current_module, template_name);
+  uint32_t key = name ? hash_sdb(name) : 0;
+  vec_t *bucket = rbtree_find(self->templates, key);
+  if (!bucket) {
+    bucket = create_vec(self->allocator);
+    (void)rbtree_insert(self->templates, key, bucket);
+  }
+  (void)vec_push(bucket, template);
+  return create_integer_value(self, type, &template, name, loc);
 }
 clux_value_t *clux_context_create_type_template(clux_context_t *self,
                                                 void *ast,
@@ -1544,6 +1591,7 @@ clux_value_t *clux_context_create_func(clux_context_t *self,
 clux_value_t *clux_context_func_set_ast(clux_context_t *self,
                                         clux_value_t *value,
                                         void *ast,
+                                        const char *name,
                                         const location_t *loc) {
   if (!value) {
     return clux_context_create_error_message(
@@ -1563,7 +1611,18 @@ clux_value_t *clux_context_func_set_ast(clux_context_t *self,
   if (clux_value_is_shadow(value)) {
     return value;
   }
-  clux_func_set_ast(value, ast);
+  /* 名字经 strs 驻留后由 function 借用（闭包/合成函数匿名传 NULL）。 */
+  const char *function_name = NULL;
+  if (name) {
+    size_t len = strlen(name);
+    char *interned = clux_context_alloc_str(self, len);
+    (void)memcpy(interned, name, len);
+    function_name = interned;
+  }
+  clux_function_t *function = create_clux_function(
+      self->allocator, ast, self->current_module, function_name);
+  (void)vec_push(self->functions, function);
+  clux_func_set_function(value, function);
   return value;
 }
 clux_value_t *clux_context_func_capture(clux_context_t *self,
@@ -2943,7 +3002,8 @@ clux_type_t *clux_context_get_func_template_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_func_template;
 }
 /* 模板值取回原始 AST（两种模板通用）：非模板值返回 NULL。
-   实例化由上层取回 AST 后展开（对 Clux 是编译期通道）。 */
+   值头部是模板对象指针，此处解一层取 ast。实例化由上层取回 AST
+   后展开（对 Clux 是编译期通道）。 */
 void *clux_context_template_ast(clux_value_t *value) {
   if (!value) {
     return NULL;
@@ -2953,7 +3013,21 @@ void *clux_context_template_ast(clux_value_t *value) {
     return NULL;
   }
   void *raw = ptr_to_raw(clux_value_get_data(value), 0);
-  return raw ? *(void **)raw : NULL;
+  if (!raw) {
+    return NULL;
+  }
+  return clux_template_get_ast(*(clux_template_t **)raw);
+}
+clux_template_t *clux_context_template_object(clux_value_t *value) {
+  if (!value) {
+    return NULL;
+  }
+  clux_type_kind_t kind = clux_type_kind_unwrap(clux_value_get_type(value));
+  if (kind != CLUX_TYPE_TYPE_TEMPLATE && kind != CLUX_TYPE_FUNC_TEMPLATE) {
+    return NULL;
+  }
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(clux_template_t **)raw : NULL;
 }
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_error;

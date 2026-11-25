@@ -1134,7 +1134,7 @@ clux_value_t *exec_stmt_defer(clux_context_t *ctx, node_t *node) {
   if (clux_value_is_error(value)) {
     return value;
   }
-  value = clux_context_func_set_ast(ctx, value, node, loc);
+  value = clux_context_func_set_ast(ctx, value, node, NULL, loc);
   if (clux_value_is_error(value)) {
     return value;
   }

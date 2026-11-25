@@ -60,7 +60,8 @@ const clux_func_capture_t *clux_func_get_capture_table(clux_type_t *type) {
 }
 
 /* 捕获字段从类型对齐处开始平铺（各自按自身对齐取偏移）：
-   payload 偏移恒等于类型对齐值——align >= sizeof(void*) 且为 2 的幂，
+   头部（偏移 0）为 function 对象指针（context 托管），payload 偏移
+   恒等于类型对齐值——align >= sizeof(void*) 且为 2 的幂，
    round_up(sizeof(void*), align) == align。 */
 static size_t func_payload_offset(clux_type_t *type) {
   return clux_type_get_align(type);
@@ -98,16 +99,20 @@ clux_type_t *clux_func_get_return_type(clux_type_t *type) {
 
 size_t clux_func_ast_offset(void) { return 0; }
 
-void *clux_func_get_ast(clux_value_t *value) {
+clux_function_t *clux_func_get_function(clux_value_t *value) {
   void *raw = ptr_to_raw(clux_value_get_data(value), 0);
-  return raw ? *(void **)raw : NULL;
+  return raw ? *(clux_function_t **)raw : NULL;
 }
 
-void clux_func_set_ast(clux_value_t *value, void *ast) {
+void clux_func_set_function(clux_value_t *value, clux_function_t *function) {
   void *raw = ptr_to_raw(clux_value_get_data(value), 0);
   if (raw) {
-    *(void **)raw = ast;
+    *(clux_function_t **)raw = function;
   }
+}
+
+void *clux_func_get_ast(clux_value_t *value) {
+  return clux_function_get_ast(clux_func_get_function(value));
 }
 
 /* 结构相等核心：捕获表 + 参数序列 + 返回类型按声明序一一对应即相等。 */
@@ -221,8 +226,9 @@ static clux_value_t *func_invoke(clux_context_t *ctx,
       ctx, NULL, "function call has no executable environment attached");
 }
 
-/* 同类型比较：函数身份是 AST 指针，捕获环境按字段递归比较
-   （复用捕获类型 vtable 的 eq 槽位）。 */
+/* 同类型比较：函数身份是 AST 指针（function 对象只是 AST 的封装
+   视图，不参与身份——两值各自挂接同一 AST 时身份相等），捕获环境
+   按字段递归比较（复用捕获类型 vtable 的 eq 槽位）。 */
 static clux_value_t *func_compare(clux_context_t *ctx,
                                   clux_value_t *left,
                                   clux_value_t *right,
@@ -252,7 +258,7 @@ static clux_value_t *func_compare(clux_context_t *ctx,
     return clux_context_create_error_message(
         ctx, NULL, "cannot compare invalid function values");
   }
-  bool equal = *(void **)left_raw == *(void **)right_raw;
+  bool equal = clux_func_get_ast(left) == clux_func_get_ast(right);
   if (equal) {
     clux_func_meta_t *meta = func_meta(type);
     for (size_t idx = 0; idx < meta->capture_count; idx++) {

@@ -16,6 +16,7 @@
 #include "engine/type.h"
 #include "engine/tuple.h"
 #include "engine/template.h"
+#include "engine/template_object.h"
 #include "engine/type_value.h"
 #include "engine/union.h"
 #include "engine/value.h"
@@ -5598,7 +5599,7 @@ TEST(EngineTest, FuncTypeInvokeAndCaptures) {
   ASSERT_NE(f, nullptr);
   EXPECT_EQ(clux_value_get_type(f), func_type);
   EXPECT_EQ(clux_func_get_ast(f), nullptr);
-  EXPECT_EQ(clux_context_func_set_ast(ctx, f, &dummy_body, NULL), f);
+  EXPECT_EQ(clux_context_func_set_ast(ctx, f, &dummy_body, "f", NULL), f);
   EXPECT_EQ(clux_func_get_ast(f), &dummy_body);
 
   /* 捕获读取：独立 API 返回双向 view，写穿 view */
@@ -5669,8 +5670,9 @@ TEST(EngineTest, FuncTypeInvokeAndCaptures) {
   ASSERT_NE(shadow_call, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_call));
   EXPECT_EQ(clux_value_get_type(shadow_call), i32_type);
-  EXPECT_EQ(clux_context_func_set_ast(ctx, shadow_func, &dummy_body, NULL),
-            shadow_func);
+  EXPECT_EQ(
+      clux_context_func_set_ast(ctx, shadow_func, &dummy_body, NULL, NULL),
+      shadow_func);
 
   /* 非 func 类型的兜底报错 */
   clux_value_t *plain = clux_context_create_i32(ctx, 1, NULL, NULL);
@@ -5684,7 +5686,7 @@ TEST(EngineTest, FuncTypeInvokeAndCaptures) {
   EXPECT_STREQ(error_message_of(bad_capture),
                "capture access requires a func value, got 'i32'");
   clux_value_t *bad_ast =
-      clux_context_func_set_ast(ctx, plain, &dummy_body, NULL);
+      clux_context_func_set_ast(ctx, plain, &dummy_body, NULL, NULL);
   ASSERT_NE(bad_ast, nullptr);
   EXPECT_STREQ(error_message_of(bad_ast),
                "setting a function body requires a func value, got 'i32'");
@@ -5697,7 +5699,7 @@ TEST(EngineTest, FuncTypeInvokeAndCaptures) {
   clux_value_t *g = clux_context_create_func(ctx, func_type, "g", NULL);
   ASSERT_NE(g, nullptr);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, f, g, NULL)));
-  EXPECT_EQ(clux_context_func_set_ast(ctx, g, &dummy_body, NULL), g);
+  EXPECT_EQ(clux_context_func_set_ast(ctx, g, &dummy_body, "g", NULL), g);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, f, g, NULL)));
   clux_value_t *g_cap_a = clux_context_func_capture(ctx, g, "a", NULL);
   EXPECT_EQ(clux_context_assign(ctx, g_cap_a, five, NULL), g_cap_a);
@@ -5914,7 +5916,8 @@ TEST(EngineTest, StructAttributesMethodsSubtypes) {
   clux_value_t *scale =
       clux_context_create_func(ctx, method_fn_type, "scale", NULL);
   ASSERT_NE(scale, nullptr);
-  ASSERT_EQ(clux_context_func_set_ast(ctx, scale, &dummy_body, NULL), scale);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, scale, &dummy_body, NULL, NULL),
+            scale);
   /* 静态变量 attr（var count: i32 = 0） */
   clux_value_t *count = clux_context_create_i32(ctx, 0, "count", NULL);
   ASSERT_NE(count, nullptr);
@@ -6516,7 +6519,7 @@ TEST(EngineTest, TemplateValueWrapsAst) {
   EXPECT_EQ(fvt->eq, nullptr);
   EXPECT_EQ(fvt->safe_cast, nullptr);
 
-  /* 模板值：data 只存 AST 指针，ast 非空是硬约束 */
+  /* 模板值：data 存模板对象指针（解一层才是 AST），ast 非空是硬约束 */
   int fake_ast = 0;
   void *ast = &fake_ast;
   clux_value_t *tt = clux_context_create_type_template(ctx, ast, "Box", NULL);
@@ -6524,7 +6527,10 @@ TEST(EngineTest, TemplateValueWrapsAst) {
   EXPECT_EQ(clux_value_get_type(tt), type_tmpl);
   void *raw = ptr_to_raw(clux_value_get_data(tt), 0);
   ASSERT_NE(raw, nullptr);
-  EXPECT_EQ(*(void **)raw, ast);
+  clux_template_t *tt_obj = clux_context_template_object(tt);
+  ASSERT_NE(tt_obj, nullptr);
+  EXPECT_EQ(*(void **)raw, tt_obj);
+  EXPECT_EQ(clux_template_get_ast(tt_obj), ast);
   clux_value_t *ft = clux_context_create_func_template(ctx, ast, "pick", NULL);
   ASSERT_NE(ft, nullptr);
   EXPECT_EQ(clux_value_get_type(ft), func_tmpl);
@@ -6535,10 +6541,13 @@ TEST(EngineTest, TemplateValueWrapsAst) {
   clux_value_t *shadow_tmpl = clux_context_create_shadow_value(ctx, type_tmpl);
   ASSERT_NE(shadow_tmpl, nullptr);
   EXPECT_EQ(clux_context_template_ast(shadow_tmpl), nullptr);
+  EXPECT_EQ(clux_context_template_object(shadow_tmpl), nullptr);
   clux_value_t *not_template = clux_context_create_i32(ctx, 1, NULL, NULL);
   ASSERT_NE(not_template, nullptr);
   EXPECT_EQ(clux_context_template_ast(not_template), nullptr);
+  EXPECT_EQ(clux_context_template_object(not_template), nullptr);
   EXPECT_EQ(clux_context_template_ast(nullptr), nullptr);
+  EXPECT_EQ(clux_context_template_object(nullptr), nullptr);
 
   /* ast 为空返回 error；两种模板共用词法命名空间（同层重名拒绝） */
   clux_value_t *bad = clux_context_create_type_template(ctx, NULL, "Bad", NULL);
@@ -6685,8 +6694,9 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(func_type, nullptr);
   clux_value_t *func = clux_context_create_func(ctx, func_type, NULL, NULL);
   ASSERT_NE(func, nullptr);
-  ASSERT_NE(clux_context_func_set_ast(ctx, func, (void *)&func_type, NULL),
-            nullptr);
+  ASSERT_NE(
+      clux_context_func_set_ast(ctx, func, (void *)&func_type, NULL, NULL),
+      nullptr);
   ASSERT_NE(clux_context_func_capture(ctx, func, "a", NULL), nullptr);
   ASSERT_NE(clux_context_func_capture(ctx, func, "x", NULL), nullptr);
   clux_value_t *func_args[] = {left, left};
@@ -7528,7 +7538,7 @@ TEST(EngineTest, ExecutorInstallAndDispatch) {
 
   /* 挂 AST 后 invoke 回调执行器：ast 指针与 argc 透传，返回执行器结果 */
   static int dummy_body;
-  ASSERT_EQ(clux_context_func_set_ast(ctx, f, &dummy_body, NULL), f);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, f, &dummy_body, NULL, NULL), f);
   clux_value_t *called = clux_context_invoke(ctx, f, 1, &arg, NULL);
   ASSERT_NE(called, nullptr);
   EXPECT_EQ(g_executor_calls, 1);
@@ -7542,7 +7552,7 @@ TEST(EngineTest, ExecutorInstallAndDispatch) {
   clux_type_t *void_fn_type =
       clux_context_create_func_type(ctx, "V", NULL, 0, NULL, 0, i32_type);
   clux_value_t *v = clux_context_create_func(ctx, void_fn_type, "v", NULL);
-  ASSERT_EQ(clux_context_func_set_ast(ctx, v, &dummy_body, NULL), v);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, v, &dummy_body, NULL, NULL), v);
   clux_value_t *called0 = clux_context_invoke(ctx, v, 0, NULL, NULL);
   ASSERT_NE(called0, nullptr);
   EXPECT_EQ(g_executor_calls, 2);
@@ -8480,6 +8490,112 @@ TEST(EngineTest, ModuleNodePayloadOwnedByModule) {
   node_t *second = create_node(a, CLUX_NODE_PROGRAM);
   EXPECT_EQ(clux_context_create_module(ctx, "with_ast", second), nullptr);
   delete_node(&second);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* function 对象：func 值头部的封装层（ast/module/name 三借用指针）。
+   set_ast 挂接时按当下 current_module 创建并托管进 context，未挂接的
+   零值 function 指针为 NULL。 */
+TEST(EngineTest, FunctionObjectEncodesAstModuleAndName) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_type_t *i32 = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+  clux_type_t *type =
+      clux_context_create_func_type(ctx, "f", NULL, 0, NULL, 0, i32);
+
+  /* 零值：未挂接函数体，function 指针与 ast 均为 NULL。 */
+  clux_value_t *f = clux_context_create_func(ctx, type, "f", NULL);
+  ASSERT_NE(f, nullptr);
+  EXPECT_EQ(clux_func_get_function(f), nullptr);
+  EXPECT_EQ(clux_func_get_ast(f), nullptr);
+
+  /* 模块内挂接：module/name 取自 set_ast 时点（name 经 strs 驻留）。 */
+  clux_module_t *m = clux_context_create_module(ctx, "m", NULL);
+  ASSERT_NE(m, nullptr);
+  clux_context_set_current_module(ctx, m);
+  static int body;
+  EXPECT_EQ(clux_context_func_set_ast(ctx, f, &body, "f", NULL), f);
+  clux_function_t *fn = clux_func_get_function(f);
+  ASSERT_NE(fn, nullptr);
+  EXPECT_EQ(clux_function_get_ast(fn), &body);
+  EXPECT_EQ(clux_function_get_module(fn), m);
+  EXPECT_STREQ(clux_function_get_name(fn), "f");
+  EXPECT_EQ(clux_func_get_ast(f), &body);
+  EXPECT_TRUE(clux_module_declare(m, "f", true));
+
+  /* 离开模块后挂接的函数属 global（module NULL），匿名 name NULL 合法。 */
+  clux_context_set_current_module(ctx, NULL);
+  clux_value_t *anon = clux_context_create_func(ctx, type, NULL, NULL);
+  ASSERT_NE(anon, nullptr);
+  EXPECT_EQ(clux_context_func_set_ast(ctx, anon, &body, NULL, NULL), anon);
+  clux_function_t *anon_fn = clux_func_get_function(anon);
+  ASSERT_NE(anon_fn, nullptr);
+  EXPECT_EQ(clux_function_get_module(anon_fn), nullptr);
+  EXPECT_EQ(clux_function_get_name(anon_fn), nullptr);
+
+  /* assign/clone 拷贝头部指针：两值共享同一 function 对象（借用）。 */
+  clux_value_t *g = clux_context_create_func(ctx, type, "g", NULL);
+  ASSERT_NE(g, nullptr);
+  EXPECT_EQ(clux_context_func_set_ast(ctx, g, &body, "g", NULL), g);
+  EXPECT_EQ(clux_func_get_function(clux_context_assign(ctx, g, f, NULL)),
+            clux_func_get_function(f));
+  EXPECT_EQ(clux_func_get_function(clux_context_clone(ctx, f, NULL)),
+            clux_func_get_function(f));
+
+  /* 每次挂接新建 function 对象：同 ast 两值不共享对象，但函数身份
+     （AST）相等——eq 比较解一层比 ast，捕获一致即相等。 */
+  EXPECT_NE(clux_func_get_function(f), clux_func_get_function(anon));
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, f, anon, NULL)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, TemplateObjectEncodesAstModuleAndName) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  static int decl;
+  clux_module_t *m = clux_context_create_module(ctx, "m", NULL);
+  ASSERT_NE(m, nullptr);
+
+  /* 模块内创建：module 取创建时点的 current_module，name 驻留后借用。 */
+  clux_context_set_current_module(ctx, m);
+  clux_value_t *tt = clux_context_create_type_template(ctx, &decl, "Box", NULL);
+  ASSERT_NE(tt, nullptr);
+  clux_template_t *tt_obj = clux_context_template_object(tt);
+  ASSERT_NE(tt_obj, nullptr);
+  EXPECT_EQ(clux_template_get_ast(tt_obj), &decl);
+  EXPECT_EQ(clux_template_get_module(tt_obj), m);
+  EXPECT_STREQ(clux_template_get_name(tt_obj), "Box");
+  EXPECT_EQ(clux_context_template_ast(tt), &decl);
+
+  /* 离开模块后的匿名 func 模板：module NULL、name NULL，入 key 0 桶。 */
+  clux_context_set_current_module(ctx, NULL);
+  clux_value_t *anon_ft =
+      clux_context_create_func_template(ctx, &decl, NULL, NULL);
+  ASSERT_NE(anon_ft, nullptr);
+  clux_template_t *anon_obj = clux_context_template_object(anon_ft);
+  ASSERT_NE(anon_obj, nullptr);
+  EXPECT_EQ(clux_template_get_ast(anon_obj), &decl);
+  EXPECT_EQ(clux_template_get_module(anon_obj), nullptr);
+  EXPECT_EQ(clux_template_get_name(anon_obj), nullptr);
+  EXPECT_EQ(clux_context_template_ast(anon_ft), &decl);
+
+  /* 零值防御：getter 对 NULL 对象返回 NULL。 */
+  EXPECT_EQ(clux_template_get_ast(nullptr), nullptr);
+  EXPECT_EQ(clux_template_get_module(nullptr), nullptr);
+  EXPECT_EQ(clux_template_get_name(nullptr), nullptr);
+  EXPECT_EQ(create_clux_template(nullptr, &decl, NULL, NULL), nullptr);
+
+  /* 同名同 ast 再建：注册表不判重（词法层已拒绝），每次新建对象。 */
+  clux_value_t *again =
+      clux_context_create_type_template(ctx, &decl, "Box2", NULL);
+  ASSERT_NE(again, nullptr);
+  EXPECT_NE(clux_context_template_object(again), tt_obj);
+  EXPECT_EQ(clux_context_template_ast(again), &decl);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

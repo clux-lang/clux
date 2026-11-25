@@ -11,6 +11,8 @@ typedef struct _clux_vtable_t clux_vtable_t;
 typedef struct _clux_type_t clux_type_t;
 typedef struct _clux_scope_t clux_scope_t;
 typedef struct _clux_module_t clux_module_t;
+typedef struct _clux_function_t clux_function_t;
+typedef struct _clux_template_t clux_template_t;
 typedef enum _clux_binary_op_t {
   CLUX_OP_ADD,
   CLUX_OP_SUB,

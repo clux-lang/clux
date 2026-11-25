@@ -150,9 +150,11 @@ clux_value_t *clux_context_create_type_value(clux_context_t *self,
                                              clux_type_t *type,
                                              const char *name,
                                              const location_t *loc);
-/* 模板值（type_template / func_template）：模板不是类型，是值——data 只存
-   原始 AST 指针，参数表每次实例化时从 AST 重新计算。ast 须非空，否则
-   返回 error。模板值经 scope define 进词法命名空间（与变量/类型共用，
+/* 模板值（type_template / func_template）：模板不是类型，是值——data 存
+   模板对象指针（封装声明 AST + 定义模块 + 名字，结构对齐 clux_function_t），
+   参数表每次实例化时从 AST 重新计算。对象本体归 context 的模板注册表
+   （rbtree 按名 hash 分桶，匿名入 key 0 桶）。ast 须非空，否则返回
+   error。模板值经 scope define 进词法命名空间（与变量/类型共用，
    遮罩规则自然生效）。 */
 clux_value_t *clux_context_create_type_template(clux_context_t *self,
                                                 void *ast,
@@ -164,6 +166,9 @@ clux_value_t *clux_context_create_func_template(clux_context_t *self,
                                                 const location_t *loc);
 /* 模板值取回原始 AST（两种模板通用）：非模板值返回 NULL。 */
 void *clux_context_template_ast(clux_value_t *value);
+/* 模板值取回封装对象（借用，两种模板通用）：非模板值返回 NULL。
+   对象承载 ast/module/name 三借用，本体归 context 的模板注册表。 */
+clux_template_t *clux_context_template_object(clux_value_t *value);
 char *clux_context_alloc_str(clux_context_t *self, size_t len);
 clux_value_t *clux_context_create_str(clux_context_t *self,
                                       const char *value,
@@ -387,11 +392,14 @@ clux_value_t *clux_context_create_func(clux_context_t *self,
                                        clux_type_t *type,
                                        const char *name,
                                        const location_t *loc);
-/* 挂接函数体 AST 指针（借用，不拥有）：返回原值；非 func 返回语义化
-   error，shadow 值原样返回（无数据可变）。 */
+/* 挂接函数体：创建 function 对象（ast 借用 + 当下 current_module 借用 +
+   name 经 strs 驻留后借用，闭包/合成函数可传 NULL）托管进 functions
+   向量，func 值头部写入该对象指针（值大小不变）。返回原值；非 func
+   返回语义化 error，shadow 值原样返回（无数据可变）。 */
 clux_value_t *clux_context_func_set_ast(clux_context_t *self,
                                         clux_value_t *value,
                                         void *ast,
+                                        const char *name,
                                         const location_t *loc);
 /* 捕获读取（f.capture）：func 捕获走独立 API（不占 field 槽位语义），
    返回捕获类型的读写双向 view（内存共享、携带引用属性），写入由通用

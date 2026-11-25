@@ -5970,7 +5970,7 @@ TEST_F(ExecLiteralTest, CallRejectsNonFuncDeclAst) {
   ASSERT_NE(func, nullptr);
 
   node_t *bogus = make_node(CLUX_NODE_STMT_BLOCK, "{}");
-  EXPECT_EQ(clux_context_func_set_ast(ctx, func, bogus, NULL), func);
+  EXPECT_EQ(clux_context_func_set_ast(ctx, func, bogus, NULL, NULL), func);
   node_t *arg = make_node(CLUX_NODE_LITERAL_NUMERIC, "1");
   node_t *call =
       make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "kaf"), 1, &arg);
@@ -7718,7 +7718,7 @@ TEST_F(ExecLiteralTest, StmtUnionDecoratorWrapsTypeValueEndToEnd) {
   clux_value_t *wrap_func =
       clux_context_create_func(ctx, wrap_type, NULL, NULL);
   ASSERT_NE(wrap_func, nullptr);
-  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL, NULL),
             wrap_func);
   clux_value_t *wrap_bound = clux_context_declare_value(
       ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
@@ -8405,7 +8405,7 @@ TEST_F(ExecLiteralTest, StmtEnumDecoratorWrapsTypeValueEndToEnd) {
   clux_value_t *wrap_func =
       clux_context_create_func(ctx, wrap_type, NULL, NULL);
   ASSERT_NE(wrap_func, nullptr);
-  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL, NULL),
             wrap_func);
   clux_value_t *wrap_bound = clux_context_declare_value(
       ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
@@ -10992,7 +10992,7 @@ TEST_F(ExecLiteralTest, InterfaceStmtFuncDecoratorWrapsEndToEnd) {
   clux_value_t *wrap_func =
       clux_context_create_func(ctx, wrap_type, NULL, NULL);
   ASSERT_NE(wrap_func, nullptr);
-  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL, NULL),
             wrap_func);
   clux_value_t *wrap_bound = clux_context_declare_value(
       ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
@@ -13767,7 +13767,7 @@ TEST_F(ExecLiteralTest, StructStmtDecoratorChainWrapsAndDeclaresByName) {
   clux_value_t *wrap_func =
       clux_context_create_func(ctx, wrap_type, NULL, NULL);
   ASSERT_NE(wrap_func, nullptr);
-  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL, NULL),
             wrap_func);
   clux_value_t *wrap_bound = clux_context_declare_value(
       ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));
@@ -15023,7 +15023,7 @@ TEST_F(ExecLiteralTest, BitfieldStmtDecoratorWrapsTypeValueEndToEnd) {
   clux_value_t *wrap_func =
       clux_context_create_func(ctx, wrap_type, NULL, NULL);
   ASSERT_NE(wrap_func, nullptr);
-  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL),
+  ASSERT_EQ(clux_context_func_set_ast(ctx, wrap_func, wrap_decl, NULL, NULL),
             wrap_func);
   clux_value_t *wrap_bound = clux_context_declare_value(
       ctx, wrap_func, "wrap_t", node_get_location(wrap_decl));

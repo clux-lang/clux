@@ -986,11 +986,15 @@ static clux_value_t *exec_func_decl_impl(clux_context_t *ctx,
      需读到 PARAMS 槽。 */
   clux_value_t *value =
       clux_context_create_func(ctx, type, declare_named ? name : NULL, loc);
-  allocator_free(allocator, (void **)&name);
   if (clux_value_is_error(value)) {
+    allocator_free(allocator, (void **)&name);
     return value;
   }
-  value = clux_context_func_set_ast(ctx, value, node, loc);
+  /* 挂接函数体：名字与值命名同源（匿名闭包传 NULL），context 内部
+     驻留后由 function 对象借用。 */
+  value = clux_context_func_set_ast(
+      ctx, value, node, declare_named ? name : NULL, loc);
+  allocator_free(allocator, (void **)&name);
   if (clux_value_is_error(value)) {
     return value;
   }
