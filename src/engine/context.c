@@ -2,6 +2,7 @@
 #include "engine/array.h"
 #include "core/allocator.h"
 #include "core/error.h"
+#include "core/hash.h"
 #include "core/location.h"
 #include "core/rbtree.h"
 #include "core/safe_alloc.h"
@@ -41,6 +42,9 @@ struct _clux_context_t {
   safe_allocator_t *safe_allocator;
   vec_t *errors;
   rbtree_t *strs;
+  rbtree_t
+      *modules; /* hash(name) -> vec_t*（桶：clux_module_t*，桶内精确匹配） */
+  clux_module_t *current_module; /* 借用：modules 表中的当前模块 */
   clux_scope_t *global_scope;
   clux_scope_t *current_scope;
   /* AST 执行器（栈帧协议入口）：engine 只透传，帧语义住执行层。 */
@@ -106,6 +110,8 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->safe_allocator = create_safe_allocator(allocator);
   ctx->errors = create_vec(allocator);
   ctx->strs = create_rbtree(allocator);
+  ctx->modules = create_rbtree(allocator);
+  ctx->current_module = NULL;
   ctx->global_scope = create_clux_scope(allocator, NULL);
   ctx->current_scope = ctx->global_scope;
   ctx->named_types = create_vec(allocator);
@@ -296,11 +302,27 @@ static void strs_dispose(uintptr_t key, char *str, allocator_t *allocator) {
   (void)key;
   allocator_free(allocator, (void **)&str);
 }
+static void module_bucket_dispose(uintptr_t key, void *value, void *user_data) {
+  (void)key;
+  (void)user_data;
+  vec_t *bucket = value;
+  for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+    clux_module_t *module = vec_get(bucket, idx);
+    delete_clux_module(&module);
+  }
+  delete_vec(&bucket);
+}
 void delete_clux_context(clux_context_t **self) {
   if (!self || !*self) {
     return;
   }
   clux_context_t *ctx = *self;
+  /* 先销毁模块表（module 不创建/销毁 scope，借用无碍）；模块作用域
+     仍挂在 global 的 children 上，随 scope 树递归销毁。current_module
+     必须先清，否则模块内的 pop 守卫会让下面的 while 循环卡死。 */
+  rbtree_foreach(ctx->modules, module_bucket_dispose, NULL);
+  delete_rbtree(&ctx->modules);
+  ctx->current_module = NULL;
   while (ctx->current_scope != ctx->global_scope) {
     clux_context_pop_scope(ctx);
   }
@@ -2410,6 +2432,12 @@ void clux_context_pop_scope(clux_context_t *self) {
   if (!self || self->current_scope == self->global_scope) {
     return;
   }
+  /* 模块边界守卫：模块作用域归 scope 树持久持有（module 借用），
+     pop 不越过——离开模块走 set_current_module(NULL)。 */
+  if (self->current_module &&
+      self->current_scope == clux_module_get_scope(self->current_module)) {
+    return;
+  }
   clux_scope_t *parent = clux_scope_get_parent(self->current_scope);
   delete_clux_scope(&self->current_scope);
   self->current_scope = parent;
@@ -2425,6 +2453,69 @@ clux_scope_t *clux_context_swap_scope(clux_context_t *self,
   clux_scope_t *previous = self->current_scope;
   self->current_scope = target;
   return previous;
+}
+static bool module_bucket_contains(vec_t *bucket, const char *name) {
+  for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+    clux_module_t *module = vec_get(bucket, idx);
+    if (strcmp(clux_module_get_name(module), name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+clux_module_t *clux_context_create_module(clux_context_t *self,
+                                          const char *name,
+                                          node_t *node) {
+  if (!self || !name) {
+    return NULL;
+  }
+  uint32_t key = hash_sdb(name);
+  vec_t *bucket = rbtree_find(self->modules, key);
+  if (!bucket) {
+    bucket = create_vec(self->allocator);
+    rbtree_insert(self->modules, key, bucket);
+  } else if (module_bucket_contains(bucket, name)) {
+    /* 重名：先注册者保留，本次创建失败（不产生半成品）。 */
+    return NULL;
+  }
+  /* 模块作用域挂 global 之下：查找链 current ... -> module->scope ->
+     global 由 parent 链天然成立；生命周期归 scope 树，module 借用。 */
+  clux_scope_t *scope = create_clux_scope(self->allocator, self->global_scope);
+  clux_module_t *module =
+      create_clux_module(self->allocator, name, node, scope);
+  vec_push(bucket, module);
+  return module;
+}
+clux_module_t *clux_context_get_module(clux_context_t *self, const char *name) {
+  if (!self || !name) {
+    return NULL;
+  }
+  vec_t *bucket = rbtree_find(self->modules, hash_sdb(name));
+  if (!bucket) {
+    return NULL;
+  }
+  for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+    clux_module_t *module = vec_get(bucket, idx);
+    if (strcmp(clux_module_get_name(module), name) == 0) {
+      return module;
+    }
+  }
+  return NULL;
+}
+clux_module_t *clux_context_get_current_module(clux_context_t *self) {
+  return self ? self->current_module : NULL;
+}
+void clux_context_set_current_module(clux_context_t *self,
+                                     clux_module_t *module) {
+  if (!self) {
+    return;
+  }
+  self->current_module = module;
+  /* 进入模块：current 切到模块作用域（模块级名字落于此）；
+     离开模块（NULL）：恢复 global。模块内未平衡的子作用域
+     仍挂在 scope 树上，随树销毁，无泄漏。 */
+  self->current_scope =
+      module ? clux_module_get_scope(module) : self->global_scope;
 }
 clux_value_t *clux_context_declare_value(clux_context_t *self,
                                          clux_value_t *value,

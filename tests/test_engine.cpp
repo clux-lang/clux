@@ -4,6 +4,7 @@
 #include "core/safe_alloc.h"
 #include "engine/array.h"
 #include "engine/context.h"
+#include "engine/error.h"
 #include "engine/func.h"
 #include "engine/integer.h"
 #include "engine/interface.h"
@@ -8297,6 +8298,188 @@ TEST(EngineTest, PtrOverVoidSealedAndValueCreatable) {
   clux_value_t *value = clux_context_create_ptr(ctx, ptr_type, 0, NULL, NULL);
   ASSERT_NE(value, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_PTR);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- 模块接入（白皮书 §8）：注册表 + 当前模块 + 作用域链 ---- */
+
+/* 注册/查找往返：按名注册、按名取回、未注册返回 NULL、
+   初始无当前模块。 */
+TEST(EngineTest, ModuleCreateRegisterAndLookup) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  EXPECT_EQ(clux_context_get_current_module(ctx), nullptr)
+      << "fresh context has no current module";
+
+  clux_module_t *m1 = clux_context_create_module(ctx, "m1", NULL);
+  ASSERT_NE(m1, nullptr);
+  clux_module_t *m2 = clux_context_create_module(ctx, "m2", NULL);
+  ASSERT_NE(m2, nullptr);
+
+  EXPECT_EQ(clux_context_get_module(ctx, "m1"), m1);
+  EXPECT_EQ(clux_context_get_module(ctx, "m2"), m2);
+  EXPECT_STREQ(clux_module_get_name(m1), "m1");
+  EXPECT_EQ(clux_context_get_module(ctx, "nope"), nullptr)
+      << "unregistered name must not resolve";
+  EXPECT_EQ(clux_module_get_name(NULL), nullptr)
+      << "NULL module accessor degrades to NULL";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 重名注册：返回 NULL 且不产生半成品，先注册者保留。 */
+TEST(EngineTest, ModuleCreateDuplicateNameRejected) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_module_t *first = clux_context_create_module(ctx, "dup", NULL);
+  ASSERT_NE(first, nullptr);
+  clux_module_t *second = clux_context_create_module(ctx, "dup", NULL);
+  EXPECT_EQ(second, nullptr) << "duplicate registration must fail";
+  EXPECT_EQ(clux_context_get_module(ctx, "dup"), first)
+      << "first registration survives";
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 名字登记：globals 收全部、exports 只收导出子集，重复登记拒绝；
+   模块作用域挂 global 之下（parent 链）。 */
+TEST(EngineTest, ModuleDeclareNamesAndExports) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_module_t *m = clux_context_create_module(ctx, "m", NULL);
+  ASSERT_NE(m, nullptr);
+
+  EXPECT_TRUE(clux_module_declare(m, "public_fn", true));
+  EXPECT_TRUE(clux_module_declare(m, "private_var", false));
+  EXPECT_FALSE(clux_module_declare(m, "public_fn", true))
+      << "duplicate declaration must be rejected";
+
+  vec_t *globals = clux_module_get_globals(m);
+  vec_t *exports = clux_module_get_exports(m);
+  ASSERT_EQ(vec_get_size(globals), 2);
+  ASSERT_EQ(vec_get_size(exports), 1);
+  EXPECT_STREQ((const char *)vec_get(exports, 0), "public_fn");
+
+  clux_scope_t *scope = clux_module_get_scope(m);
+  ASSERT_NE(scope, nullptr);
+  EXPECT_EQ(clux_scope_get_parent(scope), clux_context_get_global_scope(ctx))
+      << "module scope must chain to global";
+
+  EXPECT_EQ(clux_module_get_scope(NULL), nullptr);
+  EXPECT_EQ(clux_module_get_globals(NULL), nullptr);
+  EXPECT_EQ(clux_module_get_exports(NULL), nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 作用域链语义：进入模块后 current 切到模块作用域；模块级名字
+   落模块作用域，模块内沿链可见；离开模块后模块名从 global 不可见；
+   global 名字在模块内沿链可见。 */
+TEST(EngineTest, ModuleScopeChainCurrentToGlobal) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  /* global 名字：模块内沿 parent 链可见。 */
+  clux_value_t *g_val = clux_context_create_i32(ctx, 7, NULL, NULL);
+  ASSERT_EQ(clux_context_declare_value(ctx, g_val, "shared", NULL), g_val)
+      << "successful naming returns the named value itself";
+
+  clux_module_t *m = clux_context_create_module(ctx, "m", NULL);
+  ASSERT_NE(m, nullptr);
+  clux_context_set_current_module(ctx, m);
+  EXPECT_EQ(clux_context_get_current_module(ctx), m);
+  EXPECT_EQ(clux_context_get_scope(ctx), clux_module_get_scope(m))
+      << "entering a module switches current to its scope";
+
+  /* 模块级名字落于模块作用域。 */
+  clux_value_t *m_val = clux_context_create_i32(ctx, 9, NULL, NULL);
+  ASSERT_EQ(clux_context_declare_value(ctx, m_val, "only_in_module", NULL),
+            m_val)
+      << "successful naming returns the named value itself";
+  clux_value_t *hit = clux_context_lookup(ctx, "only_in_module", NULL);
+  ASSERT_NE(hit, nullptr);
+  EXPECT_EQ(read_i32(hit), 9);
+  EXPECT_EQ(clux_scope_get(clux_context_get_scope(ctx), "only_in_module"),
+            m_val)
+      << "module-level name lives in the module scope";
+
+  /* global 名字沿链可见。 */
+  clux_value_t *via_chain = clux_context_lookup(ctx, "shared", NULL);
+  ASSERT_NE(via_chain, nullptr);
+  EXPECT_EQ(read_i32(via_chain), 7);
+
+  /* 离开模块：current 恢复 global，模块名不再可见。 */
+  clux_context_set_current_module(ctx, NULL);
+  EXPECT_EQ(clux_context_get_scope(ctx), clux_context_get_global_scope(ctx));
+  clux_value_t *gone = clux_context_lookup(ctx, "only_in_module", NULL);
+  ASSERT_NE(gone, nullptr);
+  EXPECT_TRUE(clux_value_is_error(gone))
+      << "module-local name must not resolve after leaving the module";
+  clux_value_t *kept = clux_context_lookup(ctx, "shared", NULL);
+  ASSERT_NE(kept, nullptr);
+  EXPECT_EQ(read_i32(kept), 7);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* pop 守卫：pop 不越过模块作用域——模块边界由 set_current_module
+   守护；模块内 push/pop 正常平衡。 */
+TEST(EngineTest, ModulePopScopeGuardedAtBoundary) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_module_t *m = clux_context_create_module(ctx, "m", NULL);
+  ASSERT_NE(m, nullptr);
+  clux_context_set_current_module(ctx, m);
+  clux_scope_t *module_scope = clux_module_get_scope(m);
+
+  /* 模块内嵌套作用域正常 push/pop。 */
+  clux_context_push_scope(ctx);
+  clux_context_push_scope(ctx);
+  clux_context_pop_scope(ctx);
+  clux_context_pop_scope(ctx);
+  EXPECT_EQ(clux_context_get_scope(ctx), module_scope);
+
+  /* 边界处 pop 被拒：current 停留模块作用域。 */
+  clux_context_pop_scope(ctx);
+  EXPECT_EQ(clux_context_get_scope(ctx), module_scope)
+      << "pop must not cross the module boundary";
+
+  /* 离开模块后 pop 恢复 global 行为。 */
+  clux_context_set_current_module(ctx, NULL);
+  clux_context_pop_scope(ctx);
+  EXPECT_EQ(clux_context_get_scope(ctx), clux_context_get_global_scope(ctx));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 带 AST 载荷的模块：node 所有权归 module，context 析构连带释放；
+   NULL node 同样合法。AST 双父挂接是既定约束（节点归 module 所有），
+   此处仅覆盖通路。 */
+TEST(EngineTest, ModuleNodePayloadOwnedByModule) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  node_t *node = create_node(a, CLUX_NODE_PROGRAM);
+  clux_module_t *m = clux_context_create_module(ctx, "with_ast", node);
+  ASSERT_NE(m, nullptr);
+  clux_module_t *bare = clux_context_create_module(ctx, "bare", NULL);
+  ASSERT_NE(bare, nullptr);
+
+  /* 重复名注册失败不得半途接管 node（node 归首个成功注册者）。 */
+  node_t *second = create_node(a, CLUX_NODE_PROGRAM);
+  EXPECT_EQ(clux_context_create_module(ctx, "with_ast", second), nullptr);
+  delete_node(&second);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

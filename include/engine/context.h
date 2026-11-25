@@ -10,6 +10,7 @@
 #include "engine/func.h"
 #include "engine/interface.h"
 #include "engine/interface_type.h"
+#include "engine/module.h"
 #include "engine/struct.h"
 #include "engine/union.h"
 #include <stdbool.h>
@@ -38,6 +39,26 @@ clux_scope_t *clux_context_get_global_scope(clux_context_t *self);
    引擎不提供帧的建立/销毁语义（帧就是 scope，生命周期归执行层）。 */
 clux_scope_t *clux_context_swap_scope(clux_context_t *self,
                                       clux_scope_t *target);
+/* ---- 模块（白皮书 §8）----
+   context 维护模块表（按名注册，hash 桶 + 精确匹配）与当前模块。
+   运行时作用域链：current ... -> module->scope -> global——模块作用域
+   由 create 时创建并挂 global 之下，生命周期归 scope 树，module 借用。
+   按名注册，重名返回 NULL（先注册者保留）。node 为模块 AST 载荷
+   （所有权归 module），可为 NULL。 */
+clux_module_t *clux_context_create_module(clux_context_t *self,
+                                          const char *name,
+                                          /* 可为 NULL */ node_t *node);
+/* 按名查找模块，未注册返回 NULL。 */
+clux_module_t *clux_context_get_module(clux_context_t *self, const char *name);
+/* 当前模块（借用）；无当前模块返回 NULL。 */
+clux_module_t *clux_context_get_current_module(clux_context_t *self);
+/* 进入/离开模块。进入非 NULL 模块时 current scope 切到模块作用域
+   （模块级名字落于此，parent 链到 global，查找链自动成立）；
+   传 NULL 离开模块，恢复 current scope 为 global。
+   pop_scope 不会越过模块作用域（模块边界由本切换守护）。
+   调用方须保证进入/离开按序平衡（借用约定）。 */
+void clux_context_set_current_module(clux_context_t *self,
+                                     clux_module_t *module);
 /* 将匿名值具名化加入当前作用域（var 声明的落地通道）：
    值是当前作用域的匿名持有时原地填名（声明即 move，零拷贝）；
    值是借用（对既有变量的引用）时按值拷贝落地为独立存储；
