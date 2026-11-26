@@ -1439,6 +1439,11 @@ TEST(SemaTest, AnonymousConstructIsNamedAndSynthesized) {
   /* 构造点 TYPE 槽回填 nonamed$1。 */
   node_t *x_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
   ASSERT_NE(x_var, nullptr);
+  /* §2.9 设计示例完整形态：var 的 TYPE 槽同步回填合成名（§2.8
+     构造值推断——构造值类型即构造点名）。 */
+  char *var_type_text = node_text(a, stmt_var_node_get_type(x_var));
+  EXPECT_STREQ(var_type_text, "nonamed$1");
+  allocator_free(a, (void **)&var_type_text);
   node_t *construct = stmt_var_node_get_value(x_var);
   ASSERT_NE(construct, nullptr);
   ASSERT_EQ(node_get_kind(construct), CLUX_NODE_EXPR_CONSTRUCT);

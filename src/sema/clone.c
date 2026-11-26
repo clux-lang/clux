@@ -174,9 +174,11 @@ static node_t *sema_clone_const_fold(node_t *node, sema_clone_env_t *env) {
 
 /* 推断显式化（§2.8 最小版）：TYPE 槽缺失时按 VALUE 字面量回填——
    带后缀整数以后缀定类型；无后缀整数默认 i32 且文本补 i32 后缀
-   （浮点后缀由语法层强制）；布尔为 bool。VALUE 非字面量（调用、
-   未折叠引用等）不动，等类型检查分期。补后缀只改 VALUE 节点的
-   location（指向 intern 文本），不替换节点，避免孤儿分配。 */
+   （浮点后缀由语法层强制）；布尔为 bool。构造值（具名构造，或已
+   经 §2.9 回填合成名的匿名构造）回填构造类型名。VALUE 其余形态
+   （调用、未折叠引用等）不动，等类型检查分期（§2.8 依赖声明）。
+   补后缀只改 VALUE 节点的 location（指向 intern 文本），不替换
+   节点，避免孤儿分配。 */
 static void
 sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
   vec_t *children = node_get_children(clone);
@@ -189,6 +191,7 @@ sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
     return;
   }
   const location_t *loc = node_get_location(value_child);
+  char *owned_name = NULL;
   const char *type_name = NULL;
   if (node_get_kind(value_child) == CLUX_NODE_LITERAL_BOOLEAN) {
     type_name = "bool";
@@ -218,6 +221,17 @@ sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
       type_name = "i32";
     }
     allocator_free(out, (void **)&text);
+  } else if (node_get_kind(value_child) == CLUX_NODE_EXPR_CONSTRUCT) {
+    /* §2.9：构造值的类型即构造点名（匿名构造的合成名已先经 anons
+       通道回填进 TYPE 槽——构造体克隆先于本 var 的 children 循环
+       完成）。构造点名 location 指向 intern 文本，读取后渲染副本。 */
+    node_t *value_type = construct_node_get_type(value_child);
+    if (value_type) {
+      owned_name = location_get(node_get_location(value_type), out);
+      if (owned_name) {
+        type_name = owned_name;
+      }
+    }
   }
   if (!type_name) {
     return;
@@ -226,6 +240,7 @@ sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
   node_t *type_node = sema_render_text_node(
       out, program, CLUX_NODE_LITERAL_IDENTIFIER, type_name, loc);
   node_set_child(clone, CLUX_STMT_VAR_TYPE, type_node);
+  allocator_free(out, (void **)&owned_name);
 }
 
 /* ---- §2.4 defer 脱糖 ---- */

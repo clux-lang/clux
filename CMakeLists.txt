@@ -108,6 +108,7 @@ if(BUILD_TESTS)
   target_include_directories(clux_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
   target_compile_definitions(clux_test PRIVATE
       U_DISABLE_VERSION_SUFFIX=1
+      CLUX_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
       CLUX_TEST_TMP_DIR="${CLUX_TEST_TMP_DIR}")
   target_link_libraries(clux_test PRIVATE icu_data_init ICU::data ICU::uc GTest::gtest)
   clux_target_warnings(clux_test)
