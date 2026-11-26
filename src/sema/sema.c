@@ -33,39 +33,6 @@
 #include <stdio.h>
 #include <string.h>
 
-struct _clux_sema_t {
-  clux_context_t *ctx;        /* 借用：engine 侧全部状态（scope/module/diag） */
-  allocator_t *out_allocator; /* 借用：emit 产物（program_t）的唯一分配来源 */
-  clux_module_t *module;      /* 借用：ctx 的 modules 注册表持有 */
-  int walked;                 /* 0 未走 / 1 已走（walk 只允许一次） */
-  vec_t *hoists;              /* sema_hoist_t*，engine allocator 持有 */
-  vec_t *instants;            /* sema_instant_t*，模块级实例化表（§2.3） */
-  vec_t *generic_defs;        /* sema_generic_def_t*，泛型名→定义（§2.3） */
-  vec_t *instance_bodies;     /* sema_instance_body_t*，实例体表（§2.3） */
-  vec_t *const_defs; /* sema_const_def_t*，顶层 comptime 常量表（§2.1） */
-  vec_t *const_uses; /* sema_const_use_t*，常量引用点表（§2.1） */
-  vec_t *prunes;     /* sema_prune_t*，comptime if 剪枝决策表（§2.5） */
-  vec_t *anons;      /* sema_anon_t*，匿名构造表（§2.9） */
-  vec_t *methods;    /* sema_method_t*，struct 方法表（§2.10） */
-  node_t *ast;       /* 借用：walk 入参 PROGRAM（emit 只读） */
-};
-
-/* 泛型定义条目（§2.3）：模块级泛型声明名 → 定义语句（借用原树）。 */
-typedef struct {
-  char *name;   /* 泛型名（ctx allocator），如 List */
-  node_t *stmt; /* 借用：泛型定义语句 */
-} sema_generic_def_t;
-
-/* 实例体条目（§2.3 完整版）：一个实参组合 → emit 尾部产出的实例声明
-   （定义深拷贝 + 代换）。param_names/args 即代换依据（同序对位）。 */
-typedef struct {
-  node_t *stmt;       /* 借用：泛型定义语句（克隆源） */
-  char *base;         /* 泛型名（ctx allocator），rename 匹配键 */
-  char *name;         /* 实例名（ctx allocator），如 List$i32 */
-  vec_t *param_names; /* char* 按序形参名（无名参数记 NULL） */
-  vec_t *args;        /* 借用：实参节点（原树指针），与形参同序 */
-} sema_instance_body_t;
-
 clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   if (!ctx || !out_allocator) {
     return NULL;
@@ -940,6 +907,9 @@ int sema_walk(clux_sema_t *sema, node_t *program) {
     }
     sema_anon_collect(sema, stmt);
   }
+  /* 类型环境 + 名字解析（§8.8 P7）：诊断全收集不 fast-fail，仍在
+     current module 期内——模块级登记需要 current scope = module scope。 */
+  sema_check_pass(sema);
   clux_context_set_current_module(sema->ctx, NULL);
   return 0;
 }

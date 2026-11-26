@@ -146,6 +146,23 @@ clux_value_t *clux_scope_get(clux_scope_t *self, const char *name) {
   return NULL;
 }
 
+bool clux_scope_defined_here(clux_scope_t *self, const char *name) {
+  if (!name) {
+    return false;
+  }
+  vec_t *bucket = rbtree_find(self->named_values, hash_sdb(name));
+  if (!bucket) {
+    return false;
+  }
+  for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+    clux_slot_t *slot = vec_get(bucket, idx);
+    if (slot->name && strcmp(slot->name, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 clux_scope_t *clux_scope_get_parent(clux_scope_t *self) {
   return self ? self->parent : NULL;
 }

@@ -12,6 +12,10 @@ void delete_clux_scope(clux_scope_t **self);
 clux_value_t *
 clux_scope_define(clux_scope_t *self, const char *name, clux_value_t *value);
 clux_value_t *clux_scope_get(clux_scope_t *self, const char *name);
+/* 本层判重（不走 parent 链，外层名字允许遮蔽）：本层已定义 name 返回
+   true。sema 局部判重用——clux_scope_get 是遮蔽语义（沿链查），无法
+   只回答"本层有没有"。 */
+bool clux_scope_defined_here(clux_scope_t *self, const char *name);
 clux_scope_t *clux_scope_get_parent(clux_scope_t *self);
 
 /* 将本作用域持有的匿名值具名化：原地给 owning slot 填名并挂入名称

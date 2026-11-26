@@ -1043,6 +1043,7 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   parser_t *p;
   node_t *ast = parse_clux(a,
                            &p,
+                           "var items: [3]i32;\n"
                            "func f(): void {\n"
                            "  foreach (x of items) { var y = x; }\n"
                            "}\n");
