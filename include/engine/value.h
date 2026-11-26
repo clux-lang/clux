@@ -18,6 +18,10 @@ bool clux_value_is_shadow(clux_value_t *self);
    首次赋值清除；TDZ 期间绕过 mutable 检查（const 支持首次赋值）。 */
 bool clux_value_is_tdz(clux_value_t *self);
 void clux_value_set_tdz(clux_value_t *self, bool tdz);
+/* 占位定型：改写 shadow 值的类型。sema 前向引用名字先以 error 类型
+   占位登记，依赖解析（模块级 var 不动点）定型后经本通道升级为推断
+   类型；非 shadow 值的类型由创建点决定，不走本通道。 */
+void clux_value_retype(clux_value_t *self, clux_type_t *type);
 void delete_clux_value(clux_value_t **self);
 #ifdef __cplusplus
 }

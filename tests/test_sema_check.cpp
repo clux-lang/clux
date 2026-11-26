@@ -806,3 +806,174 @@ TEST(SemaCheckTest, ArrayParamForeachElemTypeIsRecorded) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* 模块级 var 不动点（顺序无关）：先声明者引用后定义的 var，依赖解析
+   定型后占位升级，引用点取到真实类型——声明顺序不限制推断。 */
+TEST(SemaCheckTest, ModuleVarForwardReferenceTypeIsInferred) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var c = b;\n"
+                           "var b = a;\n"
+                           "var a = 1;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  node_t *vars[3];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 3), 3u);
+  clux_type_t *a_type = sema_get_node_type(sema, vars[2]);
+  ASSERT_NE(a_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(a_type), "i32");
+  clux_type_t *b_type = sema_get_node_type(sema, vars[1]);
+  ASSERT_NE(b_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(b_type), "i32");
+  clux_type_t *c_type = sema_get_node_type(sema, vars[0]);
+  ASSERT_NE(c_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(c_type), "i32");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 循环依赖负测（互引用）：一轮无进展仍有未定型——唯一不可推断场景，
+   每个未定型 var 各报一条语法错误（不重复演算防连锁假诊断）。 */
+TEST(SemaCheckTest, ModuleVarMutualCircularReferenceIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var a = b;\n"
+                           "var b = a;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 2u, 0, "circular reference in module-level var 'a'");
+  expect_diag_count(ctx, 2u, 1, "circular reference in module-level var 'b'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 循环依赖负测（自引用）：var a = a 直接引用自身（遮蔽外层同名），
+   同样按循环依赖报错。 */
+TEST(SemaCheckTest, ModuleVarSelfReferenceIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "var a = a;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "circular reference in module-level var 'a'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 类型标注不解除门控：var a: i32 = b 的值仍依赖未定型 b，须等 b 定型
+   后演算（标注只是占位类型，不等于依赖满足）。 */
+TEST(SemaCheckTest, ModuleVarAnnotatedForwardReferenceIsInferred) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var a: i32 = b;\n"
+                           "var b = 1;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  node_t *vars[2];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 2), 2u);
+  clux_type_t *a_type = sema_get_node_type(sema, vars[0]);
+  ASSERT_NE(a_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(a_type), "i32");
+  clux_type_t *b_type = sema_get_node_type(sema, vars[1]);
+  ASSERT_NE(b_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(b_type), "i32");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* struct 方法体纳入检查通道：方法体与模块级函数体同等待遇——体内
+   DFA（use before assignment）照常上报。 */
+TEST(SemaCheckTest, StructMethodBodyDfaIsChecked) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct B {\n"
+                           "  func m(self: *B): void {\n"
+                           "    var x: i32 = undefined;\n"
+                           "    var y = x;\n"
+                           "  }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "use before assignment 'x'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* struct 方法体 return 交验：签名返回类型进 return_type 上下文，体内
+   return 不兼容经 safe_cast 报错（与模块级函数体同规则）。 */
+TEST(SemaCheckTest, StructMethodBodyReturnIsChecked) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct B {\n"
+                           "  func m(self: *B): i32 { return true; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "cannot safely cast 'bool' to 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 正测：方法体正常代码零诊断，且方法体互调/多方法不产生重复登记。 */
+TEST(SemaCheckTest, StructMethodBodyCleanHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct B {\n"
+                           "  func m(self: *B): i32 { var x = 1; return x; }\n"
+                           "  func n(self: *B): void { var y: i32 = 2; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

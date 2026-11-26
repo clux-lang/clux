@@ -297,13 +297,12 @@ node_t *parser_read_expr_func_type(allocator_t *allocator, parser_t *parser) {
 
 /* 把 `( name: type, ... )` 里的形参逐个追加到 owner 的 children。
    每个形参都必须是 `name: type`；类型可以是 rest 表达式（参数包形参
-   `args: ...Args`）。allow_default 为 true 时额外接受 `= expr`：
-   只有闭包的捕获列表允许默认值，函数参数一律不允许。
+   `args: ...Args`）。函数参数一律不允许默认值（仅闭包捕获的括号形态
+   允许，见 read_func_decl_capture_paren）。
    当前 token 必须是 '('。 */
 static void read_func_decl_param_list(allocator_t *allocator,
                                       parser_t *parser,
-                                      node_t *owner,
-                                      bool allow_default) {
+                                      node_t *owner) {
   token_t *token = parser_peek_token(parser);
   parser_next(parser); /* '(' */
   parser_skip_trivia(parser);
@@ -365,26 +364,6 @@ static void read_func_decl_param_list(allocator_t *allocator,
       func_param_node_set_type(param, type);
       node_set_location_span(
           param, node_get_location(name), node_get_location(type));
-
-      /* 捕获列表允许默认值；函数参数不允许。 */
-      parser_skip_trivia(parser);
-      token = parser_peek_token(parser);
-      if (allow_default && token_is(token, CLUX_TOKEN_SYMBOL, "=")) {
-        parser_next(parser); /* '=' */
-        parser_skip_trivia(parser);
-        node_t *def = parser_read_expr(allocator, parser);
-        if (!def) {
-          location_t loc =
-              expression_error_location(parser, node_get_location(param));
-          parser_push_error(
-              parser,
-              create_error(allocator, &loc, "expected capture default value"));
-        } else {
-          func_param_node_set_default(param, def);
-          node_set_location_span(
-              param, node_get_location(name), node_get_location(def));
-        }
-      }
       func_params_node_add_param(owner, param);
     }
     parser_skip_trivia(parser);
@@ -419,16 +398,13 @@ static void read_func_decl_param_list(allocator_t *allocator,
 }
 
 /* 形参列表 ( name: type, ... )。当前 token 必须是 '('。
-   children 为 CLUX_NODE_FUNC_PARAM 或 rest 表达式。
-   allow_default 为 true 时接受 `= expr`（仅闭包捕获列表）。 */
-static node_t *read_func_decl_params(allocator_t *allocator,
-                                     parser_t *parser,
-                                     bool allow_default) {
+   children 为 CLUX_NODE_FUNC_PARAM 或 rest 表达式。 */
+static node_t *read_func_decl_params(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   location_t open_loc = *token_get_location(token);
   node_t *node = create_func_params_node(allocator);
   node_set_location_span(node, &open_loc, &open_loc);
-  read_func_decl_param_list(allocator, parser, node, allow_default);
+  read_func_decl_param_list(allocator, parser, node);
   /* 区间 = '(' 起点 .. 最后一个子节点终点；空列表时退化为 '(' 本身。 */
   size_t count = func_params_node_get_param_count(node);
   const location_t *end_loc =
@@ -440,14 +416,138 @@ static node_t *read_func_decl_params(allocator_t *allocator,
 
 /* 函数声明的形参列表，供 extern cfunc 等外部声明复用。 */
 node_t *parser_read_func_decl_params(allocator_t *allocator, parser_t *parser) {
-  return read_func_decl_params(allocator, parser, false);
+  return read_func_decl_params(allocator, parser);
 }
 
-/* 函数声明的捕获列表 |( name: type = expr, ... )|（白皮书 §3.3）。
-   与函数类型的捕获列表不同，这里带圆括号，且允许默认值。
-   children 只有一个 CLUX_NODE_FUNC_PARAMS，与形参列表同构。
+/* 单个带括号捕获项 ( name: type = default )（白皮书 §3.3）。
+   括号逐捕获包裹：隔离捕获表达式内可能出现的 '|'，防止与捕获列表
+   闭合符冲突。产出与形参同构的 FUNC_PARAM（类型/默认值可选）。
+   当前 token 必须是 '('。出错时按容错约定返回不完整节点并 push_error，
+   并跳到闭合 ')' 让外层循环继续。 */
+static node_t *read_func_decl_capture_paren(allocator_t *allocator,
+                                            parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  location_t open_loc = *token_get_location(token);
+  parser_next(parser); /* '(' */
+  parser_skip_trivia(parser);
+
+  node_t *param = create_func_param_node(allocator);
+  node_t *name = parser_read_literal_identifier(allocator, parser);
+  if (!name) {
+    location_t loc = expression_error_location(parser, &open_loc);
+    parser_push_error(parser,
+                      create_error(allocator, &loc, "expected capture name"));
+    goto recover;
+  }
+  func_param_node_set_name(param, name);
+  node_set_location_span(
+      param, node_get_location(name), node_get_location(name));
+
+  parser_skip_trivia(parser);
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ":")) {
+    parser_next(parser); /* ':' */
+    parser_skip_trivia(parser);
+    /* 类型解析用 ternary 层：顶层 assign 会把 `= default` 吃掉
+       （与形参列表同层）。 */
+    node_t *type = parser_read_expr_rest(allocator, parser);
+    if (!type) {
+      type = parser_read_expr_ternary(allocator, parser);
+    }
+    if (!type) {
+      location_t loc =
+          expression_error_location(parser, node_get_location(name));
+      parser_push_error(parser,
+                        create_error(allocator, &loc, "expected capture type"));
+      goto recover;
+    }
+    func_param_node_set_type(param, type);
+    node_set_location_span(
+        param, node_get_location(name), node_get_location(type));
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+  }
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "=")) {
+    parser_next(parser); /* '=' */
+    parser_skip_trivia(parser);
+    /* 默认值用顶层表达式：括号已隔离 '|'，')' 是天然终止符。 */
+    node_t *def = parser_read_expr(allocator, parser);
+    if (!def) {
+      location_t loc =
+          expression_error_location(parser, node_get_location(param));
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected capture default value"));
+      goto recover;
+    }
+    func_param_node_set_default(param, def);
+    node_set_location_span(
+        param, node_get_location(name), node_get_location(def));
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+  }
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
+    location_t loc =
+        expression_error_location(parser, node_get_location(param));
+    parser_push_error(
+        parser, create_error(allocator, &loc, "expected ')' to close capture"));
+  } else {
+    parser_next(parser); /* ')' */
+  }
+  return param;
+
+recover:
+  /* 跳到闭合 ')' 并消费；EOF 处安全退出。 */
+  for (;;) {
+    token = parser_peek_token(parser);
+    if (!token || token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
+      break;
+    }
+    parser_next(parser);
+  }
+  if (token) {
+    parser_next(parser); /* ')' */
+  }
+  return param;
+}
+
+/* 裸名捕获项 name（无括号）：仅标识符，类型从定义点现值推断。
+   带类型标注或默认值必须用括号形态——裸名后出现 ':'/'=' 即报错。
+   名字解析失败返回 NULL（由调用方容错），成功返回仅含名字的 FUNC_PARAM。 */
+static node_t *read_func_decl_capture_bare(allocator_t *allocator,
+                                           parser_t *parser) {
+  node_t *name = parser_read_literal_identifier(allocator, parser);
+  if (!name) {
+    return NULL;
+  }
+  node_t *param = create_func_param_node(allocator);
+  func_param_node_set_name(param, name);
+  node_set_location_span(
+      param, node_get_location(name), node_get_location(name));
+
+  parser_skip_trivia(parser);
+  token_t *token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ":") ||
+      token_is(token, CLUX_TOKEN_SYMBOL, "=")) {
+    location_t loc = expression_error_location(parser, node_get_location(name));
+    parser_push_error(parser,
+                      create_error(allocator,
+                                   &loc,
+                                   "capture type or default requires "
+                                   "parentheses: |(name: type = expr)|"));
+  }
+  return param;
+}
+
+/* 函数声明的捕获列表（白皮书 §3.3，defer 语句共用——defer 本质上是函数）。
+   两种捕获形态可逐项混用：
+   - 裸名 `|x, y|`：仅标识符，类型从定义点作用域现值推断；
+   - 逐捕获括号 `|(x: i32 = 1), (y: i32 = 2)|`：带类型标注/默认值，
+     括号隔离捕获表达式内可能出现的 '|' 与捕获列表闭合符的冲突。
+   空捕获列表写作 `||`。children 归一化为一个 CLUX_NODE_FUNC_PARAMS
+   （与形参列表同构，下游契约不变）；空列表 `||` 不带该子节点。
    调用前当前 token 必须是 '|'。 */
-static node_t *read_func_decl_captures(allocator_t *allocator,
+node_t *parser_read_func_decl_captures(allocator_t *allocator,
                                        parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   location_t open_loc = *token_get_location(token);
@@ -466,15 +566,53 @@ static node_t *read_func_decl_captures(allocator_t *allocator,
     return node;
   }
 
-  token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_SYMBOL, "(")) {
-    location_t loc = expression_error_location(parser, &open_loc);
-    parser_push_error(
-        parser,
-        create_error(allocator, &loc, "expected '(' after '|' in captures"));
-    return node;
+  node_t *params = create_func_params_node(allocator);
+  node_set_location_span(params, &open_loc, &open_loc);
+  for (;;) {
+    token = parser_peek_token(parser);
+    node_t *param = NULL;
+    if (token_is(token, CLUX_TOKEN_SYMBOL, "(")) {
+      param = read_func_decl_capture_paren(allocator, parser);
+    } else {
+      param = read_func_decl_capture_bare(allocator, parser);
+      if (!param) {
+        location_t loc = expression_error_location(parser, &open_loc);
+        parser_push_error(
+            parser,
+            create_error(allocator, &loc, "expected capture in captures"));
+        /* 容错：跳到分隔 ',' 或闭合 '|'。 */
+        for (;;) {
+          token = parser_peek_token(parser);
+          if (!token || token_is(token, CLUX_TOKEN_SYMBOL, ",") ||
+              token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
+            break;
+          }
+          parser_next(parser);
+        }
+      }
+    }
+    if (param) {
+      func_params_node_add_param(params, param);
+    }
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
+      parser_next(parser); /* ',' */
+      parser_skip_trivia(parser);
+      continue;
+    }
+    break;
   }
-  node_t *params = read_func_decl_params(allocator, parser, true);
+
+  /* 归一化：捕获项全部并入唯一的 FUNC_PARAMS 子节点（可能为空——
+     容错路径下的占位，下游按零捕获处理）。 */
+  size_t count = func_params_node_get_param_count(params);
+  if (count) {
+    node_set_location_span(
+        params,
+        node_get_location(func_params_node_get_param(params, 0)),
+        node_get_location(func_params_node_get_param(params, count - 1)));
+  }
   func_captures_node_add_capture(node, params);
   const location_t *end_loc = node_get_location(params);
 
@@ -650,9 +788,10 @@ read_func_decl(allocator_t *allocator, parser_t *parser, bool signature_only) {
 
   parser_skip_trivia(parser);
   token = parser_peek_token(parser);
-  /* 捕获列表 |( ... )|。cfunc 不允许捕获，但该限制属于语义检查。 */
+  /* 捕获列表 |x| 或 |(x: i32 = 1), ...|。cfunc 不允许捕获，但该限制
+     属于语义检查。 */
   if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
-    node_t *captures = read_func_decl_captures(allocator, parser);
+    node_t *captures = parser_read_func_decl_captures(allocator, parser);
     func_decl_node_set_captures(node, captures);
     end_loc = node_get_location(captures);
     node_set_location_span(node, &keyword_loc, end_loc);
@@ -685,7 +824,7 @@ read_func_decl(allocator_t *allocator, parser_t *parser, bool signature_only) {
         create_error(allocator, &loc, "expected '(' to start parameters"));
     return node;
   }
-  node_t *params = read_func_decl_params(allocator, parser, false);
+  node_t *params = read_func_decl_params(allocator, parser);
   func_decl_node_set_params(node, params);
   end_loc = node_get_location(params);
   node_set_location_span(node, &keyword_loc, end_loc);

@@ -3591,11 +3591,11 @@ TEST(StmtDeferTest, BareCapture) {
   delete_allocator(&a);
 }
 
-/* 裸列表形式的默认值停在闭合 '|' 之前。 */
-TEST(StmtDeferTest, BareCaptureWithDefault) {
+/* 带默认值的捕获必须用括号形态（与函数捕获语法一致）。 */
+TEST(StmtDeferTest, CaptureWithDefault) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  node_t *node = parse_stmt(a, &p, "defer |pa = a.&| { a; }");
+  node_t *node = parse_stmt(a, &p, "defer |(pa = a.&)| { a; }");
   expect_defer_stmt(node);
   expect_defer_capture(node_get_child(node, CLUX_STMT_DEFER_CAPTURES), 0, true);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
@@ -3619,7 +3619,7 @@ TEST(StmtDeferTest, ParenthesizedCapture) {
 TEST(StmtDeferTest, MultipleCaptures) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  node_t *node = parse_stmt(a, &p, "defer |a, b = 1| { }");
+  node_t *node = parse_stmt(a, &p, "defer |a, (b = 1)| { }");
   expect_defer_stmt(node);
   node_t *captures = node_get_child(node, CLUX_STMT_DEFER_CAPTURES);
   ASSERT_NE(captures, nullptr);
@@ -3700,7 +3700,7 @@ TEST(StmtDeferTest, MissingCaptureCloseReportsError) {
   vec_t *errors = parser_get_error(p);
   ASSERT_GE(vec_get_size(errors), 1u);
   EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
-               "expected '|' to close defer captures");
+               "expected '|' to close captures");
   delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);
@@ -3714,7 +3714,7 @@ TEST(StmtDeferTest, MissingParenCloseReportsError) {
   vec_t *errors = parser_get_error(p);
   ASSERT_GE(vec_get_size(errors), 1u);
   EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
-               "expected ')' to close defer captures");
+               "expected ')' to close capture");
   delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);
@@ -3728,7 +3728,7 @@ TEST(StmtDeferTest, InvalidCaptureNameReportsError) {
   vec_t *errors = parser_get_error(p);
   ASSERT_GE(vec_get_size(errors), 1u);
   EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
-               "expected capture name in defer");
+               "expected capture in captures");
   delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);
@@ -5846,9 +5846,9 @@ TEST(StmtTest, NoLeakOnStatements) {
       "defer { a; }",
       "defer {}",
       "defer |captured| { a; }",
-      "defer |pa = a.&| { a; }",
+      "defer |(pa = a.&)| { a; }",
       "defer |(h = handle)| { a; }",
-      "defer |a, b = 1| { }",
+      "defer |a, (b = 1)| { }",
       "defer || { }",
       "{ a; defer { b; } }",
       "defer",

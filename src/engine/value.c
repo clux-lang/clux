@@ -31,6 +31,11 @@ clux_type_t *clux_value_get_type(clux_value_t *self) { return self->type; }
 bool clux_value_is_shadow(clux_value_t *self) { return self->data == 0; }
 bool clux_value_is_tdz(clux_value_t *self) { return self->tdz; }
 void clux_value_set_tdz(clux_value_t *self, bool tdz) { self->tdz = tdz; }
+void clux_value_retype(clux_value_t *self, clux_type_t *type) {
+  if (self) {
+    self->type = type;
+  }
+}
 void delete_clux_value(clux_value_t **self) {
   if (!self || !*self) {
     return;

@@ -1691,8 +1691,8 @@ TEST(SemaTest, MemberCallOnNamedConstructReceiverIsDesugared) {
   delete_allocator(&a);
 }
 
-/* 值 self（self: P）+ receiver 非构造：方法名全表唯一 → 改写，
-   receiver 直传不包 .&。 */
+/* 指针 self（self: *P）+ receiver 非构造：方法名全表唯一 → 改写，
+   receiver 包 .& 取址后前置（值 self 形态由检查通道按签名不符报错）。 */
 TEST(SemaTest, MemberCallValueSelfAndUniqueName) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -1701,7 +1701,7 @@ TEST(SemaTest, MemberCallValueSelfAndUniqueName) {
   node_t *ast = parse_clux(
       a,
       &p,
-      "struct P { v: i32; func id(self: P): i32 { return self.v; } }\n"
+      "struct P { v: i32; func id(self: *P): i32 { return self.v; } }\n"
       "var b = .P{ .v = 3 };\n"
       "var c = b.id();\n");
   ASSERT_NE(ast, nullptr);
@@ -1721,11 +1721,20 @@ TEST(SemaTest, MemberCallValueSelfAndUniqueName) {
   char *text = node_text(a, callee);
   EXPECT_STREQ(text, "P$id");
   allocator_free(a, (void **)&text);
-  /* 值 self：首实参就是 identifier b，不包 .&。 */
+  /* 指针 self：首实参是 .& 取址（后缀 binary，RIGHT 槽为 NULL），
+     left 就是 identifier b。 */
   ASSERT_EQ(call_node_get_arg_count(call), 1u);
   node_t *self_arg = call_node_get_arg(call, 0);
-  ASSERT_EQ(node_get_kind(self_arg), CLUX_NODE_LITERAL_IDENTIFIER);
-  text = node_text(a, self_arg);
+  ASSERT_EQ(node_get_kind(self_arg), CLUX_NODE_EXPR_BINARY);
+  vec_t *addr_children = node_get_children(self_arg);
+  ASSERT_EQ(vec_get_size(addr_children), 3u);
+  EXPECT_EQ(vec_get(addr_children, 2), nullptr);
+  text = node_text(a, (node_t *)vec_get(addr_children, 1));
+  EXPECT_STREQ(text, ".&");
+  allocator_free(a, (void **)&text);
+  node_t *addr_left = (node_t *)vec_get(addr_children, 0);
+  ASSERT_EQ(node_get_kind(addr_left), CLUX_NODE_LITERAL_IDENTIFIER);
+  text = node_text(a, addr_left);
   EXPECT_STREQ(text, "b");
   allocator_free(a, (void **)&text);
   dispose_programs(programs);
@@ -1745,8 +1754,8 @@ TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
   parser_t *p;
   node_t *ast = parse_clux(a,
                            &p,
-                           "struct A { func tag(self: A): i32 { return 1; } }\n"
-                           "struct B { func tag(self: B): i32 { return 2; } }\n"
+                           "struct A { func tag(self: *A): i32 { return 1; } }\n"
+                           "struct B { func tag(self: *B): i32 { return 2; } }\n"
                            "var a = .A{};\n"
                            "var b = .B{};\n"
                            "var t = b.tag();\n");

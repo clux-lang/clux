@@ -376,10 +376,17 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
     }
     return right;
   }
-  /* 数组类型定义 [N]T：SYMBOL '[]' 且 LEFT 为长度表达式（切片类型前缀
-     []T 的 LEFT 为 NULL，已由上方前缀形态处理）。长度先于元素求值，
-     须为非负整数；元素须为 type value。 */
-  if (location_is(op_loc, "[]")) {
+  /* 数组类型定义 [N]T：SYMBOL 首 '[' 尾 ']' 且 LEFT 为长度表达式（切片
+     类型前缀 []T 的 LEFT 为 NULL，已由上方前缀形态处理）。'[]' 切片与
+     '[N]' 数组共用二元形态：SYMBOL location 区间跨越方括号（长度居中时
+     location_get 读出 "[2]" 而非 "[]"），按结构判别（与 check.c
+     check_type_eval 同构）。长度先于元素求值，须为非负整数；元素须为
+     type value。 */
+  char *array_op_text = location_get(op_loc, allocator);
+  bool is_array_type_def = array_op_text && array_op_text[0] == '[' &&
+                           array_op_text[strlen(array_op_text) - 1] == ']';
+  allocator_free(allocator, (void **)&array_op_text);
+  if (is_array_type_def) {
     clux_value_t *length = exec_operand(ctx, left_node);
     if (clux_value_is_error(length)) {
       return length;

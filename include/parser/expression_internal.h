@@ -47,6 +47,12 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
    调用前当前 token 必须是 '('。 */
 node_t *parser_read_func_decl_params(allocator_t *allocator, parser_t *parser);
 
+/* 捕获列表 |x, y| 或 |(x: i32 = 1), (y: i32 = 2)|（白皮书 §3.3），
+   函数声明/闭包与 defer 语句共用——defer 本质上是函数。
+   调用前当前 token 必须是 '|'。 */
+node_t *parser_read_func_decl_captures(allocator_t *allocator,
+                                       parser_t *parser);
+
 /* union 定义（tag union 与 cunion）。 */
 node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser);
 

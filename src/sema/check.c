@@ -2446,6 +2446,34 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
   return NULL;
 }
 
+/* ---- 模块级 var 不动点（前向引用） ---- */
+
+/* 值表达式引用名收集：子树内全部无孩子 LITERAL_IDENTIFIER（保守近似——
+   闭包形参/捕获等同名标识符一并计入，误判只会让该 var 多等一轮，无真
+   循环仍会定型；名字拷贝归 ctx allocator，随条目释放）。 */
+static void
+check_collect_idents(allocator_t *allocator, node_t *node, vec_t *names) {
+  if (!node) {
+    return;
+  }
+  if (node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER &&
+      vec_get_size(node_get_children(node)) == 0) {
+    vec_push(names, check_name_of(allocator, node));
+  }
+  vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    check_collect_idents(allocator, vec_get(children, idx), names);
+  }
+}
+
+/* 模块级 var 工作条目：不动点演算的最小载体。 */
+typedef struct {
+  node_t *stmt;    /* STMT_VAR 锚点（定位 + 类型表回填） */
+  char *name;      /* var 名（ctx allocator），占位值查找键 */
+  vec_t *deps;     /* char*（ctx allocator），值表达式引用名 */
+  int resolved;    /* 已定型（含"已尝试失败"——防重复演算重复 diag） */
+} check_modvar_t;
+
 /* ---- 入口 ---- */
 
 int sema_check_pass(clux_sema_t *sema) {
@@ -2467,11 +2495,44 @@ int sema_check_pass(clux_sema_t *sema) {
       check_func_decl(sema, decl);
     }
   }
-  /* 模块级 var 值检查：名字已由 register 循环登记（不重复 define 避免
-     duplicate diag），这里只演算值表达式并回填类型结果表（§8.5——
-     clone 渲染器按 STMT_VAR 锚点取推断类型）。DFA 天然 no-op（模块级
-     不建帧）；前向引用的名字 register 时已登记占位，此处的类型表只
-     回填本语句锚点。 */
+  /* struct 方法体纳入检查通道（与模块级函数体同等待遇）：方法签名已于
+     register 循环安装三表（check_struct_install_methods），这里逐个非
+     泛型方法走 check_func_decl（帧 + 语句检查 + DFA）；泛型方法随实例
+     化通道。方法名归三表（不裸 define），check_func_decl 只登记形参，
+     不产生重复登记。 */
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *stmt = program_node_get_stmt(sema->ast, idx);
+    if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_STRUCT) {
+      continue;
+    }
+    node_t *decl = stmt_struct_node_get_struct_decl(stmt);
+    node_t *body = decl ? struct_decl_node_get_body(decl) : NULL;
+    if (!body) {
+      continue;
+    }
+    vec_t *members = node_get_children(body);
+    for (size_t midx = 0; midx < vec_get_size(members); midx++) {
+      node_t *member = vec_get(members, midx);
+      if (!member || node_get_kind(member) != CLUX_NODE_STMT_FUNC) {
+        continue;
+      }
+      node_t *func_decl = stmt_func_node_get_func_decl(member);
+      if (func_decl && !func_decl_node_get_generics(func_decl)) {
+        check_func_decl(sema, func_decl);
+      }
+    }
+  }
+  /* 模块级 var 值检查（不动点，前向引用顺序无关）：名字已由 register
+     循环登记（无标注 var 为 error 类型 shadow 占位），全部模块 var 视为
+     互递归绑定组——每轮演算"值表达式引用的模块 var 均已定型"者，非
+     error 绑定类型即定型：经 clux_value_retype 升级占位值 + 回填类型
+     结果表（§8.5——clone 渲染器按 STMT_VAR 锚点取推断类型）。DFA 天然
+     no-op（模块级不建帧）。演算失败（NULL/error 绑定）也算完成（diag
+     已由 checked 通道上报，标记 resolved 防后续轮次重复报）。一轮无
+     进展仍有未定型，即循环依赖/相互引用——唯一不可推断场景，按语法
+     错误上报（含自引用：名字在本组内未定型同样阻塞）。 */
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  vec_t *vars = create_vec(allocator);
   for (size_t idx = 0; idx < count; idx++) {
     node_t *stmt = program_node_get_stmt(sema->ast, idx);
     if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_VAR) {
@@ -2481,11 +2542,75 @@ int sema_check_pass(clux_sema_t *sema) {
     if (!value_node) {
       continue;
     }
-    clux_value_t *value = check_expr_checked(sema, value_node);
-    clux_type_t *bind = check_value_bind_type(value);
-    if (bind) {
-      sema_record_node_type(sema, stmt, bind);
+    check_modvar_t *entry = allocator_alloc(allocator, sizeof(*entry));
+    entry->stmt = stmt;
+    entry->name = check_name_of(allocator, stmt_var_node_get_name(stmt));
+    entry->deps = create_vec(allocator);
+    check_collect_idents(allocator, value_node, entry->deps);
+    entry->resolved = 0;
+    vec_push(vars, entry);
+  }
+  for (int progress = 1; progress;) {
+    progress = 0;
+    for (size_t idx = 0; idx < vec_get_size(vars); idx++) {
+      check_modvar_t *entry = vec_get(vars, idx);
+      if (entry->resolved) {
+        continue;
+      }
+      int blocked = 0;
+      for (size_t dep = 0; dep < vec_get_size(entry->deps) && !blocked;
+           dep++) {
+        char *dep_name = vec_get(entry->deps, dep);
+        for (size_t other_idx = 0; other_idx < vec_get_size(vars);
+             other_idx++) {
+          check_modvar_t *other = vec_get(vars, other_idx);
+          if (other->name && other->resolved == 0 &&
+              strcmp(other->name, dep_name) == 0) {
+            blocked = 1; /* 含自身（自引用）：本组内未定型同名即阻塞 */
+            break;
+          }
+        }
+      }
+      if (blocked) {
+        continue;
+      }
+      clux_value_t *value =
+          check_expr_checked(sema, stmt_var_node_get_value(entry->stmt));
+      clux_type_t *bind = check_value_bind_type(value);
+      if (bind && clux_type_get_kind(bind) != CLUX_TYPE_ERROR) {
+        sema_record_node_type(sema, entry->stmt, bind);
+        clux_value_t *placeholder =
+            clux_scope_get(clux_context_get_scope(sema->ctx), entry->name);
+        if (placeholder && clux_value_is_shadow(placeholder) &&
+            clux_type_get_kind(clux_value_get_type(placeholder)) ==
+                CLUX_TYPE_ERROR) {
+          clux_value_retype(placeholder, bind);
+        }
+      }
+      entry->resolved = 1;
+      progress = 1;
     }
   }
+  for (size_t idx = 0; idx < vec_get_size(vars); idx++) {
+    check_modvar_t *entry = vec_get(vars, idx);
+    if (!entry->resolved) {
+      clux_context_diag(sema->ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(entry->stmt),
+                        "circular reference in module-level var '%s'",
+                        entry->name ? entry->name : "<unknown>");
+    }
+  }
+  for (size_t idx = 0; idx < vec_get_size(vars); idx++) {
+    check_modvar_t *entry = vec_get(vars, idx);
+    for (size_t dep = 0; dep < vec_get_size(entry->deps); dep++) {
+      char *dep_name = vec_get(entry->deps, dep);
+      allocator_free(allocator, (void **)&dep_name);
+    }
+    delete_vec(&entry->deps);
+    allocator_free(allocator, (void **)&entry->name);
+    allocator_free(allocator, (void **)&entry);
+  }
+  delete_vec(&vars);
   return 0;
 }

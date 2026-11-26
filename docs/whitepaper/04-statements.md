@@ -162,13 +162,20 @@ defer {
 
 `defer` 块在离开当前作用域时执行，按后进先出顺序。
 
-带捕获的 defer：
+带捕获的 defer（捕获语法与函数捕获一致，见 §3.3——defer 本质上是函数）：
 
 ```clux
-defer |(h = handle)| {
+defer |h| {              % 裸名捕获：类型从定义点作用域现值推断
+    close(h);
+}
+defer |(h = handle)| {   % 逐捕获括号：可带类型标注与默认值
     close(h);
 }
 ```
+
+两种形态可逐项混用：裸名 `|h|` 仅允许标识符；带类型标注或默认值的捕获
+必须各自用括号包裹 `|(name: type = expr)|`——括号隔离捕获表达式内可能
+出现的 `|`，避免与捕获列表闭合符冲突。空捕获列表写作 `||`。
 
 ## 4.12.1 using
 
@@ -183,7 +190,7 @@ using b: T = expr;
 
 ```text
 using a = e;   ⇒   var a = e;
-                   defer |pa = a.&| { pa.__dispose__(); }
+                   defer |(pa = a.&)| { pa.__dispose__(); }
 ```
 
 - 退出顺序与 `defer` 共用同一条 LIFO 序列（后声明先执行）；

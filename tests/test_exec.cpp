@@ -3678,6 +3678,30 @@ TEST_F(ExecLiteralTest, ArrayTypeBuildsInternedArrayTypeValue) {
   delete_node(&node);
 }
 
+/* 场景: 真实 parse 的 [N]T 数组类型（回归保护）——长度居中时 SYMBOL
+   location 区间跨越方括号，location_get 读出 "[4]" 而非 "[]"。
+   预期: exec 按首 '[' 尾 ']' 结构判别（与 check.c check_type_eval 同构），
+         仍然产出 interning 的 [4]i32 type value——旧实现
+         location_is("[]") 对此形态静默落空。 */
+TEST_F(ExecLiteralTest, RealParsedArraySpanStillBuildsArrayType) {
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, "4"),
+                     make_node(CLUX_NODE_SYMBOL, "[4]"),
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_ARRAY);
+  EXPECT_EQ(described,
+            clux_context_get_array_type(
+                ctx, clux_context_builtin_type(ctx, CLUX_TYPE_I32), 4));
+  delete_node(&node);
+}
+
 /* 场景: 数组长度用全部 10 种整数宽度的字面量（is_integer_kind 全 case）
    预期: 均经 clux_context_index_to_i64 正确读取为长度 4，
          interning 下描述同一 [4]i32 类型 */

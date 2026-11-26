@@ -7711,7 +7711,7 @@ TEST(ExpressionFuncDeclTest, MissingBodyReportsError) {
   delete_allocator(&a);
 }
 
-/* 捕获列表缺 '('。 */
+/* 裸名捕获带类型标注：必须用括号形态，报语义化提示。 */
 TEST(ExpressionFuncDeclTest, MissingCaptureParenReportsError) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -7720,7 +7720,103 @@ TEST(ExpressionFuncDeclTest, MissingCaptureParenReportsError) {
   vec_t *errors = parser_get_error(p);
   ASSERT_GE(vec_get_size(errors), 1u);
   EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
-               "expected '(' after '|' in captures");
+               "capture type or default requires parentheses: "
+               "|(name: type = expr)|");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 裸名捕获：仅标识符，无类型/默认值槽，类型由语义层从定义点现值推断。 */
+TEST(ExpressionFuncDeclTest, BareCaptures) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func |x, y| f(): void { a; }");
+  expect_func_decl(expr, "func");
+  node_t *captures = node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES);
+  ASSERT_NE(captures, nullptr);
+  ASSERT_EQ(vec_get_size(node_get_children(captures)), 1u);
+  node_t *params = node_get_child(captures, 0);
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(node_get_kind(params), CLUX_NODE_FUNC_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 2u);
+  for (size_t i = 0; i < 2; i++) {
+    node_t *cap = node_get_child(params, i);
+    ASSERT_NE(cap, nullptr);
+    EXPECT_EQ(node_get_kind(cap), CLUX_NODE_FUNC_PARAM);
+    EXPECT_NE(node_get_child(cap, CLUX_FUNC_PARAM_NAME), nullptr);
+    EXPECT_EQ(node_get_child(cap, CLUX_FUNC_PARAM_TYPE), nullptr);
+    EXPECT_EQ(node_get_child(cap, CLUX_FUNC_PARAM_DEFAULT), nullptr);
+  }
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 逐捕获括号形态：每个捕获各自括号包裹，可带类型与默认值。 */
+TEST(ExpressionFuncDeclTest, PerCaptureParens) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(
+      a, &p, "func |(x: i32 = 123), (y: i32 = 234)| f(): void { a; }");
+  expect_func_decl(expr, "func");
+  node_t *captures = node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES);
+  ASSERT_NE(captures, nullptr);
+  ASSERT_EQ(vec_get_size(node_get_children(captures)), 1u);
+  node_t *params = node_get_child(captures, 0);
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(node_get_kind(params), CLUX_NODE_FUNC_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 2u);
+  node_t *cap0 = node_get_child(params, 0);
+  ASSERT_NE(cap0, nullptr);
+  EXPECT_NE(node_get_child(cap0, CLUX_FUNC_PARAM_NAME), nullptr);
+  EXPECT_NE(node_get_child(cap0, CLUX_FUNC_PARAM_TYPE), nullptr);
+  node_t *def0 = node_get_child(cap0, CLUX_FUNC_PARAM_DEFAULT);
+  ASSERT_NE(def0, nullptr);
+  EXPECT_EQ(node_get_kind(def0), CLUX_NODE_LITERAL_NUMERIC);
+  node_t *cap1 = node_get_child(params, 1);
+  ASSERT_NE(cap1, nullptr);
+  node_t *def1 = node_get_child(cap1, CLUX_FUNC_PARAM_DEFAULT);
+  ASSERT_NE(def1, nullptr);
+  EXPECT_EQ(node_get_kind(def1), CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 两种形态逐项混用；括号内默认值表达式含 '|' 也不与闭包闭合符冲突
+   （括号隔离——这正是逐捕获括号的语义作用）。 */
+TEST(ExpressionFuncDeclTest, MixedCaptureFormsAndPipeInDefault) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "func |n, (m: i32 = n | 1)| f(): void { a; }");
+  expect_func_decl(expr, "func");
+  node_t *captures = node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES);
+  ASSERT_NE(captures, nullptr);
+  node_t *params = node_get_child(captures, 0);
+  ASSERT_NE(params, nullptr);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 2u);
+  node_t *bare = node_get_child(params, 0);
+  ASSERT_NE(bare, nullptr);
+  EXPECT_EQ(node_get_child(bare, CLUX_FUNC_PARAM_TYPE), nullptr);
+  EXPECT_EQ(node_get_child(bare, CLUX_FUNC_PARAM_DEFAULT), nullptr);
+  node_t *paren = node_get_child(params, 1);
+  ASSERT_NE(paren, nullptr);
+  EXPECT_NE(node_get_child(paren, CLUX_FUNC_PARAM_TYPE), nullptr);
+  node_t *def = node_get_child(paren, CLUX_FUNC_PARAM_DEFAULT);
+  ASSERT_NE(def, nullptr);
+  /* 默认值是位或表达式（'|' 未被误读为捕获列表闭合符）。 */
+  EXPECT_EQ(node_get_kind(def), CLUX_NODE_EXPR_BINARY);
+  node_t *op = node_get_child(def, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(op, nullptr);
+  EXPECT_EQ(node_get_kind(op), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(op)->end.offset -
+                node_get_location(op)->begin.offset,
+            (ptrdiff_t)strlen("|"));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -7842,6 +7938,11 @@ TEST(ExpressionFuncDeclTest, NoLeakOnFuncDecl) {
                            "func f(): void",
                            "func |a: i32| f(): void {}",
                            "func |(o: i32 =)| f(): i32 { a; }",
+                           "func |x, y| f(): void { a; }",
+                           "func |(x: i32 = 1), (y: i32 = 2)| f(): void { a; }",
+                           "func |x, (y: i32 = 1)| f(): void { a; }",
+                           "func |(a | b)| f(): void {}",
+                           "func |,| f(): void {}",
                            "func",
                            "func f",
                            "cfunc f(a: i32, ...): i32 { a; }",
