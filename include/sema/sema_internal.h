@@ -24,6 +24,14 @@ struct _clux_sema_t {
   vec_t *instants;            /* sema_instant_t*，模块级实例化表（§2.3） */
   vec_t *generic_defs;        /* sema_generic_def_t*，泛型名→定义（§2.3） */
   vec_t *instance_bodies;     /* sema_instance_body_t*，实例体表（§2.3） */
+  program_t *inst_program; /* 物化期 intern 文本池（§2.3 P11）：walk 期
+                                 物化实例体新造文本 intern 于此（仅在有实
+                                 例体时创建），物化体的新造名 location 借
+                                 其缓冲——与产物借 parser 源码缓冲同构：
+                                 调用方先消费产物后销毁 sema */
+  size_t inst_defer_counter; /* 物化循环已消耗的 __deferN 计数（§2.3
+                                 P11）：emit env 初始化后预置起点，防物化
+                                 体固化名与 emit 主循环产物撞模块级名 */
   vec_t *const_defs;   /* sema_const_def_t*，顶层 comptime 常量表（§2.1） */
   vec_t *const_uses;   /* sema_const_use_t*，常量引用点表（§2.1） */
   vec_t *prunes;       /* sema_prune_t*，comptime if 剪枝决策表（§2.5） */
@@ -69,14 +77,19 @@ typedef struct {
   node_t *stmt; /* 借用：泛型定义语句 */
 } sema_generic_def_t;
 
-/* 实例体条目（§2.3 完整版）：一个实参组合 → emit 尾部产出的实例声明
-   （定义深拷贝 + 代换）。param_names/args 即代换依据（同序对位）。 */
+/* 实例体条目（§2.3 完整版，P11 重构：walk 期物化）：一个实参组合 →
+   定义深拷贝 + 代换产出的实例声明。inst_stmt 在 walk 期物化（ctx
+   allocator，文本 intern 进 sema->inst_program），check pass 当普通
+   声明检查（§8.7 泛型体检查），emit 尾部对其普通克隆进输出（emit
+   不再关心实例化）。param_names/args 即代换依据（同序对位）。 */
 typedef struct {
-  node_t *stmt;       /* 借用：泛型定义语句（克隆源） */
+  node_t *stmt;       /* 借用：泛型定义语句（克隆源，原树） */
   char *base;         /* 泛型名（ctx allocator），rename 匹配键 */
   char *name;         /* 实例名（ctx allocator），如 List$i32 */
   vec_t *param_names; /* char* 按序形参名（无名参数记 NULL） */
   vec_t *args;        /* 借用：实参节点（原树指针），与形参同序 */
+  node_t *inst_stmt; /* 物化体：walk 期 clone+代换产物（sema 持有），
+                         NULL=物化失败（防御态，emit 跳过） */
 } sema_instance_body_t;
 
 /* check.c：§8.8 P7 类型环境 + 名字解析。walk 尾部、current module 摘除
@@ -240,8 +253,12 @@ typedef struct {
   const char *subst_name; /* §2.6 展开期迭代变量名 */
   node_t *subst_src;      /* §2.6 展开期当前元素源子树 */
   vec_t *inst_params;     /* §2.3 实例体态：形参名表（char* 借用），可 NULL */
-  vec_t *inst_args;     /* §2.3 实例体态：实参节点表（原树指针借用），可 NULL */
-  int instantiate;      /* §2.3 实例体态：GENERIC_PARAMS→NULL + 自引用折叠 */
+  vec_t *inst_args; /* §2.3 实例体态：实参节点表（原树指针借用），可 NULL */
+  int instantiate;  /* §2.3 实例体态：GENERIC_PARAMS→NULL + 自引用折叠 */
+  program_t *reown_from; /* §2.3 P11 emit 期克隆物化体：location 文本按
+                            指针命中该文本池（sema->inst_program）时重
+                            intern 进目标 program——产物新造文本不得借用
+                            sema 生命周期，可 NULL */
   size_t defer_counter; /* __deferN 编号 */
   clux_sema_t *sema;    /* 借用：walk 主体（§8.5 类型结果表查询），可 NULL */
 } sema_clone_env_t;

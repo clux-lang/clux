@@ -66,6 +66,21 @@ var a: Test[i32, i32] = .{};   →   var a: Test$i32$i32 = .{};
 ```
 
 - 实例体是定义 AST 的深拷贝 + 参数代换（类型参数 → 具体类型表达式）。
+- **walk 期物化（P11）**：实例化与 emit 解耦——sema_walk 尾部
+  （anons 收集后、检查 pass 前）按收集序对每个参数组合做 inst 态克隆
+  物化（GENERIC_PARAMS 摘除 + 形参代换 + 自引用折叠），产出非泛型形态
+  声明挂 `sema_instance_body_t.inst_stmt`。新造文本（实例名等）intern
+  进 sema 持有的临时 `inst_program` 文本池。
+- **检查 pass 覆盖实例体**：检查域 = 原树顶层语句 + 全部物化体，
+  四类顶层循环（模块注册 / 非泛型函数体 / struct 方法体 / 模块 var
+  不动点）统一遍历同一 tops 表。定义体错误在错误实参组合上暴露。
+- **emit 只做普通消费**：emit 视物化体为普通 func/type，尾部纯普通
+  深克隆进产物（不再关心实例化）；克隆期按指针命中文本池的 location
+  文本重 intern 进产物 program（reown_from 通道），产物新造文本自持
+  不借 sema 生命周期（§5-2 引擎全灭后仍可序列化）。defer_counter
+  在物化循环与 emit 间连续（物化消耗记入 `inst_defer_counter`，
+  emit 预置起点），防 `__deferN` 撞名。物化失败条目（防御态 NULL）
+  检查与 emit 均跳过。
 - 实例化发生在**使用它的模块**内；实例名在本模块 program 内唯一即可
   （不同模块各自实例化同名实例互不冲突，分属各自 program）。
 - 使用导入模块导出的实例时直接引用其名字，不重复实例化
@@ -453,12 +468,16 @@ sema_create(ctx, out_allocator)
 - TDZ 是同一语义的**运行期**同型物；静态版在检查 pass 内独立实现，
   机制分离（一个静态一个动态），语义对齐由测试对照保证。
 
-### 8.7 泛型体检查（本期不落地，锚点）
+### 8.7 泛型体检查（P11 已落地）
 
-§2.3 已定：实例体的类型检查 = 在代换后的 AST 上带实参 shadow 值
-再做一次 walk。落在 emit 产出的实例体上、与 emit 的先后关系，随
-后续泛型体检查分期定稿。本期泛型定义体不检查——定义体错误在
-实例化后才暴露，属既有语义。
+实例化与 emit 解耦（§2.3 P11）：sema_walk 尾部把每个使用过的参数组合
+物化为非泛型形态声明（inst 态克隆 + 代换），检查 pass 把物化体当
+**普通声明**检查——模块注册 / 函数体 / struct 方法体 / 模块 var 各循
+环统一遍历「原树顶层 + 全部物化体」。泛型定义体本身不再单独建检查
+通道：未使用的定义体不物化、不检查（`GenericDefWithoutUseIsNot
+Instantiated`）；定义体错误天然只在物化出的坏实参组合上暴露
+（`GenericBodyErrorOnlyInBadInstance`）。检查失败经 diag 汇聚到
+sema_has_error，emit 返回 NULL。
 
 ### 8.8 分期表
 
@@ -468,3 +487,4 @@ sema_create(ctx, out_allocator)
 | 8 | 表达式类型推断：shadow 演算全表达式形态 + 类型结果表 + 调用签名交验 | 合法程序全过、非法调用点报 diag |
 | 9 | 语句级检查：初始化/赋值兼容 + 构造完备性 + 条件 bool + return 匹配 | 正负测对照 |
 | 10 | DFA 确定性赋值 + §2.8 渲染器消费类型表补全回填 + §5-4 断言收紧 | kRichSource 全部 STMT_VAR 有 TYPE；子集断言无条件 |
+| 11 | 泛型实例体 walk 期物化 + 检查 pass 统一 tops 表覆盖（§8.7） | 坏实参组合报定义体错误、好组合零诊断、检查失败 emit 返回 NULL |

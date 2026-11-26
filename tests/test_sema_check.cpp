@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/allocator.h"
 #include "core/json.h"
+#include "core/program.h"
 #include "core/vec.h"
 #include "engine/context.h"
 #include "engine/diag.h"
@@ -13,7 +14,9 @@
 #include <string.h>
 
 /* §8.8 P7 类型环境 + 名字解析：函数体内自由名字解析、类型位置求值、
-   内建遮蔽与局部判重；诊断全收集不 fast-fail。 */
+   内建遮蔽与局部判重；诊断全收集不 fast-fail。
+   §8.7 P11 泛型实例体 walk 期物化：物化体与原树同过 check pass，
+   定义体错误在错误实参组合上暴露；检查失败 emit 返回 NULL。 */
 
 static node_t *parse_clux(allocator_t *a, parser_t **p, const char *src) {
   *p = create_parser(a, "test.clux", src);
@@ -971,6 +974,156 @@ TEST(SemaCheckTest, StructMethodBodyCleanHasNoDiag) {
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- §8.7 P11：泛型体检查（walk 期物化 → 实例体纳入检查通道） ---- */
+
+/* 无使用点的泛型定义不实例化 → 定义体不检查：合理省略（无实例即无
+   可检查对象）。 */
+TEST(SemaCheckTest, GenericDefWithoutUseIsNotInstantiated) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func id[T](x: T): T { return missing; }\n"
+                           "var v: i32 = 0;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 泛型 func 体内未定义名：使用点触发物化（id$i32），物化体当普通函数
+   检查 → walk 期报 undefined name，emit 因 has_error 返回 NULL。 */
+TEST(SemaCheckTest, GenericFuncBodyErrorIsReportedAndEmitBlocked) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func id[T](x: T): T { return missing; }\n"
+                           "var v: i32 = id[i32](1);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "undefined name 'missing'");
+  /* 检查失败 → 不产出：emit 必须返回 NULL。 */
+  EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 同一 body 只在坏实参组合上报错：body 语句 `var y: *i32 = x;` 在
+   T=i32 组合下类型不匹配（物化体 f$i32 报 safe_cast），在 T=P（*i32）
+   组合下合法；两个调用点自身均签名匹配，不产生额外诊断。 */
+TEST(SemaCheckTest, GenericBodyErrorOnlyInBadInstance) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "type P = *i32;\n"
+                           "func f[T](x: T): void { var y: *i32 = x; }\n"
+                           "var a: i32 = 0;\n"
+                           "var p: *i32;\n"
+                           "var use1 = f[i32](a);\n"
+                           "var use2 = f[P](p);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "cannot safely cast 'i32' to '*i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 泛型体内 DFA：use-before-assignment 经物化体在 walk 期暴露。 */
+TEST(SemaCheckTest, GenericBodyUseBeforeAssignmentIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f[T](x: T): void {\n"
+                           "  var v: T = undefined;\n"
+                           "  var w = v;\n"
+                           "}\n"
+                           "var a: i32 = 0;\n"
+                           "var use = f[i32](a);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "use before assignment 'v'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 泛型 struct 实例体方法体错误：使用点触发 Box$i32 物化，方法体当
+   普通方法检查 → 未定义字段访问在 walk 期上报。 */
+TEST(SemaCheckTest, GenericStructMethodBodyIsChecked) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast =
+      parse_clux(a,
+                 &p,
+                 "struct Box[T] {\n"
+                 "  v: T;\n"
+                 "  func get(self: *Box[T]): T { return self.missing; }\n"
+                 "}\n"
+                 "var b: Box[i32];\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_GE(clux_context_diag_count(ctx), 1u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 正测：干净的泛型 func + struct 实例化零诊断，emit 正常产出。 */
+TEST(SemaCheckTest, GenericInstancesCleanHaveNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func id[T](x: T): T { return x; }\n"
+                           "struct Box[T] { v: T; }\n"
+                           "var a: i32 = 0;\n"
+                           "var use = id[i32](a);\n"
+                           "var b: Box[i32];\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  ASSERT_NE(program, nullptr);
+  delete_program(&program);
+  delete_vec(&programs);
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);

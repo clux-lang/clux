@@ -47,6 +47,8 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->instants = create_vec(allocator);
   sema->generic_defs = create_vec(allocator);
   sema->instance_bodies = create_vec(allocator);
+  sema->inst_program = NULL;    /* 物化期按需创建（§2.3 P11） */
+  sema->inst_defer_counter = 0; /* 物化未发生即 0 起点 */
   sema->const_defs = create_vec(allocator);
   sema->const_uses = create_vec(allocator);
   sema->prunes = create_vec(allocator);
@@ -100,9 +102,16 @@ void sema_destroy(clux_sema_t **sema) {
     }
     delete_vec(&body->param_names);
     delete_vec(&body->args); /* 实参节点借用原树，只释放 vec 外壳 */
+    if (body->inst_stmt) {
+      delete_node(&body->inst_stmt); /* 物化体归 sema 所有（§2.3 P11） */
+    }
     allocator_free(allocator, (void **)&body);
   }
   delete_vec(&self->instance_bodies);
+  if (self->inst_program) {
+    /* 文本池只持 intern 字符串表（物化体根不挂 decls），单独释放外壳 */
+    delete_program(&self->inst_program);
+  }
   for (size_t idx = 0; idx < vec_get_size(self->const_defs); idx++) {
     sema_const_def_t *def = (sema_const_def_t *)vec_get(self->const_defs, idx);
     allocator_free(allocator, (void **)&def->name);
@@ -202,6 +211,11 @@ static node_t *sema_func_name_of(node_t *stmt) {
   return decl ? func_decl_node_get_name(decl) : NULL;
 }
 
+static node_t *sema_func_generics_of(node_t *stmt) {
+  node_t *decl = stmt_func_node_get_func_decl(stmt);
+  return decl ? func_decl_node_get_generics(decl) : NULL;
+}
+
 static node_t *sema_struct_name_of(node_t *stmt) {
   node_t *decl = stmt_struct_node_get_struct_decl(stmt);
   return decl ? struct_decl_node_get_name(decl) : NULL;
@@ -249,7 +263,7 @@ static const sema_decl_meta_t g_sema_decl_meta[] = {
     [CLUX_NODE_STMT_TYPE] = {stmt_type_node_get_name,
                              stmt_type_node_get_generics,
                              1},
-    [CLUX_NODE_STMT_FUNC] = {sema_func_name_of, NULL, 1},
+    [CLUX_NODE_STMT_FUNC] = {sema_func_name_of, sema_func_generics_of, 1},
     [CLUX_NODE_STMT_STRUCT] = {sema_struct_name_of, sema_struct_generics_of, 1},
     [CLUX_NODE_STMT_ENUM] = {sema_enum_name_of, NULL, 1},
     [CLUX_NODE_STMT_UNION] = {sema_union_name_of, sema_union_generics_of, 1},
@@ -858,6 +872,52 @@ sema_struct_member_hoist(clux_sema_t *sema, node_t *stmt, const char *prefix) {
   }
 }
 
+/* §2.3 P11 物化：walk 尾部（anons 收集后、check pass 前）对每个实例体
+   做一次 inst 态克隆，产出物化体 inst_stmt——check pass 当普通声明检查
+   （§8.7 泛型体检查），emit 尾部对其只做普通克隆，实例化与 emit 解耦。
+   共享同一 clone env：defer_counter 跨实例体连续（消耗值记入
+   inst_defer_counter 供 emit 预置起点）；instants/consts/prunes/anons/
+   methods 全表注入，与旧 emit 尾部 inst 态克隆行为等价（定义体内引用
+   点照常折叠/剪枝/退化）。新造文本 intern 进 sema 持有的 inst_program，
+   物化体与后续 emit 产物的实例名 location 借其缓冲。 */
+static void sema_instance_bodies_materialize(clux_sema_t *sema) {
+  size_t total = vec_get_size(sema->instance_bodies);
+  if (total == 0) {
+    return;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  sema->inst_program = create_program(allocator);
+  sema_clone_env_t env;
+  sema_clone_env_init(&env,
+                      allocator,
+                      sema->inst_program,
+                      sema->instants,
+                      sema->const_uses,
+                      sema->prunes,
+                      sema);
+  env.anons = sema->anons;
+  env.methods = sema->methods;
+  for (size_t idx = 0; idx < total; idx++) {
+    sema_instance_body_t *body =
+        (sema_instance_body_t *)vec_get(sema->instance_bodies, idx);
+    sema_rename_t inst_rename;
+    inst_rename.from = body->base;
+    inst_rename.to = body->name;
+    env.renames = &inst_rename;
+    env.rename_count = 1;
+    env.inst_params = body->param_names;
+    env.inst_args = body->args;
+    env.instantiate = 1;
+    body->inst_stmt = sema_clone_node_renamed(body->stmt, &env);
+    env.renames = NULL;
+    env.rename_count = 0;
+    env.inst_params = NULL;
+    env.inst_args = NULL;
+    env.instantiate = 0;
+  }
+  sema->inst_defer_counter = env.defer_counter;
+}
+
 int sema_walk(clux_sema_t *sema, node_t *program) {
   if (!sema) {
     return -1;
@@ -964,6 +1024,9 @@ int sema_walk(clux_sema_t *sema, node_t *program) {
     }
     sema_anon_collect(sema, stmt);
   }
+  /* §2.3 P11 物化：实例体在 check pass 前落成——check 把物化体当普通
+     声明检查（§8.7 泛型体检查随之免费获得），emit 只做普通克隆。 */
+  sema_instance_bodies_materialize(sema);
   /* 类型环境 + 名字解析（§8.8 P7）：诊断全收集不 fast-fail，仍在
      current module 期内——模块级登记需要 current scope = module scope。 */
   sema_check_pass(sema);
@@ -1047,6 +1110,9 @@ vec_t *sema_emit(clux_sema_t *sema) {
       &env, out, program, sema->instants, sema->const_uses, sema->prunes, sema);
   env.anons = sema->anons;
   env.methods = sema->methods;
+  /* §2.3 P11：物化期已消耗若干 __deferN 编号（物化体闭包 var 固化名），
+     emit 主循环从物化已消耗值之后起计数，防模块内撞名。 */
+  env.defer_counter = sema->inst_defer_counter;
   sema_rename_t *renames = NULL;
   vec_t *skip = NULL;
   for (size_t idx = 0; idx < program_node_get_stmt_count(sema->ast); idx++) {
@@ -1115,27 +1181,22 @@ vec_t *sema_emit(clux_sema_t *sema) {
     env.rename_count = 0;
     env.skip = NULL;
   }
-  /* §2.3 完整版实例体：定义深拷贝 + 形参代换——renames 单条
-     base→实例名改声明名与体内裸引用，inst_params/inst_args 代换
-     泛型形参，instantiate 态摘除 GENERICS 槽并折叠自引用使用点。 */
+  /* §2.3 P11 实例体输出：walk 期已物化（inst_stmt），emit 只对物化体做
+     纯普通深克隆——不再关心实例化（代换/自引用折叠均已固化）。物化
+     失败条目（防御态 NULL）跳过。表注入保持 env 现状：物化体节点指针
+     不在原树锚定的收集表中，不会命中。克隆期开启 reown_from：物化体
+     新造文本（借 inst_program 缓冲）重 intern 进产物 program，产物
+     不借 sema 生命周期（§5-2 引擎全灭后仍可序列化）。 */
+  env.reown_from = sema->inst_program;
   for (size_t idx = 0; idx < vec_get_size(sema->instance_bodies); idx++) {
     sema_instance_body_t *body =
         (sema_instance_body_t *)vec_get(sema->instance_bodies, idx);
-    sema_rename_t inst_rename;
-    inst_rename.from = body->base;
-    inst_rename.to = body->name;
-    env.renames = &inst_rename;
-    env.rename_count = 1;
-    env.inst_params = body->param_names;
-    env.inst_args = body->args;
-    env.instantiate = 1;
-    program_node_add_stmt(ast, sema_clone_node_renamed(body->stmt, &env));
-    env.renames = NULL;
-    env.rename_count = 0;
-    env.inst_params = NULL;
-    env.inst_args = NULL;
-    env.instantiate = 0;
+    if (body->inst_stmt) {
+      program_node_add_stmt(ast,
+                            sema_clone_node_renamed(body->inst_stmt, &env));
+    }
   }
+  env.reown_from = NULL;
   /* §2.9 匿名构造具名化：按收集序合成 struct nonamed$N { ... }。
      字段取自 CONSTRUCT_FIELD（NAME 渲染 identifier，TYPE 按 VALUE
      字面量推断：bool / 带后缀数值以后缀定类型 / 无后缀整数默认 i32，

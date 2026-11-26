@@ -2468,10 +2468,10 @@ check_collect_idents(allocator_t *allocator, node_t *node, vec_t *names) {
 
 /* 模块级 var 工作条目：不动点演算的最小载体。 */
 typedef struct {
-  node_t *stmt;    /* STMT_VAR 锚点（定位 + 类型表回填） */
-  char *name;      /* var 名（ctx allocator），占位值查找键 */
-  vec_t *deps;     /* char*（ctx allocator），值表达式引用名 */
-  int resolved;    /* 已定型（含"已尝试失败"——防重复演算重复 diag） */
+  node_t *stmt; /* STMT_VAR 锚点（定位 + 类型表回填） */
+  char *name;   /* var 名（ctx allocator），占位值查找键 */
+  vec_t *deps;  /* char*（ctx allocator），值表达式引用名 */
+  int resolved; /* 已定型（含"已尝试失败"——防重复演算重复 diag） */
 } check_modvar_t;
 
 /* ---- 入口 ---- */
@@ -2480,13 +2480,31 @@ int sema_check_pass(clux_sema_t *sema) {
   if (!sema || !sema->ast) {
     return 0;
   }
-  /* current scope 须为 module scope（walk 尾部、模块摘除前）。 */
+  /* current scope 须为 module scope（walk 尾部、模块摘除前）。
+     §8.7 P11：检查域 = 原树顶层语句 + walk 期物化的实例体（inst_stmt，
+     非泛型形态——代换/自引用折叠已固化）。物化体当普通声明走同一套
+     register/函数体/方法体循环，泛型体检查即免费获得：定义体错误在
+     错误实参组合的物化体上暴露，错误即 diag → emit 阻断。 */
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  vec_t *tops = create_vec(allocator);
   size_t count = program_node_get_stmt_count(sema->ast);
   for (size_t idx = 0; idx < count; idx++) {
-    check_module_register(sema, program_node_get_stmt(sema->ast, idx));
+    vec_push(tops, program_node_get_stmt(sema->ast, idx));
+  }
+  for (size_t idx = 0; idx < vec_get_size(sema->instance_bodies); idx++) {
+    node_t *inst_stmt =
+        ((sema_instance_body_t *)vec_get(sema->instance_bodies, idx))
+            ->inst_stmt;
+    if (inst_stmt) {
+      vec_push(tops, inst_stmt);
+    }
+  }
+  count = vec_get_size(tops);
+  for (size_t idx = 0; idx < count; idx++) {
+    check_module_register(sema, vec_get(tops, idx));
   }
   for (size_t idx = 0; idx < count; idx++) {
-    node_t *stmt = program_node_get_stmt(sema->ast, idx);
+    node_t *stmt = vec_get(tops, idx);
     if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_FUNC) {
       continue;
     }
@@ -2501,7 +2519,7 @@ int sema_check_pass(clux_sema_t *sema) {
      化通道。方法名归三表（不裸 define），check_func_decl 只登记形参，
      不产生重复登记。 */
   for (size_t idx = 0; idx < count; idx++) {
-    node_t *stmt = program_node_get_stmt(sema->ast, idx);
+    node_t *stmt = vec_get(tops, idx);
     if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_STRUCT) {
       continue;
     }
@@ -2531,10 +2549,9 @@ int sema_check_pass(clux_sema_t *sema) {
      已由 checked 通道上报，标记 resolved 防后续轮次重复报）。一轮无
      进展仍有未定型，即循环依赖/相互引用——唯一不可推断场景，按语法
      错误上报（含自引用：名字在本组内未定型同样阻塞）。 */
-  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
   vec_t *vars = create_vec(allocator);
   for (size_t idx = 0; idx < count; idx++) {
-    node_t *stmt = program_node_get_stmt(sema->ast, idx);
+    node_t *stmt = vec_get(tops, idx);
     if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_VAR) {
       continue;
     }
@@ -2558,8 +2575,7 @@ int sema_check_pass(clux_sema_t *sema) {
         continue;
       }
       int blocked = 0;
-      for (size_t dep = 0; dep < vec_get_size(entry->deps) && !blocked;
-           dep++) {
+      for (size_t dep = 0; dep < vec_get_size(entry->deps) && !blocked; dep++) {
         char *dep_name = vec_get(entry->deps, dep);
         for (size_t other_idx = 0; other_idx < vec_get_size(vars);
              other_idx++) {
@@ -2612,5 +2628,6 @@ int sema_check_pass(clux_sema_t *sema) {
     allocator_free(allocator, (void **)&entry);
   }
   delete_vec(&vars);
+  delete_vec(&tops); /* 只借原树/物化体指针，释放外壳 */
   return 0;
 }

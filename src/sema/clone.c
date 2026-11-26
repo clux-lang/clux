@@ -880,12 +880,36 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
     }
   }
   node_t *clone = create_node(env->out, node_get_kind(node));
-  node_set_location(clone, node_get_location(node));
+  /* §2.3 P11：emit 克隆物化体时，location 文本命中 reown_from 文本池
+     （新造文本 intern 自 sema->inst_program，指针精确匹配池内 string 数据）
+     → 重 intern 进目标 program：产物新造文本自持，不借 sema 生命周期；
+     源码文本不在池内，保持借调用方源缓冲的原契约。 */
+  const location_t *loc = node_get_location(node);
+  if (env->reown_from && loc && loc->begin.offset) {
+    vec_t *pool = program_get_strings(env->reown_from);
+    int hit = 0;
+    for (size_t idx = 0; !hit && pool && idx < vec_get_size(pool); idx++) {
+      string_t *str = vec_get(pool, idx);
+      hit = loc->begin.offset == string_get_data(str);
+    }
+    if (hit) {
+      size_t len = (size_t)(loc->end.offset - loc->begin.offset);
+      const char *text =
+          program_intern_string(env->program, loc->begin.offset, len);
+      location_t owned = *loc;
+      owned.begin.offset = text;
+      owned.end.offset = text + len;
+      node_set_location(clone, &owned);
+    } else {
+      node_set_location(clone, loc);
+    }
+  } else {
+    node_set_location(clone, loc);
+  }
   /* 改写目标：LITERAL_IDENTIFIER（名字/类型引用）、SYMBOL（关键字，
      不会与用户声明名同文本，条件覆盖仅为统一）。 */
   if ((kind == CLUX_NODE_SYMBOL || kind == CLUX_NODE_LITERAL_IDENTIFIER) &&
       env->renames && env->rename_count > 0) {
-    const location_t *loc = node_get_location(node);
     for (size_t idx = 0; idx < env->rename_count; idx++) {
       if (!location_is(loc, env->renames[idx].from)) {
         continue;
@@ -965,6 +989,7 @@ void sema_clone_env_init(sema_clone_env_t *env,
   env->inst_params = NULL;
   env->inst_args = NULL;
   env->instantiate = 0;
+  env->reown_from = NULL;
   env->defer_counter = 0;
   env->sema = sema;
 }
