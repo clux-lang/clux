@@ -58,10 +58,10 @@
    x = twice(21)；[[add100]] func raw 落地为 raw = add100(raw)）；
    求值为其余值（编译期标记，如 metadata）不改当前值原样返回。
    expr 缺失 / 装饰器求值 error / invoke error 均产出 error。 */
-static clux_value_t *apply_decorator(clux_context_t *ctx,
-                                     clux_value_t *value,
-                                     node_t *decorator,
-                                     const location_t *fallback_loc) {
+clux_value_t *exec_apply_decorator(clux_context_t *ctx,
+                                   clux_value_t *value,
+                                   node_t *decorator,
+                                   const location_t *fallback_loc) {
   node_t *decorator_expr =
       decorator ? decorator_node_get_expr(decorator) : NULL;
   if (!decorator_expr) {
@@ -134,10 +134,10 @@ clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node) {
   if (value) {
     size_t decorator_count = stmt_var_node_get_decorator_count(node);
     for (size_t idx = 0; idx < decorator_count; idx++) {
-      value = apply_decorator(ctx,
-                              value,
-                              stmt_var_node_get_decorator(node, idx),
-                              node_get_location(node));
+      value = exec_apply_decorator(ctx,
+                                   value,
+                                   stmt_var_node_get_decorator(node, idx),
+                                   node_get_location(node));
       if (clux_value_is_error(value)) {
         return value;
       }
@@ -1255,10 +1255,10 @@ clux_value_t *exec_stmt_func(clux_context_t *ctx, node_t *node) {
     return value;
   }
   for (size_t idx = 0; idx < decorator_count; idx++) {
-    value = apply_decorator(ctx,
-                            value,
-                            stmt_func_node_get_decorator(node, idx),
-                            node_get_location(node));
+    value = exec_apply_decorator(ctx,
+                                 value,
+                                 stmt_func_node_get_decorator(node, idx),
+                                 node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;
     }
@@ -1304,10 +1304,10 @@ clux_value_t *exec_stmt_union(clux_context_t *ctx, node_t *node) {
     return value;
   }
   for (size_t idx = 0; idx < decorator_count; idx++) {
-    value = apply_decorator(ctx,
-                            value,
-                            stmt_union_node_get_decorator(node, idx),
-                            node_get_location(node));
+    value = exec_apply_decorator(ctx,
+                                 value,
+                                 stmt_union_node_get_decorator(node, idx),
+                                 node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;
     }
@@ -1353,10 +1353,10 @@ clux_value_t *exec_stmt_enum(clux_context_t *ctx, node_t *node) {
     return value;
   }
   for (size_t idx = 0; idx < decorator_count; idx++) {
-    value = apply_decorator(ctx,
-                            value,
-                            stmt_enum_node_get_decorator(node, idx),
-                            node_get_location(node));
+    value = exec_apply_decorator(ctx,
+                                 value,
+                                 stmt_enum_node_get_decorator(node, idx),
+                                 node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;
     }
@@ -1402,10 +1402,10 @@ clux_value_t *exec_stmt_bitfield(clux_context_t *ctx, node_t *node) {
     return value;
   }
   for (size_t idx = 0; idx < decorator_count; idx++) {
-    value = apply_decorator(ctx,
-                            value,
-                            stmt_bitfield_node_get_decorator(node, idx),
-                            node_get_location(node));
+    value = exec_apply_decorator(ctx,
+                                 value,
+                                 stmt_bitfield_node_get_decorator(node, idx),
+                                 node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;
     }
@@ -1451,10 +1451,10 @@ clux_value_t *exec_stmt_interface(clux_context_t *ctx, node_t *node) {
     return value;
   }
   for (size_t idx = 0; idx < decorator_count; idx++) {
-    value = apply_decorator(ctx,
-                            value,
-                            stmt_interface_node_get_decorator(node, idx),
-                            node_get_location(node));
+    value = exec_apply_decorator(ctx,
+                                 value,
+                                 stmt_interface_node_get_decorator(node, idx),
+                                 node_get_location(node));
     if (clux_value_is_error(value)) {
       return value;
     }
@@ -1494,26 +1494,67 @@ clux_value_t *exec_stmt_struct(clux_context_t *ctx, node_t *node) {
   if (decorator_count == 0) {
     return exec_operand(ctx, decl);
   }
-  /* 匿名求值源类型值：不具名——type value 无捕获引用，装饰失败
-     直接返回 error，无需回滚声明。注意：此路径方法签名引用 struct
-     自身不可解析（壳名未 define），值级装饰路径待泛型批次处理。 */
-  clux_value_t *value = exec_expr_struct_decl_value(ctx, decl);
-  if (clux_value_is_error(value)) {
-    return value;
-  }
+  /* 装饰器表达式先行求值（白皮书 §9.1/§9.6）：标记类（非 func 值，如
+     metadata）只做编译期标记；求值失败在壳 define 之前拦截——声明失败
+     名字不可解析（与 union/enum 等语句的失败语义一致）。 */
+  clux_value_t *wrappers[decorator_count ? decorator_count : 1];
+  bool has_func = false;
   for (size_t idx = 0; idx < decorator_count; idx++) {
-    value = apply_decorator(ctx,
-                            value,
-                            stmt_struct_node_get_decorator(node, idx),
-                            node_get_location(node));
-    if (clux_value_is_error(value)) {
-      return value;
+    node_t *decorator = stmt_struct_node_get_decorator(node, idx);
+    node_t *decorator_expr =
+        decorator ? decorator_node_get_expr(decorator) : NULL;
+    if (!decorator_expr) {
+      return clux_context_create_error_message(
+          ctx,
+          decorator ? node_get_location(decorator) : node_get_location(node),
+          "decorator requires an expression");
+    }
+    wrappers[idx] = exec_operand(ctx, decorator_expr);
+    if (!wrappers[idx] || clux_value_is_error(wrappers[idx])) {
+      return wrappers[idx] ? wrappers[idx]
+                           : clux_context_create_error_message(
+                                 ctx,
+                                 node_get_location(node),
+                                 "struct '%s' decoration failed",
+                                 "struct");
+    }
+    if (clux_type_kind_unwrap(clux_value_get_type(wrappers[idx])) ==
+        CLUX_TYPE_FUNC) {
+      has_func = true;
     }
   }
-  allocator_t *allocator = clux_context_get_allocator(ctx);
-  char *name = location_get(node_get_location(name_node), allocator);
-  clux_value_t *bound = clux_context_declare_value(
-      ctx, value, name, node_get_location(name_node));
-  allocator_free(allocator, (void **)&name);
+  /* 具名两阶段构造（壳先 define）：方法签名引用 struct 自身在 pass C
+     可解析——泛型实例体经 sema 物化代换出的实例名同样在此 define。 */
+  clux_value_t *bound = exec_operand(ctx, decl);
+  if (!bound || clux_value_is_error(bound)) {
+    return bound;
+  }
+  /* func 类类型装饰器在具名壳上按声明序 invoke，完成编译期调用计算
+     （§9.9）；但类型绑定保持壳值——类型装饰器不产生运行期代码、
+     不改写类型本体（§9.6），包装结果只消费 error，值丢弃。 */
+  if (has_func) {
+    exec_call_install_executor(ctx);
+    for (size_t idx = 0; idx < decorator_count; idx++) {
+      if (clux_type_kind_unwrap(clux_value_get_type(wrappers[idx])) !=
+          CLUX_TYPE_FUNC) {
+        continue;
+      }
+      node_t *decorator = stmt_struct_node_get_decorator(node, idx);
+      clux_value_t *computed = clux_context_invoke(
+          ctx,
+          wrappers[idx],
+          1,
+          &bound,
+          decorator ? node_get_location(decorator) : node_get_location(node));
+      if (!computed || clux_value_is_error(computed)) {
+        return computed ? computed
+                        : clux_context_create_error_message(
+                              ctx,
+                              node_get_location(node),
+                              "struct '%s' decoration failed",
+                              "struct");
+      }
+    }
+  }
   return bound;
 }

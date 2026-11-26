@@ -490,6 +490,7 @@ sema_has_error，emit 返回 NULL。
 | 11 | 泛型实例体 walk 期物化 + 检查 pass 统一 tops 表覆盖（§8.7） | 坏实参组合报定义体错误、好组合零诊断、检查失败 emit 返回 NULL |
 | 12 | 泛型约束检查（§8.9）：interface 类型真实构建 + 实例体逐参约束判定 | 不满足报第一个缺失/签名不符成员或派生失败；好组合零诊断 |
 | 13 | 物化对齐默认值与参数包协议（§8.10）：§6.2 缺参默认补齐 + §6.4 尾部包聚合 | 缺参无默认报 missing、省略与显式折叠同名、包空/展开零诊断 |
+| 14 | 装饰器编译期计算（§8.11）：exec_apply_decorator 公有化 + pass C 成员装饰器链式应用 + STMT_STRUCT 装饰三段式 | 方法装饰器值级包装 end-to-end、同定义双实例独立计算、标记/失败路径回归 |
 
 ### 8.9 泛型约束检查（P12 设计稿）
 
@@ -552,3 +553,39 @@ P11 物化通道按 `param_count == arg_count` 严格校验，§6.2 泛型默认
 - **parser 同步修复**：泛型参数 TYPE/CONSTRAINT 槽解析改用 ternary
   层——顶层 assign 会把 `[N: usize = 4]` 的 `= 4` 吞成赋值表达式，
   DEFAULT 分支永不触发（与捕获项 `( name: type = default )` 同层同修）。
+
+### 8.11 装饰器编译期计算（P14 已落地）
+
+装饰器此前只有 parser 期语法与 sema 登记通道，exec 期零计算。P14 按
+§9.1/§9.6/§9.9 把装饰器的编译期调用落进 exec，协议以
+`exec_apply_decorator`（stmt.c，已公有化）为核心：
+
+- **apply 协议**：装饰器表达式求值为 func → 以当前值为唯一实参
+  invoke（值级包装）；求值为其他值（metadata/类型值等编译期标记）→
+  原样返回当前值（§9.1 标记类透传）；表达式缺失/求值 error/invoke
+  error → 产出 error。
+- **STMT_STRUCT 装饰三段式**（exec_stmt_struct）：①装饰器表达式先于
+  壳 define 求值，失败即拦截——名字不 define；②全标记类 → 具名求值
+  后直接返回 bound；③有 func → 具名两阶段构造（先 define 壳使装饰器
+  体内自引用可解析）→ 按声明序逐个 invoke → **绑定保持壳值，包装结果
+  只消费 error**（§9.6 类型装饰器编译期计算但不改写类型本体；早期
+  「struct 包装成 i32」属人为行为，随本语义收紧废除）。
+- **pass C 成员装饰器**（exec_expr_struct_decl_impl）：STMT_VAR/
+  STMT_FUNC 成员按声明序链式 `exec_apply_decorator`——方法装饰后由
+  包装函数接管 method 表，`u.get()` 经 member-call 糖真实走捕获链
+  （end-to-end 见 `StructMethodDecoratorWrapsMethodInPassCEndToEnd`）。
+  标记类装饰器（类型值等）不改写成员初值，原样透传。
+- **泛型按实例计算**：泛型实例体经 sema walk 期物化（形参名→实参
+  代换）后作为独立实例语句在 exec 期逐条执行，装饰器表达式（含代换
+  后的调用实参）随每条实例语句独立求值——`Conf[i32]` 与
+  `Conf[usize]` 的 `[[addn(B)]]` 各算各的，不共享缓存
+  （`GenericInstanceDecoratorComputesPerInstance`）。
+- **注意**：装饰器函数签名经 exec 急切求值
+  （exec_func_decl_impl → exec_operand_type），被装饰类型须先于装饰器
+  定义存在，前向引用将报 undeclared。
+
+**留后续的三个缺口**（P14 不含，随对应批次开放）：
+
+1. STMT_TYPE 声明上的装饰器 exec 期静默丢弃（parser 保留节点）；
+2. FIELD（枚举字段）装饰器全链路零消费；
+3. 带装饰器的 comptime var 随 emit 常量摘除丢弃（emit 期不回放装饰器）。

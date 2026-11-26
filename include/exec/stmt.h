@@ -6,6 +6,13 @@
 extern "C" {
 #endif
 clux_value_t *exec_stmt_var(clux_context_t *ctx, node_t *node);
+/* 单装饰器应用（白皮书 §9.1 值级包装协议）：装饰器表达式求值为 func 时
+   以当前值为唯一实参 invoke；其余值（编译期标记）原样返回当前值。
+   pass C 成员装饰（src/exec/expr.c）与本文件各声明语句共用。 */
+clux_value_t *exec_apply_decorator(clux_context_t *ctx,
+                                   clux_value_t *value,
+                                   node_t *decorator,
+                                   const location_t *fallback_loc);
 clux_value_t *exec_stmt_type(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_func(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_stmt_union(clux_context_t *ctx, node_t *node);

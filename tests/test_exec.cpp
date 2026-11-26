@@ -3684,11 +3684,10 @@ TEST_F(ExecLiteralTest, ArrayTypeBuildsInternedArrayTypeValue) {
          仍然产出 interning 的 [4]i32 type value——旧实现
          location_is("[]") 对此形态静默落空。 */
 TEST_F(ExecLiteralTest, RealParsedArraySpanStillBuildsArrayType) {
-  node_t *node =
-      make_binary_of(a,
-                     make_node(CLUX_NODE_LITERAL_NUMERIC, "4"),
-                     make_node(CLUX_NODE_SYMBOL, "[4]"),
-                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_NUMERIC, "4"),
+                                make_node(CLUX_NODE_SYMBOL, "[4]"),
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
   clux_value_t *result = exec_expr_binary(ctx, node);
   ASSERT_NE(result, nullptr);
   EXPECT_FALSE(clux_value_is_error(result)) << error_message_of(result);
@@ -13524,10 +13523,11 @@ TEST_F(ExecLiteralTest, StructStatementWithoutDecoratorsDefinesByName) {
   delete_node(&stmt);
 }
 
-/* 场景: attribute 四条错误路径——var 成员带装饰器/缺名（成员索引 1）/
-        缺初值/重名 'a'
-   预期: 各路径精确错误文本（缺名消息的 %zu 是成员索引——首个成员是
-         合法字段，nameless var 位于成员位 1） */
+/* 场景: attribute 带装饰器成员走标记透传 + 三条错误路径——缺名（成员
+        索引 1）/缺初值/重名 'a'
+   预期: 装饰 attribute 编译期标记透传原值（§9.1）；错误路径精确文本
+         （缺名消息的 %zu 是成员索引——首个成员是合法字段，nameless
+         var 位于成员位 1） */
 TEST_F(ExecLiteralTest, StructDeclAttributeErrorPaths) {
   node_t *members = create_struct_members_node(a);
   node_t *decorated = make_var_member_of(
@@ -13548,8 +13548,16 @@ TEST_F(ExecLiteralTest, StructDeclAttributeErrorPaths) {
   node_t *decl = make_struct_decl_of(a, "SA", NULL, members);
   clux_value_t *decorated_attr = exec_expr_struct_decl(ctx, decl);
   ASSERT_NE(decorated_attr, nullptr);
-  EXPECT_STREQ(error_message_of(decorated_attr),
-               "decorated struct attribute is not supported yet");
+  /* P14 起成员装饰器走 exec_apply_decorator：i32 类型值非 func，
+     按编译期标记透传（§9.1），attribute d 保持原值 0。 */
+  EXPECT_FALSE(clux_value_is_error(decorated_attr));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(decorated_attr)),
+            CLUX_TYPE_TYPE);
+  clux_type_t *sa_type = type_described_by(decorated_attr);
+  ASSERT_NE(sa_type, nullptr);
+  const clux_struct_attr_t *d_attr = clux_struct_find_attr(sa_type, "d");
+  ASSERT_NE(d_attr, nullptr);
+  EXPECT_EQ(read_i32(d_attr->value), 0);
   delete_node(&decl);
 
   members = create_struct_members_node(a);
@@ -13636,10 +13644,12 @@ TEST_F(ExecLiteralTest, StructDeclAttributeErrorPaths) {
   delete_node(&decl);
 }
 
-/* 场景: method 四条错误路径——func 成员带装饰器/缺函数声明体（成员
-        索引 1）/函数声明缺名（成员索引 1）/与既有 attribute 'act' 重名
-   预期: 各路径精确错误文本（重名走 attribute 重名通道而非 method 通道；
-         缺声明体/缺名消息的 %zu 是成员索引） */
+/* 场景: method 带装饰器成员走标记透传 + 三条错误路径——缺函数声明体
+        （成员索引 1）/函数声明缺名（成员索引 1）/与既有 attribute
+        'act' 重名
+   预期: 装饰方法编译期标记透传后照常安装（§9.1）；错误路径精确文本
+         （重名走 attribute 重名通道而非 method 通道；缺声明体/缺名
+         消息的 %zu 是成员索引） */
 TEST_F(ExecLiteralTest, StructDeclMethodErrorPaths) {
   node_t *members = create_struct_members_node(a);
   node_t *decorated_decl = make_func_decl_of(
@@ -13648,7 +13658,7 @@ TEST_F(ExecLiteralTest, StructDeclMethodErrorPaths) {
       NULL,
       NULL,
       make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m"),
-      NULL,
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
       create_stmt_block_node(a));
   node_t *decorated_method = make_stmt_func_of(a, decorated_decl);
   stmt_func_node_add_decorator(
@@ -13665,8 +13675,11 @@ TEST_F(ExecLiteralTest, StructDeclMethodErrorPaths) {
   node_t *decl = make_struct_decl_of(a, "SM", NULL, members);
   clux_value_t *decorated_method_result = exec_expr_struct_decl(ctx, decl);
   ASSERT_NE(decorated_method_result, nullptr);
-  EXPECT_STREQ(error_message_of(decorated_method_result),
-               "decorated struct method is not supported yet");
+  /* P14 起方法装饰器走 exec_apply_decorator：i32 类型值非 func，
+     按编译期标记透传（§9.1），方法照常安装进 method 表。 */
+  EXPECT_FALSE(clux_value_is_error(decorated_method_result));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(decorated_method_result)),
+            CLUX_TYPE_TYPE);
   delete_node(&decl);
 
   members = create_struct_members_node(a);
@@ -13772,10 +13785,11 @@ TEST_F(ExecLiteralTest, StructDeclMethodErrorPaths) {
 }
 
 /* 场景: 匿名 struct 声明（无名，字段 n: i32 + attribute v = 5）经
-        exec_expr_struct_decl_value 与 exec_expr_struct_decl 双通道求值
-   预期: 两通道都产出无名的 type value（不 define 名字）：字段表与
-         attribute 表完整（attr 值可读回 5）；同一声明体两次求值产出
-         不同类型实例（两阶段构造不做结构去重） */
+        exec_expr_struct_decl 求值（name 为 NULL 时 declare_named 路径
+        落到无名 type value，不 define 名字）
+   预期: 产出无名的 type value：字段表与 attribute 表完整（attr 值
+         可读回 5）；同一声明体两次求值产出不同类型实例（两阶段构造
+         不做结构去重） */
 TEST_F(ExecLiteralTest, StructDeclAnonymousExprEvaluatesUnnamedTypeValue) {
   node_t *members = create_struct_members_node(a);
   struct_members_node_add_member(
@@ -13792,7 +13806,7 @@ TEST_F(ExecLiteralTest, StructDeclAnonymousExprEvaluatesUnnamedTypeValue) {
           make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5")));
   node_t *decl = make_struct_decl_of(a, NULL, NULL, members);
 
-  clux_value_t *first = exec_expr_struct_decl_value(ctx, decl);
+  clux_value_t *first = exec_expr_struct_decl(ctx, decl);
   ASSERT_NE(first, nullptr);
   EXPECT_FALSE(clux_value_is_error(first));
   EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(first)), CLUX_TYPE_TYPE);
@@ -13805,29 +13819,26 @@ TEST_F(ExecLiteralTest, StructDeclAnonymousExprEvaluatesUnnamedTypeValue) {
   ASSERT_NE(v_attr, nullptr);
   EXPECT_EQ(read_i32(v_attr->value), 5);
 
-  clux_value_t *second = exec_expr_struct_decl_value(ctx, decl);
+  clux_value_t *second = exec_expr_struct_decl(ctx, decl);
   ASSERT_NE(second, nullptr);
   EXPECT_FALSE(clux_value_is_error(second));
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(second)), CLUX_TYPE_TYPE)
+      << "the anonymous declaration via the declare_named path must fall "
+         "through to the unnamed type value";
   EXPECT_NE(type_described_by(second), first_type)
       << "two-phase struct construction must not dedupe structurally "
          "identical shells";
-
-  clux_value_t *third = exec_expr_struct_decl(ctx, decl);
-  ASSERT_NE(third, nullptr);
-  EXPECT_FALSE(clux_value_is_error(third));
-  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(third)), CLUX_TYPE_TYPE)
-      << "the anonymous declaration via the declare_named path must fall "
-         "through to the unnamed type value";
   delete_node(&decl);
 }
 
 /* 场景: STMT_STRUCT 装饰器链——[[7]] 编译期标记透传；wrap_t(u: type):
-        type { return i32; } func 装饰器真实包装（参照 interface 批次
-        e2e 模式）；[[no_such_decorator]] 失败传播
+        type { return i32; } func 类型装饰器编译期调用计算（§9.6）；
+        [[no_such_decorator]] 失败传播
    预期: 透传路径 DP 绑定源 type value（字段表 1 项保持、执行器不安装）；
-         包装路径 DW 被描述类型恒等 i32 builtin、执行器懒安装、名字绑定
-         包装结果；失败路径 DZ 返回 error 且名字不 define */
-TEST_F(ExecLiteralTest, StructStmtDecoratorChainWrapsAndDeclaresByName) {
+         计算路径 DW 执行器懒安装、func 装饰器真实 invoke，但类型绑定
+         保持壳值——被描述类型仍是 struct DW（类型装饰器不改写类型本体）；
+         失败路径 DZ 返回 error 且名字不 define（求值先于壳 define 拦截） */
+TEST_F(ExecLiteralTest, StructStmtDecoratorChainComputesAndDeclaresByName) {
   node_t *pass_members = create_struct_members_node(a);
   struct_members_node_add_member(
       pass_members,
@@ -13906,14 +13917,15 @@ TEST_F(ExecLiteralTest, StructStmtDecoratorChainWrapsAndDeclaresByName) {
   ASSERT_NE(wrapped, nullptr);
   EXPECT_FALSE(clux_value_is_error(wrapped));
   EXPECT_EQ(clux_context_lookup(ctx, "DW", NULL), wrapped)
-      << "the decorated path must bind the wrapped value under the name";
+      << "the decorated path must bind the shell type value under the name";
   clux_type_t *described = type_described_by(wrapped);
   ASSERT_NE(described, nullptr);
-  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
-      << "the decorator must substitute the source struct type with its "
-         "return type";
+  EXPECT_EQ(clux_type_get_kind(described), CLUX_TYPE_STRUCT)
+      << "type decorators must compute without rewriting the type binding";
+  EXPECT_EQ(clux_struct_field_count(described), 1u)
+      << "the source struct type must stay intact after decoration";
   EXPECT_NE(clux_context_get_executor(ctx), nullptr)
-      << "invoking the func decorator must lazily install the executor";
+      << "invoking the func type decorator must lazily install the executor";
   delete_node(&wrap_stmt);
   delete_node(&wrap_decl);
 
@@ -13940,6 +13952,325 @@ TEST_F(ExecLiteralTest, StructStmtDecoratorChainWrapsAndDeclaresByName) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
       << "a failing decorator must not define the name";
   delete_node(&fail_stmt);
+}
+
+/* 合成一元指针类型表达式 *name（方法装饰器签名交验共用）。 */
+static node_t *make_decorator_ptr_type_of(allocator_t *allocator,
+                                          const char *name) {
+  return make_binary_of(
+      allocator,
+      NULL,
+      make_text_node(allocator, CLUX_NODE_SYMBOL, "*"),
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name));
+}
+
+/* 合成 func(*name) -> i32 类型表达式（捕获表缺省）。 */
+static node_t *make_decorator_func_ptr_type(allocator_t *allocator,
+                                            const char *name) {
+  node_t *params = create_func_params_node(allocator);
+  func_params_node_add_param(params,
+                             make_decorator_ptr_type_of(allocator, name));
+  return make_func_type_of(
+      allocator,
+      NULL,
+      params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+}
+
+/* 场景: 方法装饰器编译期计算（P14）——add100m 以 func(*Box)->i32 交验
+        （Box 预定义，规避装饰器签名对被装饰类型的前向引用环）；
+        SM3 的 get 方法在 pass C 链式装饰，包装函数接管 method 表，
+        u.get() 糖调用经 safe_cast 前置 *SM3 接收者（字段前缀兼容 *Box）
+   预期: u.get() == 107（源方法返回 self.x == 7，包装 + 100）——包装
+         真实 invoke 捕获的源方法；执行器懒安装 */
+TEST_F(ExecLiteralTest, StructMethodDecoratorWrapsMethodInPassCEndToEnd) {
+  /* struct Box { x: i32; } */
+  node_t *box_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      box_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *box_decl = make_struct_decl_of(a, "Box", NULL, box_members);
+  ASSERT_FALSE(clux_value_is_error(exec_expr_struct_decl(ctx, box_decl)));
+
+  /* add100m(f: func(*Box) -> i32): func |f| (*Box) -> i32
+        { return func |f| w(self: *Box): i32 { return f(self) + 100; }; } */
+  node_t *outer_params = create_func_params_node(a);
+  func_params_node_add_param(
+      outer_params,
+      make_named_param_of(a,
+                          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                          make_decorator_func_ptr_type(a, "Box")));
+  node_t *ret_captures = create_func_captures_node(a);
+  func_captures_node_add_capture(
+      ret_captures,
+      make_capture_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                      make_decorator_func_ptr_type(a, "Box")));
+  node_t *ret_params = create_func_params_node(a);
+  func_params_node_add_param(ret_params, make_decorator_ptr_type_of(a, "Box"));
+  node_t *ret_type =
+      make_func_type_of(a,
+                        ret_captures,
+                        ret_params,
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  /* 内层闭包捕获表：第 0 项必须是 FUNC_PARAMS 包装（f: func(*Box)->i32）*/
+  node_t *cap_params = create_func_params_node(a);
+  func_params_node_add_param(
+      cap_params,
+      make_named_param_of(a,
+                          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                          make_decorator_func_ptr_type(a, "Box")));
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, cap_params);
+  node_t *inner_params = create_func_params_node(a);
+  func_params_node_add_param(
+      inner_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_decorator_ptr_type_of(a, "Box")));
+  node_t *self_arg = make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "self");
+  node_t *inner_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      inner_ret,
+      make_binary_of(
+          a,
+          make_call_of(a,
+                       make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "f"),
+                       1,
+                       &self_arg),
+          make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+          make_text_node(a, CLUX_NODE_LITERAL_NUMERIC, "100")));
+  node_t *inner_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(inner_body, inner_ret);
+  node_t *inner_decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        inner_params,
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "w"),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        inner_body);
+  node_t *outer_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(outer_ret, inner_decl);
+  node_t *outer_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(outer_body, outer_ret);
+  node_t *add100m_decl = make_func_decl_of(
+      a,
+      NULL,
+      NULL,
+      outer_params,
+      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "add100m"),
+      ret_type,
+      outer_body);
+  clux_value_t *add100m = exec_expr_func_decl(ctx, add100m_decl);
+  ASSERT_NE(add100m, nullptr);
+  ASSERT_FALSE(clux_value_is_error(add100m)) << error_message_of(add100m);
+  EXPECT_EQ(clux_context_lookup(ctx, "add100m", NULL), add100m);
+
+  /* struct SM3 { x: i32; [[add100m]] func get(self: *Box): i32
+                   { return self.x; } } */
+  node_t *get_params = create_func_params_node(a);
+  func_params_node_add_param(
+      get_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+          make_decorator_ptr_type_of(a, "Box")));
+  node_t *get_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      get_ret,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "self"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "."),
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x")));
+  node_t *get_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(get_body, get_ret);
+  node_t *get_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        get_params,
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "get"),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        get_body);
+  node_t *get_stmt = make_stmt_func_of(a, get_decl);
+  stmt_func_node_add_decorator(
+      get_stmt,
+      make_decorator_of(
+          a, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "add100m")));
+  node_t *sm3_members = create_struct_members_node(a);
+  struct_members_node_add_member(
+      sm3_members,
+      make_field_member_of(
+          a,
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  struct_members_node_add_member(sm3_members, get_stmt);
+  node_t *sm3_stmt = create_stmt_struct_node(a);
+  stmt_struct_node_set_struct_decl(
+      sm3_stmt, make_struct_decl_of(a, "SM3", NULL, sm3_members));
+  clux_value_t *sm3 = exec_stmt_struct(ctx, sm3_stmt);
+  ASSERT_NE(sm3, nullptr);
+  ASSERT_FALSE(clux_value_is_error(sm3)) << error_message_of(sm3);
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "invoking the method decorator must lazily install the executor";
+
+  /* u = SM3{ x: 7 }; u.get() == 107 */
+  node_t *ctor = create_construct_node(a);
+  construct_node_set_type(
+      ctor, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "SM3"));
+  node_t *ctor_field = create_construct_field_node(a);
+  construct_field_node_set_name(
+      ctor_field, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"));
+  construct_field_node_set_value(
+      ctor_field, make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "7"));
+  construct_node_add_elem(ctor, ctor_field);
+  clux_value_t *inst = exec_expr_construct(ctx, ctor);
+  ASSERT_NE(inst, nullptr);
+  ASSERT_FALSE(clux_value_is_error(inst)) << error_message_of(inst);
+  ASSERT_FALSE(
+      clux_value_is_error(clux_context_declare_value(ctx, inst, "u", NULL)));
+  node_t *call = make_call_of(
+      a,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "u"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "."),
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "get")),
+      0,
+      NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(read_i32(result), 107)
+      << "u.get() must run through the wrapper: source method + 100";
+  delete_node(&call);
+  delete_node(&ctor);
+  delete_node(&sm3_stmt);
+  delete_node(&add100m_decl);
+  delete_node(&box_decl);
+}
+
+/* 场景: 泛型按实例装饰器调用计算（P14 §9.6）——模拟 sema 物化输出的
+        两条实例语句（Conf[B] 的 B 已代换为 3/7）：装饰器表达式
+        addn(3)/addn(7) 随实例语句在 exec 期逐实例求值 + invoke
+   预期: Conf_3 的 attr m == 13、Conf_7 的 attr m == 17——同一装饰器
+         工厂对每个实例独立计算，结果不共享 */
+TEST_F(ExecLiteralTest, GenericInstanceDecoratorComputesPerInstance) {
+  /* addn(k: i32): func |k| (i32) -> i32
+        { return func |k| w(x: i32): i32 { return x + k; }; } */
+  node_t *outer_params = create_func_params_node(a);
+  func_params_node_add_param(
+      outer_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "k"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *ret_captures = create_func_captures_node(a);
+  func_captures_node_add_capture(
+      ret_captures,
+      make_capture_of(a,
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "k"),
+                      make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *ret_params = create_func_params_node(a);
+  func_params_node_add_param(
+      ret_params, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *ret_type =
+      make_func_type_of(a,
+                        ret_captures,
+                        ret_params,
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *cap_params = create_func_params_node(a);
+  func_params_node_add_param(
+      cap_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "k"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *captures = create_func_captures_node(a);
+  func_captures_node_add_capture(captures, cap_params);
+  node_t *inner_params = create_func_params_node(a);
+  func_params_node_add_param(
+      inner_params,
+      make_named_param_of(
+          a,
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+          make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32")));
+  node_t *inner_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(
+      inner_ret,
+      make_binary_of(a,
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "x"),
+                     make_text_node(a, CLUX_NODE_SYMBOL, "+"),
+                     make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "k")));
+  node_t *inner_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(inner_body, inner_ret);
+  node_t *inner_decl =
+      make_func_decl_of(a,
+                        captures,
+                        NULL,
+                        inner_params,
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "w"),
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        inner_body);
+  node_t *outer_ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(outer_ret, inner_decl);
+  node_t *outer_body = create_stmt_block_node(a);
+  stmt_block_node_add_stmt(outer_body, outer_ret);
+  node_t *addn_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        outer_params,
+                        make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "addn"),
+                        ret_type,
+                        outer_body);
+  clux_value_t *addn = exec_expr_func_decl(ctx, addn_decl);
+  ASSERT_NE(addn, nullptr);
+  ASSERT_FALSE(clux_value_is_error(addn)) << error_message_of(addn);
+
+  /* 两条实例语句（模拟物化输出）：[[addn(B)]] var m: i32 = 10 */
+  const char *instance_names[2] = {"Conf_3", "Conf_7"};
+  const char *add_texts[2] = {"3", "7"};
+  for (size_t idx = 0; idx < 2; idx++) {
+    node_t *var_member = make_var_member_of(
+        a,
+        make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "m"),
+        make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "10"));
+    node_t *add_arg =
+        make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, add_texts[idx]);
+    stmt_var_node_add_decorator(
+        var_member,
+        make_decorator_of(
+            a,
+            make_call_of(
+                a,
+                make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "addn"),
+                1,
+                &add_arg)));
+    node_t *members = create_struct_members_node(a);
+    struct_members_node_add_member(members, var_member);
+    node_t *stmt = create_stmt_struct_node(a);
+    stmt_struct_node_set_struct_decl(
+        stmt, make_struct_decl_of(a, instance_names[idx], NULL, members));
+    clux_value_t *bound = exec_stmt_struct(ctx, stmt);
+    ASSERT_NE(bound, nullptr);
+    ASSERT_FALSE(clux_value_is_error(bound)) << error_message_of(bound);
+    clux_value_t *named = clux_context_lookup(ctx, instance_names[idx], NULL);
+    ASSERT_NE(named, nullptr);
+    clux_type_t *inst_type = type_described_by(named);
+    ASSERT_NE(inst_type, nullptr);
+    const clux_struct_attr_t *m_attr = clux_struct_find_attr(inst_type, "m");
+    ASSERT_NE(m_attr, nullptr)
+        << "the decorated attribute must be present on the instance type";
+    EXPECT_EQ(read_i32(m_attr->value), idx == 0 ? 13 : 17)
+        << "each instance must compute its decorator independently";
+    delete_node(&stmt);
+  }
+  delete_node(&addn_decl);
 }
 
 /* 场景: context 层两阶段构造直连——begin 字段校验五条 NULL 路径（缺名/

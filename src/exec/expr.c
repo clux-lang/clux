@@ -19,6 +19,7 @@
 #include "engine/union.h"
 #include "exec/exec.h"
 #include "exec/generic.h"
+#include "exec/stmt.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
@@ -1917,8 +1918,7 @@ clux_value_t *exec_expr_interface_decl_value(clux_context_t *ctx,
    （方法签名此刻可解析自身），再求值 var（attribute）与 func（method）
    成员，最后 install 三表收尾。implements 是 sema 断言（exec 忽略）；
    泛型定义产 type 模板值（实例化通道按下标实参重执行）；匿名 struct
-   合法（define 只在具名时发生——装饰器包装走匿名路径，方法签名引用
-   自身会报 use of undeclared identifier）。is_instance 为真时（泛型
+   合法（define 只在具名时发生）。is_instance 为真时（泛型
    实例重执行）跳过门禁且不 define：保留原名作 shell 名（类型名不参与
    判等），实例值归实例化出口 clone。 */
 static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
@@ -2071,13 +2071,6 @@ static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
       continue;
     }
     if (node_get_kind(member) == CLUX_NODE_STMT_VAR) {
-      if (stmt_var_node_get_decorator_count(member) != 0) {
-        fail = clux_context_create_error_message(
-            ctx,
-            node_get_location(member),
-            "decorated struct attribute is not supported yet");
-        break;
-      }
       node_t *attr_name_node = stmt_var_node_get_name(member);
       if (!attr_name_node) {
         fail = clux_context_create_error_message(
@@ -2118,19 +2111,35 @@ static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
         allocator_free(allocator, (void **)&attr_name);
         break;
       }
+      /* 成员装饰器链式应用（§9.1 值级包装）：泛型实例体的成员装饰器
+         已随 inst 克隆代换形参，在此按实例做编译期调用计算。 */
+      size_t var_dec_count = stmt_var_node_get_decorator_count(member);
+      for (size_t didx = 0; didx < var_dec_count; didx++) {
+        value = exec_apply_decorator(ctx,
+                                     value,
+                                     stmt_var_node_get_decorator(member, didx),
+                                     node_get_location(member));
+        if (!value || clux_value_is_error(value)) {
+          fail = value ? value
+                       : clux_context_create_error_message(
+                             ctx,
+                             node_get_location(member),
+                             "struct '%s' attribute '%s' decoration failed",
+                             type_name,
+                             attr_name);
+          allocator_free(allocator, (void **)&attr_name);
+          break;
+        }
+      }
+      if (fail) {
+        break;
+      }
       attrs[attr_filled].name = attr_name;
       attrs[attr_filled].value = value;
       attr_filled++;
       continue;
     }
     if (node_get_kind(member) == CLUX_NODE_STMT_FUNC) {
-      if (stmt_func_node_get_decorator_count(member) != 0) {
-        fail = clux_context_create_error_message(
-            ctx,
-            node_get_location(member),
-            "decorated struct method is not supported yet");
-        break;
-      }
       node_t *func_decl = stmt_func_node_get_func_decl(member);
       if (!func_decl) {
         fail = clux_context_create_error_message(
@@ -2172,6 +2181,29 @@ static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
       if (!func || clux_value_is_error(func)) {
         fail = func;
         allocator_free(allocator, (void **)&method_name);
+        break;
+      }
+      /* 方法装饰器链式应用（§9.1 值级包装）：泛型实例体的方法装饰器
+         已随 inst 克隆代换形参，在此按实例做编译期调用计算。 */
+      size_t func_dec_count = stmt_func_node_get_decorator_count(member);
+      for (size_t didx = 0; didx < func_dec_count; didx++) {
+        func = exec_apply_decorator(ctx,
+                                    func,
+                                    stmt_func_node_get_decorator(member, didx),
+                                    node_get_location(member));
+        if (!func || clux_value_is_error(func)) {
+          fail = func ? func
+                      : clux_context_create_error_message(
+                            ctx,
+                            node_get_location(member),
+                            "struct '%s' method '%s' decoration failed",
+                            type_name,
+                            method_name);
+          allocator_free(allocator, (void **)&method_name);
+          break;
+        }
+      }
+      if (fail) {
         break;
       }
       attrs[attr_filled].name = method_name;
@@ -2217,14 +2249,6 @@ static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
 
 clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node) {
   return exec_expr_struct_decl_impl(ctx, node, true, false);
-}
-
-/* 匿名 struct 值求值：仅求值出不具名的 type value（不按名 define），
-   struct 语句装饰器包装路径用——包装完成后由 declare_value 具名化。
-   注意：此路径方法签名引用 struct 自身不可解析（壳名未 define），
-   值级装饰路径待泛型批次一并处理。 */
-clux_value_t *exec_expr_struct_decl_value(clux_context_t *ctx, node_t *node) {
-  return exec_expr_struct_decl_impl(ctx, node, false, false);
 }
 
 /* 泛型 struct 实例：在绑定环境（实例化 scope）内重执行声明 AST——
