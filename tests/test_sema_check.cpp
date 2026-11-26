@@ -7,9 +7,11 @@
 #include "engine/diag.h"
 #include "engine/type.h"
 #include "parser/node.h"
+#include "parser/node_generic_param.h"
 #include "parser/parser.h"
 #include "parser/program.h"
 #include "sema/sema.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1247,6 +1249,165 @@ TEST(SemaCheckTest, GenericPatternConstraintExtendsJudged) {
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx, 1u, 0, "type 'i32' does not satisfy constraint 'A'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- §8.9 P13：泛型默认值与参数包（物化对齐 §6.2/§6.4） ---- */
+
+/* 正测：右侧参数省略由 DEFAULT 槽补齐（§6.2）——实例体中 U 代换为
+   i32（var z: U = 0 合法）；若未填充，U 会报 undeclared type。 */
+TEST(SemaCheckTest, GenericDefaultOmittedIsFilledAndSubstituted) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f[T, U = i32](x: T): U {\n"
+                           "  var z: U = 0;\n"
+                           "  return 0;\n"
+                           "}\n"
+                           "var s: str = \"a\";\n"
+                           "var u = f[str](s);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  ASSERT_NE(program, nullptr);
+  delete_program(&program);
+  delete_vec(&programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 折叠：省略槽默认值文本并入拼名（f[i32] 与 f[i32, i32] 同实例名
+   f$i32$i32）——同组合只物化一次，body 错误单条诊断；未折叠则两条。 */
+TEST(SemaCheckTest, GenericDefaultOmittedFoldsWithExplicit) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f[T, U = i32](x: T): void {\n"
+                           "  var z: str = 0;\n"
+                           "}\n"
+                           "var a: i32 = 0;\n"
+                           "f[i32](a);\n"
+                           "f[i32, i32](a);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "cannot safely cast 'i32' to 'str'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：无包时多给实参保留旧计数消息（对齐 exec 计数协议），emit 阻断。 */
+TEST(SemaCheckTest, GenericNoPackExtraArgsKeepOldMessage) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "type R[A] = [4]A;\nvar v: R[i32, str];\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "generic 'R' expects 1 type arguments, got 2");
+  EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 正测：参数包空包（§6.4）——剩余实参为空聚合为空 TUPLE，物化体
+   rest: ...<> 的签名在 check 侧降级，零诊断 emit OK。 */
+TEST(SemaCheckTest, GenericPackEmptyHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func h[T, ...Args](x: T, rest: ...Args): void {\n"
+                           "  var z: i32 = 0;\n"
+                           "}\n"
+                           "var a: i32 = 0;\n"
+                           "h[i32](a);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  ASSERT_NE(program, nullptr);
+  delete_program(&program);
+  delete_vec(&programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 正测：包展开——剩余实参 [str] 聚合为 tuple 代换（rest: ...<str>），
+   exec 层 exec_pack_tuple_type 同协议，零诊断 emit OK。 */
+TEST(SemaCheckTest, GenericPackExpandedHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func h[T, ...Args](x: T, rest: ...Args): void {\n"
+                           "  var z: i32 = 0;\n"
+                           "}\n"
+                           "var a: i32 = 0;\n"
+                           "h[i32, str](a, \"s\");\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  program_t *program = (program_t *)vec_get(programs, 0);
+  ASSERT_NE(program, nullptr);
+  delete_program(&program);
+  delete_vec(&programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 正测：comptime 值参数默认（§6.2）——空下标省略由 DEFAULT 补齐并
+   物化进检查域（body 中 str ← 0 的错误被单条诊断证实）。 */
+TEST(SemaCheckTest, GenericComptimeDefaultOmittedIsFilled) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func k[N: comptime usize = 4](): void {\n"
+                           "  var z: str = 0;\n"
+                           "}\n"
+                           "k[]();\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "cannot safely cast 'i32' to 'str'");
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);

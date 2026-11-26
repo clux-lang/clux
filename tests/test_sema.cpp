@@ -1395,7 +1395,8 @@ TEST(SemaTest, GenericSelfReferenceFoldsToInstanceName) {
   delete_allocator(&a);
 }
 
-/* 实参数与形参数不一致 = 硬错误：ERROR diag，emit 阻断。 */
+/* 实参数与形参数不一致 = 硬错误：ERROR diag，emit 阻断。缺参且无默认值
+   报 "missing generic argument"（§8.9 P13：消息对齐 exec generic.c）。 */
 TEST(SemaTest, GenericInstanceArityMismatchIsDiagnosed) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -1408,8 +1409,7 @@ TEST(SemaTest, GenericInstanceArityMismatchIsDiagnosed) {
   ASSERT_GE(clux_context_diag_count(ctx), 1u);
   string_t *text =
       clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
-  EXPECT_NE(strstr(string_get_data(text),
-                   "generic 'P' expects 2 type arguments, got 1"),
+  EXPECT_NE(strstr(string_get_data(text), "missing generic argument 'B'"),
             nullptr);
   delete_string(&text);
   EXPECT_EQ(sema_emit(sema), nullptr);
@@ -1752,13 +1752,14 @@ TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
   parser_t *p;
-  node_t *ast = parse_clux(a,
-                           &p,
-                           "struct A { func tag(self: *A): i32 { return 1; } }\n"
-                           "struct B { func tag(self: *B): i32 { return 2; } }\n"
-                           "var a = .A{};\n"
-                           "var b = .B{};\n"
-                           "var t = b.tag();\n");
+  node_t *ast =
+      parse_clux(a,
+                 &p,
+                 "struct A { func tag(self: *A): i32 { return 1; } }\n"
+                 "struct B { func tag(self: *B): i32 { return 2; } }\n"
+                 "var a = .A{};\n"
+                 "var b = .B{};\n"
+                 "var t = b.tag();\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_FALSE(sema_has_error(sema));

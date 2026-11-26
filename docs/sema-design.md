@@ -489,6 +489,7 @@ sema_has_error，emit 返回 NULL。
 | 10 | DFA 确定性赋值 + §2.8 渲染器消费类型表补全回填 + §5-4 断言收紧 | kRichSource 全部 STMT_VAR 有 TYPE；子集断言无条件 |
 | 11 | 泛型实例体 walk 期物化 + 检查 pass 统一 tops 表覆盖（§8.7） | 坏实参组合报定义体错误、好组合零诊断、检查失败 emit 返回 NULL |
 | 12 | 泛型约束检查（§8.9）：interface 类型真实构建 + 实例体逐参约束判定 | 不满足报第一个缺失/签名不符成员或派生失败；好组合零诊断 |
+| 13 | 物化对齐默认值与参数包协议（§8.10）：§6.2 缺参默认补齐 + §6.4 尾部包聚合 | 缺参无默认报 missing、省略与显式折叠同名、包空/展开零诊断 |
 
 ### 8.9 泛型约束检查（P12 设计稿）
 
@@ -526,3 +527,28 @@ yet"），P12 同步限定为非泛型 interface 约束 + 类型模式约束；F
 **约束失败即剔除**（2026-11-26 定稿）：约束不满足的实例体从检查域剔除，
 一条约束错误足矣——物化体 body 照常检查只会对坏实参产出一串级联二次
 错误，无增量信息。与 §8.7「坏实参组合单一诊断」的测试思路一致。
+
+### 8.10 物化对齐默认值与参数包协议（P13 已落地）
+
+P11 物化通道按 `param_count == arg_count` 严格校验，§6.2 泛型默认值省略
+与 §6.4 参数包两协议在 sema 侧不可达。P13 把 `sema_instant_register`
+的校验与登记扩展为三段协议（exec 侧 generic.c 已有对照实现，错误消息
+逐字对齐）：
+
+- **位置段校验**：无包时多给保留旧消息（`"generic '%s' expects %zu
+  type arguments, got %zu"`）；缺参逐尾部查 DEFAULT 槽补齐（从右向左
+  省略，§6.2），无默认报 `"missing generic argument '%s'"`
+  （`GenericInstanceArityMismatchIsDiagnosed` 断言随消息对齐更新）。
+- **拼名**：位置段缺槽用 DEFAULT 值源文本（非名字形态记 '?'），保证
+  `f[i32]`（省略 `U = i32`）与 `f[i32, i32]` 折叠为同一实例名
+  `f$i32$i32`；module_declare 二次失败即静默去重，实例体按使用点
+  各登记一条。
+- **参数包**（尾部 `...Args`，即 GENERIC_PARAMS 末尾 EXPR_REST）：
+  包槽聚合为 owned TUPLE 挂 `sema_instance_body_t.pack_arg`——元素是
+  剩余实参的**深拷贝叶子**（按 kind+location 重建 name-form 节点，
+  delete_node 递归释放子节点，不可借原树）；物化期 `...Args` 代换为
+  `...<e1,e2,...>`，exec 的 exec_pack_tuple_type 天然支持，check 侧
+  签名降级零诊断。destroy 时 pack_arg 随 body 递归释放。
+- **parser 同步修复**：泛型参数 TYPE/CONSTRAINT 槽解析改用 ternary
+  层——顶层 assign 会把 `[N: usize = 4]` 的 `= 4` 吞成赋值表达式，
+  DEFAULT 分支永不触发（与捕获项 `( name: type = default )` 同层同修）。

@@ -14,6 +14,7 @@
 #include "parser/node_generic_param.h"
 #include "parser/node_interface_decl.h"
 #include "parser/node_program.h"
+#include "parser/node_rest.h"
 #include "parser/node_stmt_bitfield.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_foreach.h"
@@ -27,6 +28,7 @@
 #include "parser/node_stmt_block.h"
 #include "parser/node_struct_decl.h"
 #include "parser/node_struct_member.h"
+#include "parser/node_tuple.h"
 #include "parser/node_union.h"
 #include "parser/parser.h"
 #include "sema/sema_internal.h"
@@ -101,7 +103,11 @@ void sema_destroy(clux_sema_t **sema) {
       allocator_free(allocator, (void **)&param);
     }
     delete_vec(&body->param_names);
-    delete_vec(&body->args); /* 实参节点借用原树，只释放 vec 外壳 */
+    delete_vec(&body->args); /* 实参节点借用原树，只释放 vec 外壳（包槽
+                                TUPLE 由 pack_arg 独立释放，见下） */
+    if (body->pack_arg) {
+      delete_node(&body->pack_arg); /* 包槽聚合 TUPLE 归 sema 所有（P13） */
+    }
     if (body->inst_stmt) {
       delete_node(&body->inst_stmt); /* 物化体归 sema 所有（§2.3 P11） */
     }
@@ -483,11 +489,48 @@ static int sema_name_is_generic(clux_sema_t *sema, const char *name) {
   return 0;
 }
 
-/* 新组合首登 → 登记实例体：查泛型定义，实参数与形参数一致才入表
-   （emit 尾部从定义深拷贝代换产出）；不一致报 ERROR（emit 被阻断）。 */
-static void sema_instance_body_register(clux_sema_t *sema,
-                                        node_t *use,
-                                        const char *base_name) {
+/* 泛型形参名字文本：GENERIC_PARAM 取 NAME 槽；尾部 rest（...Args，§6.4）
+   取操作数名字。无名/非名字形态返回 NULL（不参与代换）。 */
+static char *sema_generic_param_name(allocator_t *allocator, node_t *param) {
+  node_t *name = NULL;
+  if (node_get_kind(param) == CLUX_NODE_GENERIC_PARAM) {
+    name = generic_param_node_get_name(param);
+  } else if (node_get_kind(param) == CLUX_NODE_EXPR_REST) {
+    name = rest_node_get_expr(param);
+  }
+  return sema_node_is_name_form(name)
+             ? location_get(node_get_location(name), allocator)
+             : NULL;
+}
+
+/* 拼名文本段：名字形态取源文本（省略槽与显式同文本折叠为同一实例名），
+   复合形态记 '?'。 */
+static void sema_instant_append_arg_name(string_t *joined,
+                                         allocator_t *allocator,
+                                         node_t *node) {
+  string_append_cstr(joined, "$");
+  char *text = sema_node_is_name_form(node)
+                   ? location_get(node_get_location(node), allocator)
+                   : NULL;
+  if (text) {
+    string_append_cstr(joined, text);
+    allocator_free(allocator, (void **)&text);
+  } else {
+    string_append_cstr(joined, "?");
+  }
+}
+
+/* 登记：使用点 + base 名 → 实例名 base$arg1$...（§6.2 省略槽并入默认值
+   文本、§6.4 包吸收剩余实参逐个拼接）。args 已由调用方验证全部名字
+   形态。对齐校验：positional 段缺参逐尾部查 DEFAULT 槽补齐，无默认报
+   "missing generic argument"（对齐 exec generic.c）；无包多给保留旧
+   计数消息。module_declare 失败=同组合已登记，静默去重；首登成功同步
+   登记实例体（§2.3 完整版）。instants 是按使用点的表，每个使用点各
+   一条（emit 按原树 node 指针匹配折叠）。 */
+static void sema_instant_register(clux_sema_t *sema,
+                                  node_t *use,
+                                  node_t *base,
+                                  const char *base_name) {
   allocator_t *allocator = clux_context_get_allocator(sema->ctx);
   sema_generic_def_t *def = NULL;
   for (size_t idx = 0; idx < vec_get_size(sema->generic_defs); idx++) {
@@ -504,9 +547,16 @@ static void sema_instance_body_register(clux_sema_t *sema,
   node_t *generics = sema_stmt_generics_node(def->stmt);
   vec_t *params = generics ? node_get_children(generics) : NULL;
   size_t param_count = params ? vec_get_size(params) : 0;
-  vec_t *args = node_get_children(use);
-  size_t arg_count = vec_get_size(args) - 1;
-  if (param_count != arg_count) {
+  /* 尾部 rest = 参数包：吸收剩余实参（§6.4）。 */
+  size_t pack_pos = (size_t)-1;
+  if (param_count && node_get_kind((node_t *)vec_get(
+                         params, param_count - 1)) == CLUX_NODE_EXPR_REST) {
+    pack_pos = param_count - 1;
+  }
+  size_t positional = pack_pos != (size_t)-1 ? pack_pos : param_count;
+  vec_t *children = node_get_children(use);
+  size_t arg_count = vec_get_size(children) - 1;
+  if (arg_count > positional && pack_pos == (size_t)-1) {
     clux_context_diag(sema->ctx,
                       CLUX_DIAG_ERROR,
                       node_get_location(use),
@@ -516,47 +566,37 @@ static void sema_instance_body_register(clux_sema_t *sema,
                       arg_count);
     return;
   }
-  sema_instance_body_t *body =
-      allocator_alloc(allocator, sizeof(sema_instance_body_t));
-  body->stmt = def->stmt;
-  body->base =
-      location_get(node_get_location((node_t *)vec_get(args, 0)), allocator);
-  body->name = NULL;
-  body->param_names = create_vec(allocator);
-  body->args = create_vec(allocator);
-  for (size_t idx = 0; idx < param_count; idx++) {
-    node_t *param = (node_t *)vec_get(params, idx);
-    node_t *param_name = node_get_kind(param) == CLUX_NODE_GENERIC_PARAM
-                             ? generic_param_node_get_name(param)
-                             : NULL;
-    char *text = sema_node_is_name_form(param_name)
-                     ? location_get(node_get_location(param_name), allocator)
-                     : NULL; /* 无名参数（rest 等）记 NULL，不参与代换 */
-    vec_push(body->param_names, text);
-    vec_push(body->args, (node_t *)vec_get(args, idx + 1));
+  if (arg_count < positional) {
+    /* 缺参逐尾部查 DEFAULT 槽（§6.2 默认值从右向左省略）。 */
+    for (size_t idx = arg_count; idx < positional; idx++) {
+      node_t *param = (node_t *)vec_get(params, idx);
+      if (node_get_kind(param) != CLUX_NODE_GENERIC_PARAM ||
+          !generic_param_node_get_default(param)) {
+        char *pname = sema_generic_param_name(allocator, param);
+        clux_context_diag(sema->ctx,
+                          CLUX_DIAG_ERROR,
+                          node_get_location(use),
+                          "missing generic argument '%s'",
+                          pname ? pname : base_name);
+        allocator_free(allocator, (void **)&pname);
+        return;
+      }
+    }
   }
-  vec_push(sema->instance_bodies, body);
-}
-
-/* 登记：使用点 + base 名 → 实例名 base$arg1$...。args 已由调用方
-   验证全部名字形态，此处按原序拼名。module_declare 失败=同组合
-   已登记，静默去重；首登成功同步登记实例体（§2.3 完整版）。 */
-static void sema_instant_register(clux_sema_t *sema,
-                                  node_t *use,
-                                  node_t *base,
-                                  const char *base_name) {
-  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
-  vec_t *children = node_get_children(use);
+  /* 拼名：positional 段（显式实参/省略槽默认值文本）+ 包段（剩余实参
+     逐个拼接）——省略形态与显式形态折叠到同一实例名。 */
   string_t *joined = create_string(allocator);
   string_append_cstr(joined, base_name);
-  for (size_t idx = 1; idx < vec_get_size(children); idx++) {
-    node_t *arg = (node_t *)vec_get(children, idx);
-    char *text = location_get(node_get_location(arg), allocator);
-    string_append_cstr(joined, "$");
-    if (text) {
-      string_append_cstr(joined, text);
-      allocator_free(allocator, (void **)&text);
-    }
+  for (size_t idx = 0; idx < positional; idx++) {
+    node_t *arg =
+        idx < arg_count
+            ? (node_t *)vec_get(children, idx + 1)
+            : generic_param_node_get_default((node_t *)vec_get(params, idx));
+    sema_instant_append_arg_name(joined, allocator, arg);
+  }
+  for (size_t idx = positional; idx < arg_count; idx++) {
+    sema_instant_append_arg_name(
+        joined, allocator, (node_t *)vec_get(children, idx + 1));
   }
   const char *data = string_get_data(joined);
   size_t len = string_get_size(joined);
@@ -564,18 +604,44 @@ static void sema_instant_register(clux_sema_t *sema,
   memcpy(name, data, len + 1);
   delete_string(&joined);
   /* 符号表登记（同组合第二次 declare 失败即去重，静默）；首登成功
-     同步登记实例体（§2.3 完整版——body->name 独立拷贝，name 本身归
-     本使用点条目所有）。instants 是按使用点的表，每个使用点各一条
-     （emit 按原树 node 指针匹配折叠）。 */
+     同步登记实例体——positional 段缺参以 DEFAULT 借用节点补位，包槽
+     放聚合 TUPLE（元素为剩余实参深拷贝叶子，body 持有；物化期 ...Args
+     代换为 ...<e1,e2,...>，exec 层 exec_pack_tuple_type 天然支持）。 */
   if (clux_module_declare(sema->module, name, false)) {
-    size_t body_count = vec_get_size(sema->instance_bodies);
-    sema_instance_body_register(sema, use, base_name);
-    if (vec_get_size(sema->instance_bodies) > body_count) {
-      sema_instance_body_t *body =
-          (sema_instance_body_t *)vec_get(sema->instance_bodies, body_count);
-      body->name = allocator_alloc(allocator, len + 1);
-      memcpy(body->name, name, len + 1);
+    sema_instance_body_t *body =
+        allocator_alloc(allocator, sizeof(sema_instance_body_t));
+    body->stmt = def->stmt;
+    body->base = location_get(node_get_location((node_t *)vec_get(children, 0)),
+                              allocator);
+    body->name = allocator_alloc(allocator, len + 1);
+    memcpy(body->name, name, len + 1);
+    body->param_names = create_vec(allocator);
+    body->args = create_vec(allocator);
+    body->pack_arg = NULL;
+    for (size_t idx = 0; idx < positional; idx++) {
+      node_t *param = (node_t *)vec_get(params, idx);
+      vec_push(body->param_names, sema_generic_param_name(allocator, param));
+      vec_push(body->args,
+               idx < arg_count ? (node_t *)vec_get(children, idx + 1)
+                               : generic_param_node_get_default(param));
     }
+    if (pack_pos != (size_t)-1) {
+      vec_push(body->param_names,
+               sema_generic_param_name(allocator,
+                                       (node_t *)vec_get(params, pack_pos)));
+      body->pack_arg = create_tuple_node(allocator);
+      for (size_t idx = positional; idx < arg_count; idx++) {
+        /* 实参收口为名字形态叶子（收集期已验证）：按 kind+location 复制
+           新叶挂入 TUPLE——delete_node 递归释放子节点，不可借原树。 */
+        node_t *arg = (node_t *)vec_get(children, idx + 1);
+        node_t *elem = create_node(allocator, node_get_kind(arg));
+        node_set_location(elem, node_get_location(arg));
+        tuple_node_add_elem(body->pack_arg, elem);
+      }
+      vec_push(body->args, body->pack_arg);
+    }
+    body->inst_stmt = NULL;
+    vec_push(sema->instance_bodies, body);
   }
   sema_instant_t *instant = allocator_alloc(allocator, sizeof(sema_instant_t));
   instant->node = use;

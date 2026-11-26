@@ -681,7 +681,9 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
           parser_next(parser); /* comptime */
           parser_skip_trivia(parser);
         }
-        node_t *type = parser_read_expr(allocator, parser);
+        /* 类型解析用 ternary 层：顶层 assign 会把 `= default` 吃掉
+           （与捕获项同层）。 */
+        node_t *type = parser_read_expr_ternary(allocator, parser);
         if (!type) {
           location_t loc = expression_error_location(parser, &open_loc);
           parser_push_error(
@@ -697,7 +699,9 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
       if (token_is(token, CLUX_TOKEN_KEYWORD, "extends")) {
         parser_next(parser); /* extends */
         parser_skip_trivia(parser);
-        node_t *constraint = parser_read_expr(allocator, parser);
+        /* 约束解析用 ternary 层：顶层 assign 会把 `= default` 吃掉
+           （与类型槽同层）。 */
+        node_t *constraint = parser_read_expr_ternary(allocator, parser);
         if (!constraint) {
           location_t loc = expression_error_location(parser, &open_loc);
           parser_push_error(

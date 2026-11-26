@@ -87,7 +87,10 @@ typedef struct {
   char *base;         /* 泛型名（ctx allocator），rename 匹配键 */
   char *name;         /* 实例名（ctx allocator），如 List$i32 */
   vec_t *param_names; /* char* 按序形参名（无名参数记 NULL） */
-  vec_t *args;        /* 借用：实参节点（原树指针），与形参同序 */
+  vec_t *args; /* 借用：实参节点（原树指针），与形参同序；包槽
+                         例外——指 pack_arg（sema 持有的聚合 TUPLE） */
+  node_t *pack_arg; /* 拥有：包槽聚合 TUPLE（§6.4，元素为剩余实参深拷贝
+                       叶子），destroy 递归释放；NULL=该实例无包 */
   node_t *inst_stmt; /* 物化体：walk 期 clone+代换产物（sema 持有），
                          NULL=物化失败（防御态，emit 跳过） */
 } sema_instance_body_t;
