@@ -559,3 +559,250 @@ TEST(SemaCheckTest, P9CompatibleProgramHasNoDiag) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* ---- §8.8 P10：DFA 确定性赋值（§8.6）+ 模块级 var 类型表回填（§8.5）
+   + member_call 静态推断（正负测对照）---- */
+
+/* DFA 负测：= undefined 登记"未赋"（初值 AST 形态通道），定义后读取即报
+   静态消息（与运行期 TDZ 消息分离，§8.6）。 */
+TEST(SemaCheckTest, UseBeforeAssignmentIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  var x: i32 = undefined;\n"
+                           "  var y = x;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "use before assignment 'x'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* DFA 正测：读取前有显式赋值（赋值目标先置位再消费）零诊断。 */
+TEST(SemaCheckTest, AssignmentBeforeUseHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  var x: i32 = undefined;\n"
+                           "  x = 1;\n"
+                           "  var y = x;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, "");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* DFA 合流保守：if 无 else 时 then 臂赋值不提升（else 路径可能漏赋）。 */
+TEST(SemaCheckTest, IfSingleArmAssignDoesNotPromote) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(c: bool): void {\n"
+                           "  var x: i32 = undefined;\n"
+                           "  if (c) { x = 1; }\n"
+                           "  var y = x;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "use before assignment 'x'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* DFA 合流正测：两臂都赋值，合流后视为已赋（未赋集合取并集的补）。 */
+TEST(SemaCheckTest, IfBothArmsAssignPromotes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(c: bool): void {\n"
+                           "  var x: i32 = undefined;\n"
+                           "  if (c) { x = 1; } else { x = 2; }\n"
+                           "  var y = x;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, "");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* DFA 循环保守：while 体可能零次执行，体内赋值出口不提升。 */
+TEST(SemaCheckTest, WhileBodyAssignDoesNotPromote) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(c: bool): void {\n"
+                           "  var x: i32 = undefined;\n"
+                           "  while (c) { x = 1; }\n"
+                           "  var y = x;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "use before assignment 'x'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* DFA 捕获消费点：捕获即拷贝，捕获点即消费点——defer 捕获未赋外层
+   变量在捕获处报（帧换栈之前按外层条目检查）。 */
+TEST(SemaCheckTest, CaptureConsumesUnassignedOuterVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  var x: i32 = undefined;\n"
+                           "  defer |x| { var t = 1; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "use before assignment 'x'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* §8.5 模块级 var 值检查循环：register 只登记占位，值循环演算并回填
+   STMT_VAR 锚点类型（渲染器消费通道）。 */
+TEST(SemaCheckTest, ModuleVarTypeIsRecorded) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var a = 1;\n"
+                           "var b = \"hi\";\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  node_t *vars[2];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 2), 2u);
+  clux_type_t *a_type = sema_get_node_type(sema, vars[0]);
+  ASSERT_NE(a_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(a_type), "i32");
+  clux_type_t *b_type = sema_get_node_type(sema, vars[1]);
+  ASSERT_NE(b_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(b_type), "str");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* member_call 静态推断（exec_member_call 同构）：register 装 struct 方法
+   名单，值接收者前置 *Box 首参，返回类型回填 r 锚点。 */
+TEST(SemaCheckTest, MemberCallTypeIsInferred) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct Box { v: i32; func get(self: *Box): i32 "
+                           "{ return self.v; } }\n"
+                           "var r = .Box{ .v = 7 }.get();\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  node_t *vars[1];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 1), 1u);
+  clux_type_t *r_type = sema_get_node_type(sema, vars[0]);
+  ASSERT_NE(r_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(r_type), "i32");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* member_call 负测：方法名单不含该名字，消息与 exec_member_call 逐字
+   一致。 */
+TEST(SemaCheckTest, MemberCallUnknownMethodIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct Box { v: i32; }\n"
+                           "func f(b: Box): void {\n"
+                           "  var r = b.get();\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "type 'Box' has no method 'get'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* [N]T 数组形参（SYMBOL location 结构判别通道）+ foreach 迭代变量退化
+   元素类型回填 z 锚点。 */
+TEST(SemaCheckTest, ArrayParamForeachElemTypeIsRecorded) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(items: [2]i32): void {\n"
+                           "  foreach (q of items) { var z = q; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  node_t *vars[1];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 1), 1u);
+  clux_type_t *z_type = sema_get_node_type(sema, vars[0]);
+  ASSERT_NE(z_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(z_type), "i32");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

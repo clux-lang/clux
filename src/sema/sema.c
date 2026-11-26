@@ -55,6 +55,9 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->type_results = create_vec(allocator);
   sema->ast = NULL;
   sema->return_type = NULL;
+  sema->dfa_entries = create_vec(allocator);
+  sema->dfa_marks = create_vec(allocator);
+  sema->dfa_frames = 0;
   return sema;
 }
 
@@ -137,6 +140,15 @@ void sema_destroy(clux_sema_t **sema) {
     allocator_free(allocator, (void **)&entry);
   }
   delete_vec(&self->type_results);
+  /* DFA 条目（§8.6）：帧正常配对时已随帧清空，防御性兜底释放 */
+  for (size_t idx = 0; idx < vec_get_size(self->dfa_entries); idx++) {
+    sema_dfa_entry_t *entry =
+        (sema_dfa_entry_t *)vec_get(self->dfa_entries, idx);
+    allocator_free(allocator, (void **)&entry->name);
+    allocator_free(allocator, (void **)&entry);
+  }
+  delete_vec(&self->dfa_entries);
+  delete_vec(&self->dfa_marks);
   allocator_free(allocator, (void **)sema);
 }
 
@@ -1032,7 +1044,7 @@ vec_t *sema_emit(clux_sema_t *sema) {
      __deferN 模块内唯一。 */
   sema_clone_env_t env;
   sema_clone_env_init(
-      &env, out, program, sema->instants, sema->const_uses, sema->prunes);
+      &env, out, program, sema->instants, sema->const_uses, sema->prunes, sema);
   env.anons = sema->anons;
   env.methods = sema->methods;
   sema_rename_t *renames = NULL;

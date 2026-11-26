@@ -11,6 +11,7 @@
 #include "core/location.h"
 #include "core/string.h"
 #include "core/vec.h"
+#include "engine/type.h"
 #include "parser/node_assign.h"
 #include "parser/node_builtin.h"
 #include "parser/node_binary.h"
@@ -18,6 +19,7 @@
 #include "parser/node_construct.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
+#include "parser/node_func_type.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_expr.h"
@@ -172,15 +174,28 @@ static node_t *sema_clone_const_fold(node_t *node, sema_clone_env_t *env) {
   return NULL;
 }
 
-/* 推断显式化（§2.8 最小版）：TYPE 槽缺失时按 VALUE 字面量回填——
-   带后缀整数以后缀定类型；无后缀整数默认 i32 且文本补 i32 后缀
-   （浮点后缀由语法层强制）；布尔为 bool。构造值（具名构造，或已
-   经 §2.9 回填合成名的匿名构造）回填构造类型名。VALUE 其余形态
-   （调用、未折叠引用等）不动，等类型检查分期（§2.8 依赖声明）。
-   补后缀只改 VALUE 节点的 location（指向 intern 文本），不替换
-   节点，避免孤儿分配。 */
+/* 类型名可渲染判定（§8.5→§2.8 回填）：标量/具名类型（struct/enum/
+   别名）与名字即合法类型表达的复合类型（数组等）按 name 渲染为
+   identifier；func 类型签名无名字形态可渲染（闭包捕获表无法闭合
+   书写），返回 NULL 由合成侧自行构造类型表达式。 */
+static const char *sema_type_render_name(clux_type_t *type) {
+  if (!type || clux_type_get_kind(type) == CLUX_TYPE_FUNC) {
+    return NULL;
+  }
+  const char *name = clux_type_get_name(type);
+  return name && name[0] ? name : NULL;
+}
+
+/* 推断显式化（§2.8）：TYPE 槽缺失时回填——第一层按 VALUE 字面量
+   （带后缀整数以后缀定类型；无后缀整数默认 i32 且文本补 i32 后缀
+   （浮点后缀由语法层强制）；布尔为 bool；构造值（具名构造，或已
+   经 §2.9 回填合成名的匿名构造）回填构造类型名）；字面量层不覆盖
+   的形态（调用、标识符引用等）按原树 STMT_VAR 锚点查 sema 类型
+   结果表（§8.5，P10 补全回填）渲染。src 是原树 STMT_VAR（合成
+   节点传 NULL，不查表）。补后缀只改 VALUE 节点的 location（指向
+   intern 文本），不替换节点，避免孤儿分配。 */
 static void
-sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
+sema_clone_var_fixup(node_t *clone, node_t *src, sema_clone_env_t *env) {
   vec_t *children = node_get_children(clone);
   if (vec_get_size(children) < (size_t)CLUX_STMT_VAR_FIRST_DECORATOR) {
     return;
@@ -190,6 +205,8 @@ sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
   if (type_child || !value_child) {
     return;
   }
+  allocator_t *out = env->out;
+  program_t *program = env->program;
   const location_t *loc = node_get_location(value_child);
   char *owned_name = NULL;
   const char *type_name = NULL;
@@ -232,6 +249,12 @@ sema_clone_var_fixup(node_t *clone, allocator_t *out, program_t *program) {
         type_name = owned_name;
       }
     }
+  }
+  /* 第一层（字面量/构造）不覆盖：查类型结果表（§8.5→§2.8 P10）。
+     标注优先语义由 type_child 前置守卫保证；表条目缺失（不可演算/
+     func 类型等）保持 NULL 不强填。 */
+  if (!type_name && src && env->sema) {
+    type_name = sema_type_render_name(sema_get_node_type(env->sema, src));
   }
   if (!type_name) {
     return;
@@ -348,7 +371,18 @@ static node_t *sema_defer_def_synth(node_t *src,
                                        CLUX_NODE_LITERAL_IDENTIFIER,
                                        ref->name,
                                        loc));
-  node_set_child(var, CLUX_STMT_VAR_TYPE, NULL); /* 由闭包推断 */
+  /* §8.5 类型表回填：闭包 var 的类型用结构化 func type 表达式
+     （捕获表 + 空形参 + void 返回）闭合书写。 */
+  node_t *type = create_func_type_node(env->out);
+  node_set_location(type, loc);
+  func_type_node_set_captures(
+      type, sema_clone_impl(stmt_defer_node_get_captures(src), env));
+  func_type_node_set_params(type, create_func_params_node(env->out));
+  func_type_node_set_return(
+      type,
+      sema_render_text_node(
+          env->out, env->program, CLUX_NODE_LITERAL_IDENTIFIER, "void", loc));
+  node_set_child(var, CLUX_STMT_VAR_TYPE, type);
   node_set_child(var, CLUX_STMT_VAR_VALUE, fn);
   node_set_child(var, CLUX_STMT_VAR_EXPORT, NULL);
   node_set_child(var, CLUX_STMT_VAR_COMPTIME, NULL);
@@ -502,7 +536,7 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
           env->out, env->program, CLUX_NODE_LITERAL_NUMERIC, "0", loc));
   node_set_child(idx_var, CLUX_STMT_VAR_EXPORT, NULL);
   node_set_child(idx_var, CLUX_STMT_VAR_COMPTIME, NULL);
-  sema_clone_var_fixup(idx_var, env->out, env->program);
+  sema_clone_var_fixup(idx_var, NULL, env);
   /* for (; __i < #len(iterable); __i = __i + 1) */
   node_t *len = create_builtin_node(env->out);
   node_set_location(len, loc);
@@ -542,9 +576,19 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   node_set_child(item_var,
                  CLUX_STMT_VAR_NAME,
                  sema_clone_impl(stmt_foreach_node_get_name(src), env));
-  node_set_child(item_var,
-                 CLUX_STMT_VAR_TYPE,
-                 sema_clone_impl(stmt_foreach_node_get_type(src), env));
+  node_t *item_type = sema_clone_impl(stmt_foreach_node_get_type(src), env);
+  if (!item_type && env->sema) {
+    const char *item_type_name = sema_type_render_name(
+        sema_get_node_type(env->sema, stmt_foreach_node_get_name(src)));
+    if (item_type_name) {
+      item_type = sema_render_text_node(env->out,
+                                        env->program,
+                                        CLUX_NODE_LITERAL_IDENTIFIER,
+                                        item_type_name,
+                                        loc);
+    }
+  }
+  node_set_child(item_var, CLUX_STMT_VAR_TYPE, item_type);
   node_t *index = create_subscript_node(env->out);
   node_set_location(index, loc);
   subscript_node_set_base(index, idx_iter);
@@ -872,7 +916,7 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
     delete_vec(&children);
   }
   if (node_get_kind(node) == CLUX_NODE_STMT_VAR) {
-    sema_clone_var_fixup(clone, env->out, env->program);
+    sema_clone_var_fixup(clone, node, env);
   }
   /* §2.9 匿名构造具名化：命中 anons 表的匿名构造点，TYPE 槽回填
      合成名 identifier（具名 struct 由 emit 尾部合成）。 */
@@ -904,7 +948,8 @@ void sema_clone_env_init(sema_clone_env_t *env,
                          program_t *program,
                          vec_t *instants,
                          vec_t *consts,
-                         vec_t *prunes) {
+                         vec_t *prunes,
+                         clux_sema_t *sema) {
   env->out = out;
   env->program = program;
   env->instants = instants;
@@ -921,6 +966,7 @@ void sema_clone_env_init(sema_clone_env_t *env,
   env->inst_args = NULL;
   env->instantiate = 0;
   env->defer_counter = 0;
+  env->sema = sema;
 }
 
 node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env) {

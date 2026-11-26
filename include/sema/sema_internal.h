@@ -34,7 +34,21 @@ struct _clux_sema_t {
   clux_type_t *return_type; /* 借用：当前函数签名返回类型上下文（§8.8 P9
                                return 匹配；NULL=不在函数体/void/未定局），
                                check_func_decl 进出体保存恢复配对 */
+  vec_t *dfa_entries; /* sema_dfa_entry_t*，局部 var 赋值状态栈（§8.6）；
+                          函数体帧内活动（dfa_frames>0），帧进出整体换栈 */
+  size_t dfa_frames; /* 函数体帧嵌套层数：>0 时 DFA 消费点生效（模块级
+                          语句与预扫描不启用，§8.6 只管函数体局部 var） */
+  vec_t *dfa_marks; /* size_t 水位标记栈：scope 进出配对截断 entries */
 };
+
+/* §8.6 DFA 条目：局部 var 的赋值状态。name 归 ctx allocator（条目
+   死亡即释放）；assigned=1 已赋 / 0 未赋（含 var x: T; 与 = undefined，
+   两者运行期同为 TDZ 起点）。查找自栈顶向下取首个同名条目（内层
+   遮蔽外层，与 scope 语义对齐；截断保证同级/臂内条目随块死亡）。 */
+typedef struct {
+  char *name;
+  int assigned;
+} sema_dfa_entry_t;
 
 /* 类型结果表条目（§8.5 第一版）：节点 → 类型（借用，类型归 context 的
    具名类型表/children 表托管）。check pass 记录三类锚点：STMT_VAR 语句
@@ -229,17 +243,19 @@ typedef struct {
   vec_t *inst_args;     /* §2.3 实例体态：实参节点表（原树指针借用），可 NULL */
   int instantiate;      /* §2.3 实例体态：GENERIC_PARAMS→NULL + 自引用折叠 */
   size_t defer_counter; /* __deferN 编号 */
+  clux_sema_t *sema;    /* 借用：walk 主体（§8.5 类型结果表查询），可 NULL */
 } sema_clone_env_t;
 
 /* env 初始化：out/program 随 emit 创建；renames/skip 由 emit 按 stmt
    覆写；subst_* 初始 NULL。instants/consts/prunes 为 sema 整个 walk
-   期的收集表（可空）。 */
+   期的收集表（可空）；sema 为类型结果表（§2.8 回填数据源）借用。 */
 void sema_clone_env_init(sema_clone_env_t *env,
                          allocator_t *out,
                          program_t *program,
                          vec_t *instants,
                          vec_t *consts,
-                         vec_t *prunes);
+                         vec_t *prunes,
+                         clux_sema_t *sema);
 
 node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env);
 

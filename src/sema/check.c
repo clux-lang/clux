@@ -75,12 +75,15 @@
 #include "parser/node_ternary.h"
 #include "parser/node_tuple.h"
 #include "parser/node_union.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static void check_stmt(clux_sema_t *sema, node_t *stmt);
 static clux_value_t *check_expr(clux_sema_t *sema, node_t *node);
 static void check_func_decl(clux_sema_t *sema, node_t *decl);
+static clux_type_t *
+check_func_signature(clux_sema_t *sema, node_t *decl, int report);
 
 /* ---- 基础提取 ---- */
 
@@ -451,7 +454,10 @@ check_type_eval(clux_sema_t *sema, node_t *node, int report) {
     if (op && strcmp(op, "*") == 0) {
       clux_type_t *base = check_type_eval(sema, right, report);
       result = base ? clux_context_get_ptr_type(ctx, base) : NULL;
-    } else if (op && strcmp(op, "[]") == 0) {
+    } else if (op && op[0] == '[' && op[strlen(op) - 1] == ']') {
+      /* '[]' 切片与 '[N]' 数组共用二元形态：SYMBOL location 区间跨越
+         方括号（长度居中时 location_get 读出 "[2]" 而非 "[]"），按
+         首 '[' 尾 ']' 结构判别，LEFT 是否缺失区分切片/数组。 */
       clux_type_t *base = check_type_eval(sema, right, report);
       if (!base) {
         result = NULL;
@@ -558,6 +564,63 @@ static clux_type_t *check_build_struct(clux_sema_t *sema, node_t *stmt) {
   allocator_free(allocator, (void **)&fields);
   allocator_free(allocator, (void **)&name);
   return result;
+}
+
+/* struct 三表安装（P10）：壳建好且类型名 define 之后调用——方法签名
+   可解析 struct 自身（shell 先行，与 exec 的两阶段构造同构）。方法成员
+   （body 内 STMT_FUNC）静默构建签名 + 产 func shadow 值，经 context
+   install 通道驻留名字并拷入三表；attribute（var 成员）P9 不安装（值
+   表达式走 CTFE 通道）。泛型方法跳过（随实例化通道）。安装失败静默
+   （install 只允许一次，重复注册路径天然 no-op）。 */
+static void check_struct_install_methods(clux_sema_t *sema,
+                                         node_t *stmt,
+                                         clux_type_t *type) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_STRUCT) {
+    return;
+  }
+  node_t *decl = stmt_struct_node_get_struct_decl(stmt);
+  node_t *body = decl ? struct_decl_node_get_body(decl) : NULL;
+  if (!body) {
+    return;
+  }
+  vec_t *children = node_get_children(body);
+  size_t count = vec_get_size(children);
+  if (!count) {
+    return;
+  }
+  clux_context_t *ctx = sema->ctx;
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  clux_struct_attr_t attrs[count];
+  const char *methods[count];
+  size_t filled = 0;
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *member = vec_get(children, idx);
+    if (!member || node_get_kind(member) != CLUX_NODE_STMT_FUNC) {
+      continue;
+    }
+    node_t *func_decl = stmt_func_node_get_func_decl(member);
+    node_t *name_node = func_decl ? func_decl_node_get_name(func_decl) : NULL;
+    if (!func_decl || func_decl_node_get_generics(func_decl) || !name_node) {
+      continue; /* 泛型方法/缺名：随实例化通道，不进名单 */
+    }
+    char *mname = location_get(node_get_location(name_node), allocator);
+    clux_type_t *signature = check_func_signature(sema, func_decl, 0);
+    if (!mname || !signature) {
+      allocator_free(allocator, (void **)&mname);
+      continue;
+    }
+    attrs[filled].name = mname;
+    attrs[filled].value = clux_context_create_shadow_value(ctx, signature);
+    methods[filled] = mname;
+    filled++;
+  }
+  if (filled) {
+    (void)clux_context_install_struct_tables(
+        ctx, type, attrs, filled, methods, filled, NULL, 0);
+  }
+  for (size_t idx = 0; idx < filled; idx++) {
+    allocator_free(allocator, (void **)&attrs[idx].name);
+  }
 }
 
 /* 非泛型 STMT_ENUM → enum 类型。底层缺省 i32，须整数或 str；variant 值
@@ -761,7 +824,15 @@ check_func_signature(clux_sema_t *sema, node_t *decl, int report) {
   if (!return_type) {
     return NULL;
   }
+  /* 匿名闭包无函数名——签名本身携带闭包类型（形参/返回/捕获俱全），
+     缺名不应让整体降级为未知类型；用内部合成名构建（clux 中不存在
+     未知类型的标识符）。 */
+  static const char closure_name[] = "<closure>";
   char *name = check_name_of(allocator, func_decl_node_get_name(decl));
+  if (!name) {
+    name = allocator_alloc(allocator, sizeof(closure_name));
+    memcpy(name, closure_name, sizeof(closure_name));
+  }
   /* 捕获表：与 check_captures 同两形态。 */
   node_t *captures_node = func_decl_node_get_captures(decl);
   vec_t *capture_children =
@@ -903,7 +974,10 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
     if (decl && struct_decl_node_get_generics(decl)) {
       check_define_template(sema, name, stmt, 0);
     } else {
-      check_define_type_name(sema, name, check_build_struct(sema, stmt), 0);
+      clux_type_t *type = check_build_struct(sema, stmt);
+      check_define_type_name(sema, name, type, 0);
+      /* 类型名 define 后安装方法名单（签名可解析 struct 自身）。 */
+      check_struct_install_methods(sema, stmt, type);
     }
     return;
   }
@@ -1074,15 +1148,193 @@ static void check_local_scan(clux_sema_t *sema, node_t *node) {
   }
 }
 
+/* ---- §8.8 P10：DFA 确定性赋值（§8.6） ---- */
+
+/* 局部 var 赋值状态栈：栈顶向下首个同名即内层遮蔽（与作用域链同构）。
+   帧内活动（dfa_frames>0）才启用——模块级 var 不参与。 */
+
+/* 自栈顶向下找首个同名条目（内层遮蔽）。 */
+static sema_dfa_entry_t *check_dfa_find(clux_sema_t *sema, const char *name) {
+  if (!name) {
+    return NULL;
+  }
+  for (size_t idx = vec_get_size(sema->dfa_entries); idx > 0; idx--) {
+    sema_dfa_entry_t *entry =
+        (sema_dfa_entry_t *)vec_get(sema->dfa_entries, idx - 1);
+    if (entry->name && strcmp(entry->name, name) == 0) {
+      return entry;
+    }
+  }
+  return NULL;
+}
+
+/* 注册点：只有函数体局部 STMT_VAR（形参/迭代变量/嵌套函数名天然已赋
+   或不参与）。assigned 按初值 AST 形态：有初值且非 undefined 即已赋
+   （运行期 TDZ 只在无初值/undefined 时出现，shadow 可演算性与之无关）。
+   名字取 location 文本拷贝，所有权归条目（截断/销毁时释放）。 */
+static void
+check_dfa_define(clux_sema_t *sema, node_t *name_node, int assigned) {
+  if (!sema->dfa_frames || !name_node) {
+    return;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  char *name = check_name_of(allocator, name_node);
+  if (!name) {
+    return;
+  }
+  sema_dfa_entry_t *entry = allocator_alloc(allocator, sizeof(*entry));
+  entry->name = name;
+  entry->assigned = assigned;
+  vec_push(sema->dfa_entries, entry);
+}
+
+/* 消费点：名字引用命中未赋条目即报（与运行期 TDZ 消息分离的静态消息，
+   §8.6）。 */
+static void
+check_dfa_consume(clux_sema_t *sema, node_t *node, const char *name) {
+  if (!sema->dfa_frames || !name) {
+    return;
+  }
+  sema_dfa_entry_t *entry = check_dfa_find(sema, name);
+  if (entry && !entry->assigned) {
+    clux_context_diag(sema->ctx,
+                      CLUX_DIAG_ERROR,
+                      node_get_location(node),
+                      "use before assignment '%s'",
+                      name);
+  }
+}
+
+/* 赋值标记：EXPR_ASSIGN 左操作数 name-form 时先置位（赋值目标不是
+   消费点；先置位再求值左侧，查表天然不再误报）。非 name-form 目标
+   （member/subscript）不标记——其 base 读取按正常消费点检查。 */
+static void check_dfa_assign_target(clux_sema_t *sema, node_t *left) {
+  if (!sema->dfa_frames || !check_is_name_form(left)) {
+    return;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  char *name = check_name_of(allocator, left);
+  sema_dfa_entry_t *entry = check_dfa_find(sema, name);
+  if (entry) {
+    entry->assigned = 1;
+  }
+  allocator_free(allocator, (void **)&name);
+}
+
+/* assigned 快照（if 合流/循环保守/短路与三元不提升/defer 隔离用）。
+   调用方持 flags 数组，check_dfa_restore 恢复并释放。 */
+static int *check_dfa_snapshot(clux_sema_t *sema, size_t *out_size) {
+  size_t size = vec_get_size(sema->dfa_entries);
+  *out_size = size;
+  if (!size) {
+    return NULL;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  int *flags = allocator_alloc(allocator, size * sizeof(int));
+  for (size_t idx = 0; idx < size; idx++) {
+    flags[idx] =
+        ((sema_dfa_entry_t *)vec_get(sema->dfa_entries, idx))->assigned;
+  }
+  return flags;
+}
+
+static void check_dfa_restore(clux_sema_t *sema, int *flags, size_t size) {
+  if (flags) {
+    for (size_t idx = 0; idx < size && idx < vec_get_size(sema->dfa_entries);
+         idx++) {
+      ((sema_dfa_entry_t *)vec_get(sema->dfa_entries, idx))->assigned =
+          flags[idx];
+    }
+    allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+    allocator_free(allocator, (void **)&flags);
+  }
+}
+
+/* 水位标记：与 5 对 scope push/pop 配对（块/for/foreach/defer + 帧内
+   任意嵌套），pop 截断 entries（vec 不持元素所有权，条目手工释放）。 */
+static void check_dfa_mark_push(clux_sema_t *sema) {
+  if (!sema->dfa_frames) {
+    return;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  size_t *mark = allocator_alloc(allocator, sizeof(size_t));
+  *mark = vec_get_size(sema->dfa_entries);
+  vec_push(sema->dfa_marks, mark);
+}
+
+static void check_dfa_mark_pop(clux_sema_t *sema) {
+  if (!sema->dfa_frames) {
+    return;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  size_t size = vec_get_size(sema->dfa_marks);
+  if (!size) {
+    return;
+  }
+  size_t *mark = (size_t *)vec_get(sema->dfa_marks, size - 1);
+  size_t target = *mark;
+  allocator_free(allocator, (void **)&mark);
+  vec_pop(sema->dfa_marks);
+  size = vec_get_size(sema->dfa_entries);
+  while (size > target) {
+    sema_dfa_entry_t *entry =
+        (sema_dfa_entry_t *)vec_get(sema->dfa_entries, size - 1);
+    allocator_free(allocator, (void **)&entry->name);
+    allocator_free(allocator, (void **)&entry);
+    vec_pop(sema->dfa_entries);
+    size--;
+  }
+}
+
+/* 捕获消费检查：FUNC_CAPTURE 名字按定义点外层条目做消费点检查
+   （捕获即拷贝，捕获点即消费点）。帧换栈/defer 隔离前调用。
+   FUNC_PARAMS 容错形态与 check_captures 一致地展开。 */
+static void check_dfa_capture_consumes(clux_sema_t *sema, node_t *captures) {
+  if (!captures || node_get_kind(captures) != CLUX_NODE_FUNC_CAPTURES ||
+      !sema->dfa_frames) {
+    return;
+  }
+  vec_t *children = node_get_children(captures);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    node_t *child = vec_get(children, idx);
+    if (!child) {
+      continue;
+    }
+    if (node_get_kind(child) == CLUX_NODE_FUNC_CAPTURE) {
+      node_t *name_node = func_capture_node_get_name(child);
+      allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+      char *name = check_name_of(allocator, name_node);
+      check_dfa_consume(sema, name_node, name);
+      allocator_free(allocator, (void **)&name);
+    } else if (node_get_kind(child) == CLUX_NODE_FUNC_PARAMS) {
+      size_t count = func_params_node_get_param_count(child);
+      for (size_t pidx = 0; pidx < count; pidx++) {
+        node_t *param = func_params_node_get_param(child, pidx);
+        node_t *name_node = func_param_node_get_name(param);
+        allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+        char *name = check_name_of(allocator, name_node);
+        check_dfa_consume(sema, name_node, name);
+        allocator_free(allocator, (void **)&name);
+      }
+    }
+  }
+}
+
 /* 函数体帧：push scope → 块级预扫描 → 捕获 → 形参（先全部登记再查
    默认值——默认值可引用任意形参）→ 返回类型 → 逐语句检查 → pop。
    STMT_FUNC 与闭包 EXPR_FUNC_DECL 共用本通道。泛型定义体不检查
-   （实例体的检查随实例化通道，P8+）。 */
+   （实例体的检查随实例化通道，P8+）。P10：帧换栈——捕获名先按外层
+   条目做消费点检查，再换空白帧进体（嵌套帧不查外层自由名，首版
+   保守）；出帧清空 entries 还原外层栈。 */
 static void check_func_decl(clux_sema_t *sema, node_t *decl) {
   if (!decl || func_decl_node_get_generics(decl)) {
     return;
   }
   clux_context_t *ctx = sema->ctx;
+  check_dfa_capture_consumes(sema, func_decl_node_get_captures(decl));
+  vec_t *saved_entries = sema->dfa_entries;
+  sema->dfa_entries = create_vec(clux_context_get_allocator(ctx));
+  sema->dfa_frames++;
   clux_context_push_scope(ctx);
   node_t *body = func_decl_node_get_body(decl);
   if (body) {
@@ -1110,6 +1362,23 @@ static void check_func_decl(clux_sema_t *sema, node_t *decl) {
   }
   sema->return_type = saved_return;
   clux_context_pop_scope(ctx);
+  /* P10：帧收尾——清空本帧 entries（vec 不持所有权，条目手工释放）
+     后还原外层栈。 */
+  {
+    allocator_t *allocator = clux_context_get_allocator(ctx);
+    size_t size = vec_get_size(sema->dfa_entries);
+    while (size > 0) {
+      sema_dfa_entry_t *entry =
+          (sema_dfa_entry_t *)vec_get(sema->dfa_entries, size - 1);
+      allocator_free(allocator, (void **)&entry->name);
+      allocator_free(allocator, (void **)&entry);
+      vec_pop(sema->dfa_entries);
+      size--;
+    }
+    delete_vec(&sema->dfa_entries);
+  }
+  sema->dfa_entries = saved_entries;
+  sema->dfa_frames--;
 }
 
 /* ---- 语句检查 ---- */
@@ -1173,10 +1442,12 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
   switch (node_get_kind(stmt)) {
   case CLUX_NODE_STMT_BLOCK: {
     clux_context_push_scope(ctx);
+    check_dfa_mark_push(sema);
     size_t count = stmt_block_node_get_stmt_count(stmt);
     for (size_t idx = 0; idx < count; idx++) {
       check_stmt(sema, stmt_block_node_get_stmt(stmt, idx));
     }
+    check_dfa_mark_pop(sema);
     clux_context_pop_scope(ctx);
     return;
   }
@@ -1196,20 +1467,47 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
     clux_type_t *bind = type ? type : check_value_bind_type(value);
     check_define_value_name(sema, stmt_var_node_get_name(stmt), bind, 1);
     sema_record_node_type(sema, stmt, bind);
+    /* P10：函数体局部 var 登记赋值状态（初值可演算即已赋；`var x: T;`
+       与 `= undefined` 均未赋）。 */
+    check_dfa_define(sema, stmt_var_node_get_name(stmt), value != NULL);
     return;
   }
   case CLUX_NODE_STMT_IF: {
     node_t *cond_node = stmt_if_node_get_condition(stmt);
     check_cond_bool(sema, check_expr_checked(sema, cond_node), cond_node, "if");
+    /* P10：两臂分别演算后合流——未赋集合取并集（两臂都赋才算赋）。
+       无 else 时 else 臂等价于快照（不提升）。 */
+    size_t base_size = 0;
+    int *base = sema->dfa_frames ? check_dfa_snapshot(sema, &base_size) : NULL;
     check_stmt(sema, stmt_if_node_get_then(stmt));
+    size_t then_size = 0;
+    int *then_flags =
+        sema->dfa_frames ? check_dfa_snapshot(sema, &then_size) : NULL;
+    check_dfa_restore(sema, base, base_size);
     check_stmt(sema, stmt_if_node_get_else(stmt));
+    if (then_flags) {
+      for (size_t idx = 0;
+           idx < then_size && idx < vec_get_size(sema->dfa_entries);
+           idx++) {
+        sema_dfa_entry_t *entry =
+            (sema_dfa_entry_t *)vec_get(sema->dfa_entries, idx);
+        entry->assigned = entry->assigned && then_flags[idx];
+      }
+      allocator_t *allocator = clux_context_get_allocator(ctx);
+      allocator_free(allocator, (void **)&then_flags);
+    }
     return;
   }
   case CLUX_NODE_STMT_WHILE: {
+    /* P10：循环保守——出口保持循环前状态（体内赋值不提升，可能零次
+       执行；cond 内赋值按循环前快照一并恢复）。 */
+    size_t snap_size = 0;
+    int *snap = sema->dfa_frames ? check_dfa_snapshot(sema, &snap_size) : NULL;
     node_t *cond_node = stmt_while_node_get_condition(stmt);
     check_cond_bool(
         sema, check_expr_checked(sema, cond_node), cond_node, "while");
     check_stmt(sema, stmt_while_node_get_body(stmt));
+    check_dfa_restore(sema, snap, snap_size);
     return;
   }
   case CLUX_NODE_STMT_DO_WHILE: {
@@ -1221,6 +1519,7 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
   }
   case CLUX_NODE_STMT_FOR: {
     clux_context_push_scope(ctx);
+    check_dfa_mark_push(sema);
     node_t *init = stmt_for_node_get_init(stmt);
     if (init) {
       if (node_get_kind(init) == CLUX_NODE_STMT_VAR) {
@@ -1229,11 +1528,16 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
         check_expr_checked(sema, init);
       }
     }
+    /* P10：循环保守——init 后快照，cond/update/body 的赋值不提升。 */
+    size_t snap_size = 0;
+    int *snap = sema->dfa_frames ? check_dfa_snapshot(sema, &snap_size) : NULL;
     node_t *cond_node = stmt_for_node_get_condition(stmt);
     check_cond_bool(
         sema, check_expr_checked(sema, cond_node), cond_node, "for");
     check_expr_checked(sema, stmt_for_node_get_update(stmt));
     check_stmt(sema, stmt_for_node_get_body(stmt));
+    check_dfa_restore(sema, snap, snap_size);
+    check_dfa_mark_pop(sema);
     clux_context_pop_scope(ctx);
     return;
   }
@@ -1244,6 +1548,7 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
     clux_value_t *iterable =
         check_expr_checked(sema, stmt_foreach_node_get_iterable(stmt));
     clux_context_push_scope(ctx);
+    check_dfa_mark_push(sema);
     clux_type_t *type =
         check_type_eval(sema, stmt_foreach_node_get_type(stmt), 1);
     clux_type_t *bind = type;
@@ -1259,7 +1564,12 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
     node_t *name_node = stmt_foreach_node_get_name(stmt);
     check_define_value_name(sema, name_node, bind, 1);
     sema_record_node_type(sema, name_node, bind);
+    /* P10：循环保守——体内赋值不提升到出口（可能零次执行）。 */
+    size_t snap_size = 0;
+    int *snap = sema->dfa_frames ? check_dfa_snapshot(sema, &snap_size) : NULL;
     check_stmt(sema, stmt_foreach_node_get_body(stmt));
+    check_dfa_restore(sema, snap, snap_size);
+    check_dfa_mark_pop(sema);
     clux_context_pop_scope(ctx);
     return;
   }
@@ -1288,9 +1598,18 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
     return;
   }
   case CLUX_NODE_STMT_DEFER:
+    /* P10：捕获点即消费点（先按外层条目检查）；体内赋值/登记不外泄
+     （快照恢复 + 水位截断）。 */
     clux_context_push_scope(ctx);
+    check_dfa_capture_consumes(sema, stmt_defer_node_get_captures(stmt));
+    size_t defer_snap_size = 0;
+    int *defer_snap =
+        sema->dfa_frames ? check_dfa_snapshot(sema, &defer_snap_size) : NULL;
+    check_dfa_mark_push(sema);
     check_captures(sema, stmt_defer_node_get_captures(stmt));
     check_stmt(sema, stmt_defer_node_get_body(stmt));
+    check_dfa_mark_pop(sema);
+    check_dfa_restore(sema, defer_snap, defer_snap_size);
     clux_context_pop_scope(ctx);
     return;
   case CLUX_NODE_STMT_RETURN: {
@@ -1372,6 +1691,8 @@ static clux_value_t *check_lookup_value(clux_sema_t *sema, node_t *node) {
   char *name = check_name_of(allocator, node);
   clux_value_t *found =
       name ? clux_scope_get(clux_context_get_scope(ctx), name) : NULL;
+  /* P10：DFA 消费点——名字引用命中未赋条目即报（§8.6）。 */
+  check_dfa_consume(sema, node, name);
   if (name && !found) {
     clux_context_diag(ctx,
                       CLUX_DIAG_ERROR,
@@ -1568,6 +1889,152 @@ static clux_value_t *check_call_value(clux_sema_t *sema,
   return clux_context_create_shadow_value(ctx, rtype);
 }
 
+/* 方法调用 a.b(args) 的静态推断（与 exec/call.c 的 exec_member_call 同构，
+   白皮书 §3.5.1：实例调用是 T::b(a, args) 的语法糖）。检查通道：
+   receiver 经 check_expr 演算；ptr 接收者 deref 作查找通道（argv[0] 仍
+   用原接收者）；qualifier unwrap 后查 struct 方法名单——可演算的
+   STRUCT 接收者无此方法报 diag（消息与 exec 逐字一致）；非 struct /
+   不可演算形态降级 NULL（P9 不硬报未知形态）。receiver 前置为第一
+   实参（值接收者产 *T shadow，指针接收者原样），self 形参经 safe_cast
+   兼容判定（*T 对 *const T 协变放行），其余实参严格判等（与
+   check_call_value 同规则）。 */
+static clux_value_t *check_member_call_value(clux_sema_t *sema, node_t *node) {
+  node_t *callee_node = call_node_get_callee(node);
+  node_t *receiver_node = binary_node_get_left(callee_node);
+  node_t *name_node = binary_node_get_right(callee_node);
+  const location_t *op_loc =
+      node_get_location(binary_node_get_symbol(callee_node));
+  clux_context_t *ctx = sema->ctx;
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  clux_value_t *receiver = check_expr(sema, receiver_node);
+  if (check_is_real_error(receiver)) {
+    return receiver;
+  }
+  if (!receiver || check_is_opaque_value(receiver)) {
+    return NULL; /* 接收者不可演算：整调用降级 */
+  }
+  if (!name_node || node_get_kind(name_node) != CLUX_NODE_LITERAL_IDENTIFIER) {
+    return NULL; /* 非 name 形态方法名（P9 不硬报） */
+  }
+  size_t argc = call_node_get_arg_count(node);
+  clux_value_t **argv =
+      argc ? allocator_alloc(allocator, argc * sizeof(clux_value_t *)) : NULL;
+  for (size_t idx = 0; idx < argc; idx++) {
+    argv[idx] = check_expr(sema, call_node_get_arg(node, idx));
+  }
+  clux_value_t *arg_error = NULL;
+  for (size_t idx = 0; idx < argc; idx++) {
+    if (check_is_real_error(argv[idx])) {
+      arg_error = argv[idx];
+      break;
+    }
+  }
+  if (arg_error) {
+    allocator_free(allocator, (void **)&argv);
+    return arg_error; /* 实参错误按序传播（receiver 已先行检查） */
+  }
+  char *name = location_get(node_get_location(name_node), allocator);
+  /* 指针接收者先 deref 产 base 作查找通道（与 exec 同构：argv[0] 仍用
+     原接收者，deref 只管名单查找）。 */
+  clux_value_t *lookup = receiver;
+  if (clux_type_get_kind(clux_value_get_type(receiver)) == CLUX_TYPE_PTR) {
+    lookup = clux_context_deref(ctx, receiver, op_loc);
+    if (check_is_real_error(lookup)) {
+      allocator_free(allocator, (void **)&name);
+      allocator_free(allocator, (void **)&argv);
+      return lookup;
+    }
+  }
+  clux_type_t *receiver_type = clux_type_unwrap(clux_value_get_type(lookup));
+  if (!receiver_type) {
+    receiver_type = clux_value_get_type(lookup);
+  }
+  clux_value_t *result = NULL;
+  do {
+    if (clux_type_get_kind(receiver_type) != CLUX_TYPE_STRUCT) {
+      break; /* 非 struct 接收者降级（namespace/内建形态 P9 不硬报） */
+    }
+    if (!clux_struct_is_method(receiver_type, name)) {
+      const char *type_name = clux_type_get_name(receiver_type);
+      clux_context_diag(ctx,
+                        CLUX_DIAG_ERROR,
+                        op_loc,
+                        "type '%s' has no method '%s'",
+                        type_name ? type_name : "<unknown>",
+                        name);
+      break;
+    }
+    clux_value_t *method =
+        clux_context_struct_attr(ctx, receiver_type, name, op_loc);
+    if (check_is_real_error(method)) {
+      result = method;
+      break;
+    }
+    /* receiver 前置为一般首参：值接收者产 *T shadow，指针接收者原样。 */
+    clux_value_t *first = receiver;
+    if (clux_type_get_kind(clux_value_get_type(receiver)) != CLUX_TYPE_PTR) {
+      first = clux_context_create_shadow_value(
+          ctx, clux_context_get_ptr_type(ctx, clux_value_get_type(receiver)));
+    }
+    clux_type_t *ftype = clux_value_get_type(method);
+    size_t pcount = clux_func_param_count(ftype);
+    if (argc + 1 != pcount) {
+      clux_context_diag(ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(node),
+                        "function expects %zu argument%s, got %zu",
+                        pcount,
+                        pcount == 1 ? "" : "s",
+                        argc + 1);
+      break;
+    }
+    /* self 形参安全转换兼容判定（*T 对 *const T 协变放行），失败消息
+       与运行期 safe_cast 一致。 */
+    clux_type_t *self_param = clux_func_get_param(ftype, 0);
+    if (self_param) {
+      clux_value_t *gap = check_safe_cast_gap(sema, first, self_param);
+      if (gap) {
+        result = gap;
+        break;
+      }
+    }
+    /* 其余实参严格判等（与 check_call_value 同规则，锚定形参 idx+1）。 */
+    int mism = 0;
+    for (size_t idx = 0; idx < argc; idx++) {
+      clux_value_t *arg = argv[idx];
+      if (!arg || check_is_opaque_value(arg)) {
+        continue; /* 不可演算实参不硬报 */
+      }
+      clux_type_t *ptype = clux_func_get_param(ftype, idx + 1);
+      clux_type_t *atype = clux_value_get_type(arg);
+      if (!ptype || !clux_type_equal(atype, ptype)) {
+        const char *pname = ptype ? clux_type_get_name(ptype) : NULL;
+        const char *aname = clux_type_get_name(atype);
+        clux_context_diag(ctx,
+                          CLUX_DIAG_ERROR,
+                          node_get_location(node),
+                          "function argument %zu requires type '%s', got '%s'",
+                          idx + 1,
+                          pname ? pname : "<unknown>",
+                          aname ? aname : "<unknown>");
+        mism = 1;
+        break;
+      }
+    }
+    if (mism) {
+      break;
+    }
+    clux_type_t *rtype = clux_func_get_return_type(ftype);
+    if (!rtype || !clux_type_is_seal(rtype)) {
+      break; /* void/未定局返回类型：调用结果不可用 */
+    }
+    result = clux_context_create_shadow_value(ctx, rtype);
+  } while (0);
+  allocator_free(allocator, (void **)&name);
+  allocator_free(allocator, (void **)&argv);
+  return result;
+}
+
 static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
   if (!node) {
     return NULL;
@@ -1634,7 +2101,12 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
       }
     } else if (strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
       clux_value_t *lvalue = check_expr(sema, left);
+      /* P10：短路右侧可能不执行——赋值不提升（读取照常检查）。 */
+      size_t rhs_size = 0;
+      int *rhs_flags =
+          sema->dfa_frames ? check_dfa_snapshot(sema, &rhs_size) : NULL;
       clux_value_t *rvalue = check_expr(sema, right);
+      check_dfa_restore(sema, rhs_flags, rhs_size);
       if (check_is_real_error(lvalue)) {
         result = lvalue;
       } else if (check_is_real_error(rvalue)) {
@@ -1674,8 +2146,17 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
                         "type '%s' does not support operator '?:'",
                         type_name ? type_name : "<unknown>");
     }
+    /* P10：两臂均可能不执行——赋值不提升（读取照常检查）。 */
+    size_t then_size = 0;
+    int *then_flags =
+        sema->dfa_frames ? check_dfa_snapshot(sema, &then_size) : NULL;
     clux_value_t *then_value = check_expr(sema, ternary_node_get_then(node));
+    check_dfa_restore(sema, then_flags, then_size);
+    size_t else_size = 0;
+    int *else_flags =
+        sema->dfa_frames ? check_dfa_snapshot(sema, &else_size) : NULL;
     clux_value_t *else_value = check_expr(sema, ternary_node_get_else(node));
+    check_dfa_restore(sema, else_flags, else_size);
     if (check_is_real_error(cond)) {
       return cond;
     }
@@ -1698,7 +2179,9 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
   case CLUX_NODE_EXPR_ASSIGN: {
     /* 双侧求值（左值形态错误照常传播）。P9：赋值兼容——目标可演算且
        值可演算时走 safe_cast 判定（与运行期 assign 同一通道），不兼容
-       产真 error 沿表达式上抛（stmt 边界转 diag）。 */
+       产真 error 沿表达式上抛（stmt 边界转 diag）。P10：左操作数
+       name-form 时先置位再求值（赋值目标不是消费点）。 */
+    check_dfa_assign_target(sema, assign_node_get_left(node));
     clux_value_t *target = check_expr(sema, assign_node_get_left(node));
     clux_value_t *value = check_expr(sema, assign_node_get_value(node));
     if (check_is_real_error(target)) {
@@ -1772,6 +2255,13 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
   }
   case CLUX_NODE_EXPR_CALL: {
     node_t *callee_node = call_node_get_callee(node);
+    /* 方法调用糖（obj.m(args) 的 "." callee）走专属通道：receiver 前置
+       首参 + 方法名单查找（exec_member_call 同构）。 */
+    if (callee_node && node_get_kind(callee_node) == CLUX_NODE_EXPR_BINARY &&
+        location_is(node_get_location(binary_node_get_symbol(callee_node)),
+                    ".")) {
+      return check_member_call_value(sema, node);
+    }
     clux_value_t *callee = check_expr(sema, callee_node);
     size_t argc = call_node_get_arg_count(node);
     clux_value_t **argv =
@@ -1779,14 +2269,10 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     for (size_t idx = 0; idx < argc; idx++) {
       argv[idx] = check_expr(sema, call_node_get_arg(node, idx));
     }
-    /* 错误全收集后按序传播：callee 先于实参。方法调用 callee
-       （obj.m(args) 的 "." 形态）的真 error 静默降级——方法不在字段
-       表（member_call 检查通道 P8+），报出来是假阳性。 */
+    /* 错误全收集后按序传播：callee 先于实参。 */
     clux_value_t *result = NULL;
     if (check_is_real_error(callee)) {
-      if (!callee_node || node_get_kind(callee_node) != CLUX_NODE_EXPR_BINARY) {
-        result = callee;
-      }
+      result = callee;
     } else {
       for (size_t idx = 0; idx < argc; idx++) {
         if (check_is_real_error(argv[idx])) {
@@ -1979,6 +2465,26 @@ int sema_check_pass(clux_sema_t *sema) {
     node_t *decl = stmt_func_node_get_func_decl(stmt);
     if (decl && !func_decl_node_get_generics(decl)) {
       check_func_decl(sema, decl);
+    }
+  }
+  /* 模块级 var 值检查：名字已由 register 循环登记（不重复 define 避免
+     duplicate diag），这里只演算值表达式并回填类型结果表（§8.5——
+     clone 渲染器按 STMT_VAR 锚点取推断类型）。DFA 天然 no-op（模块级
+     不建帧）；前向引用的名字 register 时已登记占位，此处的类型表只
+     回填本语句锚点。 */
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *stmt = program_node_get_stmt(sema->ast, idx);
+    if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_VAR) {
+      continue;
+    }
+    node_t *value_node = stmt_var_node_get_value(stmt);
+    if (!value_node) {
+      continue;
+    }
+    clux_value_t *value = check_expr_checked(sema, value_node);
+    clux_type_t *bind = check_value_bind_type(value);
+    if (bind) {
+      sema_record_node_type(sema, stmt, bind);
     }
   }
   return 0;

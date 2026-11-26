@@ -115,16 +115,10 @@ static void assert_language_subset(allocator_t *a, node_t *node) {
   EXPECT_NE(kind, CLUX_NODE_GENERIC_PARAMS);
   EXPECT_NE(kind, CLUX_NODE_GENERIC_PARAM);
   if (kind == CLUX_NODE_STMT_VAR) {
-    /* TYPE 槽非 NULL 断言限定 §2.8 已覆盖的推断形态：字面量值
-       （bool/数值）与构造值（具名构造/已具名化的匿名构造）。
-       调用/标识符等其余形态依赖类型检查完成（sema-design §2.8
-       依赖声明），届时此断言收紧为无条件。 */
-    node_t *value = stmt_var_node_get_value(node);
-    node_kind_t value_kind = value ? node_get_kind(value) : CLUX_NODE_PROGRAM;
-    int covered = value_kind == CLUX_NODE_LITERAL_BOOLEAN ||
-                  value_kind == CLUX_NODE_LITERAL_NUMERIC ||
-                  value_kind == CLUX_NODE_EXPR_CONSTRUCT;
-    if (covered && !stmt_var_node_get_type(node)) {
+    /* §2.8 推断显式化 + §8.5 类型表回填落地后收紧为无条件：emit 产物
+       中每个 STMT_VAR 的 TYPE 槽非 NULL（字面量启发式 + 类型结果表
+       两路兜底）。 */
+    if (!stmt_var_node_get_type(node)) {
       char *name = node_text(a, stmt_var_node_get_name(node));
       ADD_FAILURE() << "STMT_VAR 无 TYPE 槽: " << (name ? name : "?");
       allocator_free(a, (void **)&name);
