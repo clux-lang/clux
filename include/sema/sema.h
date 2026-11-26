@@ -32,6 +32,12 @@ bool sema_has_error(const clux_sema_t *sema);
    vec 与元素均分配在 out_allocator 上）。前置：walk 完成且无 ERROR
    级 diag，否则返回 NULL。 */
 vec_t *sema_emit(clux_sema_t *sema);
+
+/* 类型结果表查询（§8.5 第一版）：check pass 记录的节点类型——STMT_VAR
+   语句节点、EXPR_CONSTRUCT_FIELD 节点、foreach 迭代变量 name 节点。
+   返回借用指针（类型归 engine context 托管）；未入表或类型不可得
+   返回 NULL。emit 侧渲染回填在 P10 接入。 */
+clux_type_t *sema_get_node_type(clux_sema_t *sema, node_t *node);
 #ifdef __cplusplus
 }
 #endif

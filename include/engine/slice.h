@@ -14,6 +14,9 @@ typedef struct _clux_slice_data_t {
   size_t len;
 } clux_slice_data_t;
 clux_type_t *clux_type_get_slice_type(clux_type_t *base);
+/* 读取切片的元素类型：非 slice 类型返回 NULL（与 clux_array_get_base
+   对称；sema 的 foreach 迭代变量推断消费）。 */
+clux_type_t *clux_slice_get_base(clux_type_t *type);
 clux_vtable_t *get_clux_slice_vtable(void);
 #ifdef __cplusplus
 }

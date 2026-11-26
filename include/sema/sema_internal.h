@@ -29,8 +29,22 @@ struct _clux_sema_t {
   vec_t *prunes;     /* sema_prune_t*，comptime if 剪枝决策表（§2.5） */
   vec_t *anons;      /* sema_anon_t*，匿名构造表（§2.9） */
   vec_t *methods;    /* sema_method_t*，struct 方法表（§2.10） */
+  vec_t *type_results; /* sema_type_result_t*，类型结果表（§8.5 第一版） */
   node_t *ast;       /* 借用：walk 入参 PROGRAM（emit 只读） */
 };
+
+/* 类型结果表条目（§8.5 第一版）：节点 → 类型（借用，类型归 context 的
+   具名类型表/children 表托管）。check pass 记录三类锚点：STMT_VAR 语句
+   节点（标注优先、推断兜底）、EXPR_CONSTRUCT_FIELD 节点（字段值演算类
+   型）、foreach 迭代变量 name 节点（标注优先、iterable 元素类型兜底）。
+   同节点后写覆盖先写（NULL 不覆盖——首次成功的推断不被降级清掉）。 */
+typedef struct {
+  node_t *node;      /* 借用：原树锚点节点 */
+  clux_type_t *type; /* 借用：check pass 演算结果 */
+} sema_type_result_t;
+
+/* check.c 记录通道（§8.5）：NULL type 不覆盖既有条目。 */
+void sema_record_node_type(clux_sema_t *sema, node_t *node, clux_type_t *type);
 
 /* 泛型定义条目（§2.3）：模块级泛型声明名 → 定义语句（借用原树）。 */
 typedef struct {

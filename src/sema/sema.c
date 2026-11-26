@@ -52,6 +52,7 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->prunes = create_vec(allocator);
   sema->anons = create_vec(allocator);
   sema->methods = create_vec(allocator);
+  sema->type_results = create_vec(allocator);
   sema->ast = NULL;
   return sema;
 }
@@ -128,11 +129,54 @@ void sema_destroy(clux_sema_t **sema) {
     allocator_free(allocator, (void **)&method);
   }
   delete_vec(&self->methods);
+  /* 类型结果表条目全借用（node 原树、type context 托管），只释放外壳 */
+  for (size_t idx = 0; idx < vec_get_size(self->type_results); idx++) {
+    sema_type_result_t *entry =
+        (sema_type_result_t *)vec_get(self->type_results, idx);
+    allocator_free(allocator, (void **)&entry);
+  }
+  delete_vec(&self->type_results);
   allocator_free(allocator, (void **)sema);
 }
 
 bool sema_has_error(const clux_sema_t *sema) {
   return sema ? clux_context_diag_has_error(sema->ctx) : false;
+}
+
+void sema_record_node_type(clux_sema_t *sema, node_t *node, clux_type_t *type) {
+  if (!sema || !node) {
+    return;
+  }
+  for (size_t idx = 0; idx < vec_get_size(sema->type_results); idx++) {
+    sema_type_result_t *entry =
+        (sema_type_result_t *)vec_get(sema->type_results, idx);
+    if (entry->node == node) {
+      if (type) {
+        entry->type = type;
+      }
+      return;
+    }
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  sema_type_result_t *entry =
+      allocator_alloc(allocator, sizeof(sema_type_result_t));
+  entry->node = node;
+  entry->type = type;
+  (void)vec_push(sema->type_results, entry);
+}
+
+clux_type_t *sema_get_node_type(clux_sema_t *sema, node_t *node) {
+  if (!sema || !node) {
+    return NULL;
+  }
+  for (size_t idx = 0; idx < vec_get_size(sema->type_results); idx++) {
+    sema_type_result_t *entry =
+        (sema_type_result_t *)vec_get(sema->type_results, idx);
+    if (entry->node == node) {
+      return entry->type;
+    }
+  }
+  return NULL;
 }
 
 /* ---- 声明元数据表（kind 为行、pass 为列） ----

@@ -258,6 +258,14 @@ static bool slice_child_base_matches(clux_type_t *child, void *user_data) {
   return meta && clux_type_equal(meta->base, (clux_type_t *)user_data);
 }
 
+clux_type_t *clux_slice_get_base(clux_type_t *type) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_SLICE) {
+    return NULL;
+  }
+  clux_slice_meta_t *meta = slice_meta(type);
+  return meta ? meta->base : NULL;
+}
+
 clux_type_t *clux_type_get_slice_type(clux_type_t *base) {
   clux_type_t *existing = clux_type_find_child(
       base, CLUX_TYPE_SLICE, slice_child_base_matches, base);
