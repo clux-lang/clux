@@ -10,7 +10,9 @@
    锚点（§8.5 第一版）。错误全收集不 fast-fail：真 error 值沿表达式
    上抛、stmt 边界转 diag 后继续；walk 通道已报过的错误静默跳过。值登记
    全部走 create_* 通道（自动挂当前 scope，绝不手工 clux_scope_define）。
-   未覆盖形态一律静默放行（P9+ 扩展）。 */
+   未覆盖形态一律静默放行（P9+ 扩展）。P15：装饰器纳入检查——表达式
+   求值 + func 形态对被装饰物类型签名交验（§8.12），协议与
+   exec_apply_decorator 对齐（标记类透传、消息逐字一致）。 */
 #include "sema/sema_internal.h"
 #include "core/allocator.h"
 #include "core/error.h"
@@ -37,6 +39,7 @@
 #include "parser/node_call.h"
 #include "parser/node_construct.h"
 #include "parser/node_construct_field.h"
+#include "parser/node_decorator.h"
 #include "parser/node_enum_decl.h"
 #include "parser/node_enum_variant.h"
 #include "parser/node_field.h"
@@ -86,6 +89,8 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node);
 static void check_func_decl(clux_sema_t *sema, node_t *decl);
 static clux_type_t *
 check_func_signature(clux_sema_t *sema, node_t *decl, int report);
+static clux_type_t *
+check_decorator(clux_sema_t *sema, node_t *decorator, clux_type_t *subject);
 
 /* ---- 基础提取 ---- */
 
@@ -568,12 +573,48 @@ static clux_type_t *check_build_struct(clux_sema_t *sema, node_t *stmt) {
   return result;
 }
 
+/* struct 属性成员（STMT_VAR 成员）装饰器检查（§8.12 P15）：subject 取
+   类型标注（无标注/求值失败降级 eval-only），链式交验——exec pass C
+   同构（包装值成为 attr 值，绑定类型即链尾）。attr 值表达式 P9 不
+   检查（CTFE 通道），这里只验装饰器；TDZ（= undefined）与无初值成员
+   无值可包装，与 exec 同构跳过。 */
+static void check_struct_attr_decorators(clux_sema_t *sema, node_t *stmt) {
+  node_t *decl = stmt_struct_node_get_struct_decl(stmt);
+  node_t *body = decl ? struct_decl_node_get_body(decl) : NULL;
+  if (!body) {
+    return;
+  }
+  vec_t *members = node_get_children(body);
+  for (size_t idx = 0; idx < vec_get_size(members); idx++) {
+    node_t *member = vec_get(members, idx);
+    if (!member || node_get_kind(member) != CLUX_NODE_STMT_VAR) {
+      continue;
+    }
+    node_t *value_node = stmt_var_node_get_value(member);
+    if (!value_node ||
+        node_get_kind(value_node) == CLUX_NODE_LITERAL_UNDEFINED) {
+      continue; /* TDZ/无初值：exec 不适用装饰器 */
+    }
+    clux_type_t *subject =
+        check_type_eval(sema, stmt_var_node_get_type(member), 0);
+    for (size_t didx = 0; didx < stmt_var_node_get_decorator_count(member);
+         didx++) {
+      subject = check_decorator(
+          sema, stmt_var_node_get_decorator(member, didx), subject);
+      /* NULL 即失败/降级：后续装饰器经 subject=NULL 继续 eval-only。 */
+    }
+  }
+}
+
 /* struct 三表安装（P10）：壳建好且类型名 define 之后调用——方法签名
    可解析 struct 自身（shell 先行，与 exec 的两阶段构造同构）。方法成员
    （body 内 STMT_FUNC）静默构建签名 + 产 func shadow 值，经 context
-   install 通道驻留名字并拷入三表；attribute（var 成员）P9 不安装（值
-   表达式走 CTFE 通道）。泛型方法跳过（随实例化通道）。安装失败静默
-   （install 只允许一次，重复注册路径天然 no-op）。 */
+   install 通道驻留名字并拷入三表；P15：方法装饰器链式包装签名（exec
+   pass C 包装值接管 method 表的镜像），失败回退原签名（diag 已报）。
+   attribute（var 成员）P9 不安装（值表达式走 CTFE 通道——装饰器经
+   check_struct_attr_decorators 检查）。泛型方法跳过（随实例化通道——
+   实例体同名路径逐实例覆盖）。安装失败静默（install 只允许一次，
+   重复注册路径天然 no-op）。 */
 static void check_struct_install_methods(clux_sema_t *sema,
                                          node_t *stmt,
                                          clux_type_t *type) {
@@ -610,6 +651,15 @@ static void check_struct_install_methods(clux_sema_t *sema,
     if (!mname || !signature) {
       allocator_free(allocator, (void **)&mname);
       continue;
+    }
+    clux_type_t *subject = signature;
+    for (size_t didx = 0; didx < stmt_func_node_get_decorator_count(member);
+         didx++) {
+      subject = check_decorator(
+          sema, stmt_func_node_get_decorator(member, didx), subject);
+      if (subject) {
+        signature = subject;
+      }
     }
     attrs[filled].name = mname;
     attrs[filled].value = clux_context_create_shadow_value(ctx, signature);
@@ -991,15 +1041,31 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
     return;
   }
   switch (node_get_kind(stmt)) {
-  case CLUX_NODE_STMT_VAR:
+  case CLUX_NODE_STMT_VAR: {
     /* 模块级 var（含 comptime var）：TYPE 槽静默求值升级占位（值表达式
-       P8 不检查——walk 的常量回填/CTFE 通道负责）。 */
-    check_define_value_name(
-        sema,
-        stmt_var_node_get_name(stmt),
-        check_type_eval(sema, stmt_var_node_get_type(stmt), 0),
-        0);
+       P8 不检查——walk 的常量回填/CTFE 通道负责）。P15（§8.12）：
+       有初值且非 undefined 时装饰器链式包装登记类型（TDZ 与 exec
+       同构跳过；无标注 var 类型在定点通道定型，签名交验降级），
+       失败回退未装饰类型登记防级联。 */
+    clux_type_t *annotated =
+        check_type_eval(sema, stmt_var_node_get_type(stmt), 0);
+    node_t *value_node = stmt_var_node_get_value(stmt);
+    clux_type_t *bound = annotated;
+    if (value_node &&
+        node_get_kind(value_node) != CLUX_NODE_LITERAL_UNDEFINED) {
+      clux_type_t *subject = annotated;
+      for (size_t didx = 0; didx < stmt_var_node_get_decorator_count(stmt);
+           didx++) {
+        subject = check_decorator(
+            sema, stmt_var_node_get_decorator(stmt, didx), subject);
+        if (subject) {
+          bound = subject;
+        }
+      }
+    }
+    check_define_value_name(sema, stmt_var_node_get_name(stmt), bound, 0);
     return;
+  }
   case CLUX_NODE_STMT_FUNC: {
     node_t *decl = stmt_func_node_get_func_decl(stmt);
     node_t *name = decl ? func_decl_node_get_name(decl) : NULL;
@@ -1007,9 +1073,21 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
       check_define_template(sema, name, decl, 1);
     } else if (decl) {
       /* 非泛型函数：静默构建签名登记——函数名携带类型后，函数体与跨
-         函数调用可签名交验（P8）。 */
+         函数调用可签名交验（P8）。P15（§8.12）：装饰器链式包装签名
+         （exec 落地后名字即包装值），define 前求值与 exec 同序；失败
+         回退原签名登记防级联。 */
       clux_type_t *signature = check_func_signature(sema, decl, 0);
-      check_define_value_name(sema, name, signature, 0);
+      clux_type_t *bound = signature;
+      clux_type_t *subject = signature;
+      for (size_t didx = 0; didx < stmt_func_node_get_decorator_count(stmt);
+           didx++) {
+        subject = check_decorator(
+            sema, stmt_func_node_get_decorator(stmt, didx), subject);
+        if (subject) {
+          bound = subject;
+        }
+      }
+      check_define_value_name(sema, name, bound, 0);
     } else {
       check_define_value_name(sema, name, NULL, 0);
     }
@@ -1033,6 +1111,13 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
       check_define_template(sema, name, stmt, 0);
     } else {
       clux_type_t *type = check_build_struct(sema, stmt);
+      /* §8.12 P15：顶层装饰器在 define 前求值（类型语句 eval-only，对齐
+         exec P14 三段式的拦截语义）；attr 成员装饰器就地链式检查。 */
+      for (size_t didx = 0; didx < stmt_struct_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(sema, stmt_struct_node_get_decorator(stmt, didx), NULL);
+      }
+      check_struct_attr_decorators(sema, stmt);
       check_define_type_name(sema, name, type, 0);
       /* 类型名 define 后安装方法名单（签名可解析 struct 自身）。 */
       check_struct_install_methods(sema, stmt, type);
@@ -1042,6 +1127,10 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
   case CLUX_NODE_STMT_ENUM: {
     node_t *decl = stmt_enum_node_get_enum_decl(stmt);
     node_t *name = decl ? enum_decl_node_get_name(decl) : NULL;
+    for (size_t didx = 0; didx < stmt_enum_node_get_decorator_count(stmt);
+         didx++) {
+      check_decorator(sema, stmt_enum_node_get_decorator(stmt, didx), NULL);
+    }
     check_define_type_name(sema, name, check_build_enum(sema, stmt), 0);
     return;
   }
@@ -1051,6 +1140,10 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
     if (decl && union_node_get_generics(decl)) {
       check_define_template(sema, name, stmt, 0);
     } else {
+      for (size_t didx = 0; didx < stmt_union_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(sema, stmt_union_node_get_decorator(stmt, didx), NULL);
+      }
       check_define_type_name(sema, name, check_build_union(sema, stmt), 0);
     }
     return;
@@ -1058,6 +1151,10 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
   case CLUX_NODE_STMT_BITFIELD: {
     node_t *decl = stmt_bitfield_node_get_bitfield_decl(stmt);
     node_t *name = decl ? bitfield_decl_node_get_name(decl) : NULL;
+    for (size_t didx = 0; didx < stmt_bitfield_node_get_decorator_count(stmt);
+         didx++) {
+      check_decorator(sema, stmt_bitfield_node_get_decorator(stmt, didx), NULL);
+    }
     check_define_type_name(sema, name, check_build_bitfield(sema, stmt), 0);
     return;
   }
@@ -1066,6 +1163,11 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
        interface 类型（结构判定/派生判定的输入）。构建失败降级占位。 */
     node_t *decl = stmt_interface_node_get_interface_decl(stmt);
     node_t *name = decl ? interface_decl_node_get_name(decl) : NULL;
+    for (size_t didx = 0; didx < stmt_interface_node_get_decorator_count(stmt);
+         didx++) {
+      check_decorator(
+          sema, stmt_interface_node_get_decorator(stmt, didx), NULL);
+    }
     check_define_type_name(sema, name, check_build_interface(sema, stmt), 0);
     return;
   }
@@ -1523,6 +1625,20 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
       }
     }
     clux_type_t *bind = type ? type : check_value_bind_type(value);
+    /* §8.12 P15：有初值且非 undefined 时装饰器链式包装绑定类型（TDZ
+       与 exec 同构跳过；无初值也不适用）。失败回退 last-good 防级联。 */
+    if (value_node &&
+        node_get_kind(value_node) != CLUX_NODE_LITERAL_UNDEFINED && bind) {
+      clux_type_t *subject = bind;
+      for (size_t didx = 0; didx < stmt_var_node_get_decorator_count(stmt);
+           didx++) {
+        subject = check_decorator(
+            sema, stmt_var_node_get_decorator(stmt, didx), subject);
+        if (subject) {
+          bind = subject;
+        }
+      }
+    }
     check_define_value_name(sema, stmt_var_node_get_name(stmt), bind, 1);
     sema_record_node_type(sema, stmt, bind);
     /* P10：函数体局部 var 登记赋值状态（初值可演算即已赋；`var x: T;`
@@ -1700,10 +1816,78 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
     check_expr_checked(sema, stmt_expr_node_get_expr(stmt));
     return;
   case CLUX_NODE_STMT_FUNC: {
-    /* 嵌套函数：声明名（含签名）已由预扫描登记，这里只进体。 */
+    /* 嵌套函数：声明名（含签名）已由预扫描登记。§8.12 P15：装饰器
+       对预扫描登记的 shadow 签名就地 retype（链式包装）；error 类型
+       占位（签名构建失败）不 retype，防二次误报。随后照常进体。 */
     node_t *decl = stmt_func_node_get_func_decl(stmt);
     if (decl && !func_decl_node_get_generics(decl)) {
+      if (stmt_func_node_get_decorator_count(stmt) > 0) {
+        allocator_t *allocator = clux_context_get_allocator(ctx);
+        char *name = check_name_of(allocator, func_decl_node_get_name(decl));
+        clux_value_t *entry =
+            name ? clux_scope_get(clux_context_get_scope(ctx), name) : NULL;
+        if (entry && clux_value_is_shadow(entry) &&
+            clux_type_get_kind(clux_value_get_type(entry)) != CLUX_TYPE_ERROR) {
+          clux_type_t *subject = clux_value_get_type(entry);
+          for (size_t didx = 0; didx < stmt_func_node_get_decorator_count(stmt);
+               didx++) {
+            clux_type_t *wrapped = check_decorator(
+                sema, stmt_func_node_get_decorator(stmt, didx), subject);
+            if (wrapped) {
+              subject = wrapped;
+              clux_value_retype(entry, subject);
+            }
+          }
+        }
+        allocator_free(allocator, (void **)&name);
+      }
       check_func_decl(sema, decl);
+    }
+    return;
+  }
+  case CLUX_NODE_STMT_STRUCT:
+  case CLUX_NODE_STMT_ENUM:
+  case CLUX_NODE_STMT_UNION:
+  case CLUX_NODE_STMT_BITFIELD:
+  case CLUX_NODE_STMT_INTERFACE: {
+    /* §8.12 P15：局部类型族语句——顶层装饰器 eval-only（exec 同构丢弃
+       类型改写，仅求值表达式）；类型名与成员已由预扫描登记，这里不
+       重复 define。 */
+    switch (node_get_kind(stmt)) {
+    case CLUX_NODE_STMT_STRUCT:
+      for (size_t didx = 0; didx < stmt_struct_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(sema, stmt_struct_node_get_decorator(stmt, didx), NULL);
+      }
+      check_struct_attr_decorators(sema, stmt);
+      break;
+    case CLUX_NODE_STMT_ENUM:
+      for (size_t didx = 0; didx < stmt_enum_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(sema, stmt_enum_node_get_decorator(stmt, didx), NULL);
+      }
+      break;
+    case CLUX_NODE_STMT_UNION:
+      for (size_t didx = 0; didx < stmt_union_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(sema, stmt_union_node_get_decorator(stmt, didx), NULL);
+      }
+      break;
+    case CLUX_NODE_STMT_BITFIELD:
+      for (size_t didx = 0; didx < stmt_bitfield_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(
+            sema, stmt_bitfield_node_get_decorator(stmt, didx), NULL);
+      }
+      break;
+    default: /* STMT_INTERFACE */
+      for (size_t didx = 0;
+           didx < stmt_interface_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(
+            sema, stmt_interface_node_get_decorator(stmt, didx), NULL);
+      }
+      break;
     }
     return;
   }
@@ -1945,6 +2129,49 @@ static clux_value_t *check_call_value(clux_sema_t *sema,
     return NULL; /* void/未定局返回类型：调用结果不可用 */
   }
   return clux_context_create_shadow_value(ctx, rtype);
+}
+
+/* ---- §8.12 P15：装饰器检查通道 ---- */
+
+/* 单装饰器静态检查（与 exec_apply_decorator 协议对齐，§9.1/§9.6）：
+   - 表达式缺失：报 "decorator requires an expression"（与 exec 逐字
+     一致——parser 容错产出的残缺节点 walk 通道不覆盖）。
+   - 求值真 error：转 diag 后返回 NULL（后续装饰器降级 eval-only）。
+   - 求值为 func 且 subject 可演算：以 subject 的 shadow 为唯一实参走
+     check_call_value 签名交验（个数/实参类型，消息与运行期 invoke
+     一致），通过返回包装后类型（供后续装饰器链与名字登记消费）。
+   - 其余（编译期标记/模板/不可演算/subject 未知）：假定透传，原样
+     返回（§9.1 标记类；类型装饰器不改写类型本体 §9.6；模板装饰器
+     随实例化通道逐实例检查）。 */
+static clux_type_t *
+check_decorator(clux_sema_t *sema, node_t *decorator, clux_type_t *subject) {
+  if (!decorator) {
+    return subject;
+  }
+  node_t *expr = decorator_node_get_expr(decorator);
+  if (!expr) {
+    clux_context_diag(sema->ctx,
+                      CLUX_DIAG_ERROR,
+                      node_get_location(decorator),
+                      "decorator requires an expression");
+    return NULL;
+  }
+  clux_value_t *wrapper = check_expr(sema, expr);
+  if (check_is_real_error(wrapper)) {
+    check_error_diag(sema, expr, wrapper);
+    return NULL;
+  }
+  if (!wrapper || check_is_opaque_value(wrapper) ||
+      clux_type_kind_unwrap(clux_value_get_type(wrapper)) != CLUX_TYPE_FUNC) {
+    return subject; /* 标记透传 / 模板实例通道 / 不可演算降级 */
+  }
+  if (!subject) {
+    return subject; /* 被装饰物类型不可演算：签名交验降级 */
+  }
+  clux_value_t *argv[1] = {
+      clux_context_create_shadow_value(sema->ctx, subject)};
+  clux_value_t *result = check_call_value(sema, expr, wrapper, argv, 1);
+  return result ? clux_value_get_type(result) : NULL;
 }
 
 /* 方法调用 a.b(args) 的静态推断（与 exec/call.c 的 exec_member_call 同构，

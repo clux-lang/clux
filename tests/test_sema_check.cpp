@@ -1414,3 +1414,292 @@ TEST(SemaCheckTest, GenericComptimeDefaultOmittedIsFilled) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* ---- §8.12 P15：装饰器检查通道 ---- */
+
+/* 模块级 var 装饰器表达式引用未定义名：求值真 error 转 diag（§8.12
+   协议），登记回退为标注类型（无后续级联）。 */
+TEST(SemaCheckTest, DecoratorUndefinedNameIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "[[missing_dec]] var x: i32 = 1;\n"
+                           "var y: i32 = x;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "undefined name 'missing_dec'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* func 形态装饰器对被装饰物类型做签名交验：实参类型不符恰报一条
+   check_call_value 消息（与运行期 invoke 一致），失败回退未装饰类型
+   登记防级联（y 的拷贝不再报）。 */
+TEST(SemaCheckTest, DecoratorArgTypeMismatchIsReportedAndFallbackKeepsType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func wants_str(s: str): str { return s; }\n"
+                           "[[wants_str]] var x: i32 = 1;\n"
+                           "var y: i32 = x;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "function argument 0 requires type 'str'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 装饰器形参个数不符：个数交验消息与运行期逐字一致。 */
+TEST(SemaCheckTest, DecoratorArityMismatchIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func pair(a: i32, b: i32): i32 { return a; }\n"
+                           "[[pair]] var x: i32 = 1;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "function expects 2 arguments, got 1");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 标记类装饰器（非 func 求值结果：整数字面量 / 已定义 var）透传零诊断。 */
+TEST(SemaCheckTest, DecoratorMarkerValuesPassThroughWithNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var tag: i32 = 0;\n"
+                           "[[7]] [[tag]] var s: i32 = 21;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, NULL);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* TDZ（= undefined）与无初值 var：装饰器与 exec 同构跳过，零诊断。 */
+TEST(SemaCheckTest, DecoratorTdzAndUninitializedAreSkipped) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "[[missing_dec]] var x: i32 = undefined;\n"
+                           "[[missing_dec]] var z: i32;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, NULL);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 局部 var 装饰器链式包装绑定类型：retype 把 i32 包装为 str 后，
+   x 的消费按包装后类型交验（y: i32 = x 报 cast 不兼容）。 */
+TEST(SemaCheckTest, DecoratedLocalVarBindTypeIsWrapped) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func retype(v: i32): str { return \"s\"; }\n"
+                           "func f(): void {\n"
+                           "  [[retype]] var x = 1;\n"
+                           "  var y: i32 = x;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "type 'str' cannot be safely cast to 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 模块级 func 装饰器签名交验：subject 为签名类型，实参类型不符恰报
+   一条；失败回退原签名登记，raw() 调用仍按原签名交验通过。 */
+TEST(SemaCheckTest, DecoratedFuncSignatureMismatchFallbackKeepsCallable) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func wants_i32(v: i32): i32 { return v; }\n"
+                           "[[wants_i32]] func raw(): i32 { return 1; }\n"
+                           "func user(): void { var q: i32 = raw(); }\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "function argument 0 requires type 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 嵌套函数装饰器：对预扫描登记的 shadow 签名就地 retype 校验，实参
+   不符恰报一条，后续 inner() 按原签名交验通过（回退不污染）。 */
+TEST(SemaCheckTest, DecoratedNestedFuncSignatureMismatchIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func wants_i32(v: i32): i32 { return v; }\n"
+                           "func f(): void {\n"
+                           "  [[wants_i32]] func inner(): i32 { return 1; }\n"
+                           "  var q: i32 = inner();\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "function argument 0 requires type 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* struct 方法装饰器：签名实参不符恰报一条（install_methods 内链式
+   交验）；回退原签名安装。 */
+TEST(SemaCheckTest, StructMethodDecoratorMismatchIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func wants_str(s: str): str { return s; }\n"
+                           "struct S {\n"
+                           "  [[wants_str]] func m(): i32 { return 1; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "function argument 0 requires type 'str'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 类型保持的方法装饰器（id 形态）链式交验通过零诊断。 */
+TEST(SemaCheckTest, StructMethodDecoratorTypePreservingHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func idm(f: func(): i32): func(): i32"
+                           " { return f; }\n"
+                           "struct T {\n"
+                           "  [[idm]] func m(): i32 { return 1; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, NULL);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 类型族语句顶层装饰器 eval-only：未定义名仍报，标记值零诊断。 */
+TEST(SemaCheckTest, TypeStmtDecoratorUndefinedNameIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "[[missing_dec]] struct S { a: i32; }\n"
+                           "[[missing_dec]] enum E { A }\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 2u, 0, "undefined name 'missing_dec'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(SemaCheckTest, TypeStmtMarkerDecoratorHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "[[7]] struct S { a: i32; }\n"
+                           "[[7]] enum E { A }\n"
+                           "[[7]] union U { a: i32; }\n"
+                           "[[7]] bitfield B: u8 { f: 1; }\n"
+                           "[[7]] interface I { func g(): void; }\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, NULL);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 泛型实例体按实例独立检查：装饰器错误在每个实例体各报一次
+   （P11 逐实例哲学在装饰器通道的延续）。 */
+TEST(SemaCheckTest, GenericInstanceBodyDecoratorErrorPerInstance) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func gen[T](): void {\n"
+                           "  [[nope]] var g: i32 = 1;\n"
+                           "}\n"
+                           "gen[i32]();\n"
+                           "gen[str]();\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 2u, 0, "undefined name 'nope'");
+  expect_diag_count(ctx, 2u, 1, "undefined name 'nope'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

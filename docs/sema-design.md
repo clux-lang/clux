@@ -491,6 +491,7 @@ sema_has_error，emit 返回 NULL。
 | 12 | 泛型约束检查（§8.9）：interface 类型真实构建 + 实例体逐参约束判定 | 不满足报第一个缺失/签名不符成员或派生失败；好组合零诊断 |
 | 13 | 物化对齐默认值与参数包协议（§8.10）：§6.2 缺参默认补齐 + §6.4 尾部包聚合 | 缺参无默认报 missing、省略与显式折叠同名、包空/展开零诊断 |
 | 14 | 装饰器编译期计算（§8.11）：exec_apply_decorator 公有化 + pass C 成员装饰器链式应用 + STMT_STRUCT 装饰三段式 | 方法装饰器值级包装 end-to-end、同定义双实例独立计算、标记/失败路径回归 |
+| 15 | check 层装饰器检查通道（§8.12）：表达式求值诊断 + func 形态签名交验 + 挂点全覆盖（模块 register/install_methods/check_stmt） | 未定义名/签名不符恰报一条且消息与 exec 逐字一致、标记/TDZ 零诊断、包装后类型可被后续消费验证 |
 
 ### 8.9 泛型约束检查（P12 设计稿）
 
@@ -589,3 +590,49 @@ P11 物化通道按 `param_count == arg_count` 严格校验，§6.2 泛型默认
 1. STMT_TYPE 声明上的装饰器 exec 期静默丢弃（parser 保留节点）；
 2. FIELD（枚举字段）装饰器全链路零消费；
 3. 带装饰器的 comptime var 随 emit 常量摘除丢弃（emit 期不回放装饰器）。
+
+### 8.12 check 层装饰器检查通道（P15 已落地）
+
+P14 之前装饰器表达式在 check pass 零检查零诊断——未定义名、类型错误
+全部静默通过。P15 把装饰器纳入检查，核心是 `check_decorator`
+（check.c，协议与 `exec_apply_decorator` 对齐）：
+
+- **apply 协议**：
+  - 表达式缺失 → `"decorator requires an expression"`（与 exec 逐字
+    一致——parser 容错产出的残缺节点走此通道）；
+  - 求值真 error → `check_error_diag` 后返回 NULL（链条降级
+    eval-only，不级联）；
+  - 求值为 func 且 subject 可演算 → 以 subject 的 **shadow 值**为
+    唯一实参走 `check_call_value`（个数/实参类型交验，消息与运行期
+    invoke 一致），通过返回包装后类型；
+  - 其余（标记类/模板/不可演算/subject 未知）→ 原样返回 subject
+    （§9.1 标记透传、§9.6 类型装饰器不改写类型本体、模板随实例化
+    通道逐实例检查）。
+- **链式包装**：subject 沿装饰器链传递，`bound`/`subject` 双变量——
+  失败回退 **last-good 类型登记**（与 exec「失败不 define」不同：
+  check 的登记是检查环境本身，回退防级联假阳性）。
+- **挂点分工**（hoisted 成员语句不在 tops 里，方法装饰器检查唯一
+  归属 install_methods，避免与 hoist 副本双报）：
+  - `check_module_register`：模块级 var（有初值且非 undefined 才
+    链式包装）与 func（签名链式包装，define 前、与 exec 同序）；类型
+    族语句（struct/enum/union/bitfield/interface）顶层装饰器在 define
+    前 **eval-only** 求值（对齐 exec P14 三段式的拦截语义，自引用
+    报 undefined）+ struct 的 attr 成员装饰器（`check_struct_attr_
+    decorators`：TDZ/无初值跳过，与 exec 同构）；
+  - `check_struct_install_methods`：方法签名链式包装（exec pass C
+    包装值接管 method 表的静态镜像）；
+  - `check_stmt`（局部）：var 装饰后类型进 bind；嵌套 func 对预扫描
+    登记的 shadow 签名就地 `clux_value_retype`（error 类型占位排除，
+    防签名失败后误报 argument type 错）；局部类型族语句顶层 eval-only。
+- **环境一致性**：模块级 register 循环源码序 = exec 模块语句源码序
+  （装饰器引用后续名两端同报 undefined）；局部检查放 check_stmt（预
+    扫描名字全就位 = exec 块提升环境），而非 check_local_scan（scan
+    序会漏后续提升名产生假阳性）。
+- **跳过项**：STMT_TYPE 装饰器（exec 静默丢弃，缺口 1 同构跳过）；
+  模板定义分支（实例体的克隆副本通过模块 register 逐实例检查——
+  `GenericInstanceBodyDecoratorErrorPerInstance` 每实例各报一次）；
+  TDZ（`= undefined`）/无初值 var（exec 不适用装饰器）。
+- **已知边界**：comptime var 装饰器照常检查（exec emit 丢弃是 §8.11
+  缺口 3，验而不应用）；本地 struct 顶层装饰器引用壳名属假阴性（壳
+  在预扫描登记，签名不可演算时 eval-only 降级）；attr 成员仅做装饰
+  器表达式检查（attr 安装通道不存在，值级语义无检查域）。
