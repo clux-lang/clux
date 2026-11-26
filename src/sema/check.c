@@ -22,6 +22,7 @@
 #include "engine/qualifier.h"
 #include "engine/scope.h"
 #include "engine/cunion.h"
+#include "engine/interface_type.h"
 #include "engine/struct.h"
 #include "engine/type.h"
 #include "engine/union.h"
@@ -42,6 +43,7 @@
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
+#include "parser/node_generic_param.h"
 #include "parser/node_group.h"
 #include "parser/node_interface_decl.h"
 #include "parser/node_program.h"
@@ -914,6 +916,62 @@ check_func_signature(clux_sema_t *sema, node_t *decl, int report) {
   return signature;
 }
 
+/* §8.9 P12：interface 真实构建——成员签名逐个经 check_func_signature 求
+   值（与显式 func 类型表达式结构一致即恒等），clux_context_create_
+   interface_type 入库（结构去重、成员名经 strs 驻留）。泛型 interface
+   （[W]）暂缓（与 exec 同步：F-bounded 随泛型 interface 批次开放）；成员
+   非法（缺名/缺返回/带体/带捕获/带泛型/非签名节点）整体降级 NULL——登记
+   占位保持旧行为，定义体硬错误由 exec 通道兜底。 */
+static clux_type_t *check_build_interface(clux_sema_t *sema, node_t *stmt) {
+  node_t *decl = stmt_interface_node_get_interface_decl(stmt);
+  node_t *body = decl ? interface_decl_node_get_body(decl) : NULL;
+  if (!decl || interface_decl_node_get_generics(decl) || !body) {
+    return NULL;
+  }
+  size_t count = interface_members_node_get_member_count(body);
+  if (count == 0) {
+    return NULL;
+  }
+  clux_context_t *ctx = sema->ctx;
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  clux_interface_member_t *members =
+      allocator_alloc(allocator, count * sizeof(clux_interface_member_t));
+  for (size_t idx = 0; idx < count; idx++) {
+    members[idx].name = NULL;
+    members[idx].func = NULL;
+  }
+  int failed = 0;
+  for (size_t idx = 0; idx < count && !failed; idx++) {
+    node_t *member = interface_members_node_get_member(body, idx);
+    if (!member || node_get_kind(member) != CLUX_NODE_EXPR_FUNC_DECL ||
+        func_decl_node_get_body(member) ||
+        func_decl_node_get_captures(member) ||
+        func_decl_node_get_generics(member)) {
+      failed = 1;
+      break;
+    }
+    members[idx].name =
+        check_name_of(allocator, func_decl_node_get_name(member));
+    members[idx].func = check_func_signature(sema, member, 0);
+    if (!members[idx].name || !members[idx].func ||
+        clux_type_get_kind(members[idx].func) != CLUX_TYPE_FUNC) {
+      failed = 1;
+    }
+  }
+  clux_type_t *type = NULL;
+  if (!failed) {
+    char *name = check_name_of(allocator, interface_decl_node_get_name(decl));
+    type = clux_context_create_interface_type(
+        ctx, name ? name : "interface", members, count);
+    allocator_free(allocator, (void **)&name);
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    allocator_free(allocator, (void **)&members[idx].name);
+  }
+  allocator_free(allocator, (void **)&members);
+  return type;
+}
+
 /* ---- 模块级注册（第一遍，按声明序） ---- */
 
 static void check_module_register(clux_sema_t *sema, node_t *stmt);
@@ -1004,11 +1062,11 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
     return;
   }
   case CLUX_NODE_STMT_INTERFACE: {
-    /* interface 只出现在约束位置（类型形参约束），P7 占位登记——
-       约束求值随泛型实例化通道（P8+），不会进入类型位置求值。 */
+    /* §8.9 P12：真实构建后登记——约束表达式经 check_type_eval 可解析出
+       interface 类型（结构判定/派生判定的输入）。构建失败降级占位。 */
     node_t *decl = stmt_interface_node_get_interface_decl(stmt);
     node_t *name = decl ? interface_decl_node_get_name(decl) : NULL;
-    check_define_type_name(sema, name, NULL, 0);
+    check_define_type_name(sema, name, check_build_interface(sema, stmt), 0);
     return;
   }
   case CLUX_NODE_STMT_EXTERN_CFUNC:
@@ -1133,7 +1191,7 @@ static void check_local_scan(clux_sema_t *sema, node_t *node) {
   case CLUX_NODE_STMT_INTERFACE: {
     node_t *decl = stmt_interface_node_get_interface_decl(node);
     node_t *name = decl ? interface_decl_node_get_name(decl) : NULL;
-    check_define_type_name(sema, name, NULL, 0);
+    check_define_type_name(sema, name, check_build_interface(sema, node), 0);
     return;
   }
   case CLUX_NODE_STMT_COMPTIME_IF:
@@ -2476,6 +2534,171 @@ typedef struct {
 
 /* ---- 入口 ---- */
 
+/* ---- §8.9 P12：泛型约束检查 ---- */
+
+/* 约束子树是否引用任一形参名（F-bounded 形态如 IWriter[W]：泛型
+   interface 暂缓，exec 侧也不支持——检查同步跳过，随泛型 interface
+   批次开放）。 */
+static int check_constraint_refs_param(node_t *node, vec_t *param_names) {
+  if (!node) {
+    return 0;
+  }
+  if (node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER) {
+    for (size_t idx = 0; idx < vec_get_size(param_names); idx++) {
+      const char *param = (const char *)vec_get(param_names, idx);
+      if (param && location_is(node_get_location(node), param)) {
+        return 1;
+      }
+    }
+  }
+  vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    if (check_constraint_refs_param(vec_get(children, idx), param_names)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* 约束判定（消息与 exec generic.c check_generic_constraint 逐字对齐，
+   测试对照保证两侧语义一致）：interface 约束按结构判定——实参类型提供
+   全部成员（attr 表名字命中 + func 签名 type_equal）即满足；非 interface
+   约束（类型模式）按派生关系判定。返回 0=满足，非 0=不满足（diag 已发）。 */
+static int check_constraint_satisfied(clux_sema_t *sema,
+                                      clux_type_t *actual,
+                                      clux_type_t *req,
+                                      const location_t *loc) {
+  const char *actual_name = clux_type_get_name(actual);
+  const char *req_name = clux_type_get_name(req);
+  const char *arg_text = actual_name ? actual_name : "<unknown>";
+  const char *req_text = req_name ? req_name : "<unknown>";
+  if (clux_type_get_kind(req) == CLUX_TYPE_INTERFACE) {
+    size_t count = clux_interface_member_count(req);
+    for (size_t idx = 0; idx < count; idx++) {
+      const clux_interface_member_t *member =
+          clux_interface_get_member(req, idx);
+      const clux_struct_attr_t *attr = NULL;
+      if (clux_type_get_kind(actual) == CLUX_TYPE_STRUCT) {
+        attr = clux_struct_find_attr(actual, member->name);
+      }
+      if (!attr || !attr->value) {
+        clux_context_diag(sema->ctx,
+                          CLUX_DIAG_ERROR,
+                          loc,
+                          "type '%s' does not satisfy interface constraint "
+                          "'%s': missing member '%s'",
+                          arg_text,
+                          req_text,
+                          member->name);
+        return 1;
+      }
+      clux_type_t *attr_type = clux_value_get_type(attr->value);
+      if (clux_type_get_kind(attr_type) != CLUX_TYPE_FUNC ||
+          !clux_type_equal(attr_type, member->func)) {
+        clux_context_diag(sema->ctx,
+                          CLUX_DIAG_ERROR,
+                          loc,
+                          "type '%s' does not satisfy interface constraint "
+                          "'%s': member '%s' signature mismatch",
+                          arg_text,
+                          req_text,
+                          member->name);
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (!clux_type_extends(actual, req)) {
+    clux_context_diag(sema->ctx,
+                      CLUX_DIAG_ERROR,
+                      loc,
+                      "type '%s' does not satisfy constraint '%s'",
+                      arg_text,
+                      req_text);
+    return 1;
+  }
+  return 0;
+}
+
+/* 约束检查 pass：物化体 GENERICS 槽已摘除（实例体非泛型），检查走原树
+   ——sema_instance_body_t 的 stmt（泛型定义原树含约束槽）+ param_names /
+   args 按 §2.3 收集序对齐。逐参判定：值参数（comptime，TYPE 槽非空）的
+   约束暂缓；约束引用形参名（F-bounded）暂缓；类型参数约束求值（双方均
+   check_type_eval，report=0——名字级错误由 P7 通道兜底防双报）后判定。
+   约束求值失败对齐 exec 报 evaluation failed；实参类型不可求值时静默剔除
+   （既有通道/物化体已覆盖该错误）。失败实例体从 tops 原地剔除
+   （2026-11-26 定稿：单一约束诊断，防 body 级联二次错误）。 */
+static void check_generic_constraints(clux_sema_t *sema, vec_t *tops) {
+  clux_context_t *ctx = sema->ctx;
+  allocator_t *allocator = clux_context_get_allocator(ctx);
+  vec_t *excluded = create_vec(allocator);
+  for (size_t b = 0; b < vec_get_size(sema->instance_bodies); b++) {
+    sema_instance_body_t *body =
+        (sema_instance_body_t *)vec_get(sema->instance_bodies, b);
+    node_t *inst_stmt = body->inst_stmt;
+    if (!inst_stmt) {
+      continue;
+    }
+    node_t *generics = sema_stmt_generics_node(body->stmt);
+    vec_t *params = generics ? node_get_children(generics) : NULL;
+    size_t count = params ? vec_get_size(params) : 0;
+    if (count > vec_get_size(body->args)) {
+      count = vec_get_size(body->args); /* 防御：收集对齐已保证等长 */
+    }
+    for (size_t idx = 0; idx < count; idx++) {
+      node_t *param = (node_t *)vec_get(params, idx);
+      if (!param || node_get_kind(param) != CLUX_NODE_GENERIC_PARAM) {
+        continue; /* rest（参数包）非逐参约束形态 */
+      }
+      node_t *constraint = generic_param_node_get_constraint(param);
+      if (!constraint || generic_param_node_get_type(param)) {
+        continue; /* 无约束 / comptime 值参数约束暂缓 */
+      }
+      if (check_constraint_refs_param(constraint, body->param_names)) {
+        continue; /* F-bounded：随泛型 interface 批次 */
+      }
+      clux_type_t *req = check_type_eval(sema, constraint, 0);
+      if (!req) {
+        clux_context_diag(ctx,
+                          CLUX_DIAG_ERROR,
+                          node_get_location(constraint),
+                          "generic constraint evaluation failed");
+        vec_push(excluded, inst_stmt);
+        break;
+      }
+      clux_type_t *actual =
+          check_type_eval(sema, (node_t *)vec_get(body->args, idx), 0);
+      if (!actual) {
+        vec_push(excluded, inst_stmt);
+        break; /* 实参类型不可求值：错误已由使用点/物化体通道报告 */
+      }
+      if (check_constraint_satisfied(
+              sema, actual, req, node_get_location(constraint))) {
+        vec_push(excluded, inst_stmt);
+        break;
+      }
+    }
+  }
+  if (vec_get_size(excluded) > 0) {
+    size_t out = 0;
+    for (size_t idx = 0; idx < vec_get_size(tops); idx++) {
+      node_t *stmt = (node_t *)vec_get(tops, idx);
+      int drop = 0;
+      for (size_t e = 0; e < vec_get_size(excluded); e++) {
+        if (stmt == vec_get(excluded, e)) {
+          drop = 1;
+          break;
+        }
+      }
+      if (!drop) {
+        vec_set(tops, out++, stmt);
+      }
+    }
+    vec_resize(tops, out);
+  }
+  delete_vec(&excluded);
+}
+
 int sema_check_pass(clux_sema_t *sema) {
   if (!sema || !sema->ast) {
     return 0;
@@ -2503,6 +2726,10 @@ int sema_check_pass(clux_sema_t *sema) {
   for (size_t idx = 0; idx < count; idx++) {
     check_module_register(sema, vec_get(tops, idx));
   }
+  /* §8.9 P12 约束检查（register 后：interface/struct 类型均已入库）：
+     失败实例体从 tops 剔除，后续函数体/方法体/var 循环不再遍历。 */
+  check_generic_constraints(sema, tops);
+  count = vec_get_size(tops);
   for (size_t idx = 0; idx < count; idx++) {
     node_t *stmt = vec_get(tops, idx);
     if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_FUNC) {

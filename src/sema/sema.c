@@ -423,7 +423,8 @@ static void sema_hoist_block(clux_sema_t *sema,
 
 /* 语句 → 泛型参数表节点（TYPE/STRUCT/UNION；func/interface 的
    实例化随后续分期）。无泛型返回 NULL。 */
-static node_t *sema_stmt_generics_node(node_t *stmt) {
+/* 按 node kind 分派取泛型参数表（P12 起 check 侧约束检查复用）。 */
+node_t *sema_stmt_generics_node(node_t *stmt) {
   const sema_decl_meta_t *meta = sema_decl_meta_of(stmt);
   return meta && meta->generics_of ? meta->generics_of(stmt) : NULL;
 }

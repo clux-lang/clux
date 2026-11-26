@@ -1130,3 +1130,126 @@ TEST(SemaCheckTest, GenericInstancesCleanHaveNoDiag) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* ---- §8.9 P12：泛型约束检查 ---- */
+
+/* 正测：interface 约束结构判定——File 提供 IW 要求的全部成员（名字 +
+   签名一致），好组合零诊断。 */
+TEST(SemaCheckTest, GenericInterfaceConstraintSatisfiedHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct File {\n"
+                           "  func write(self: *File, data: []u8): void { }\n"
+                           "}\n"
+                           "interface IW {\n"
+                           "  func write(self: *File, data: []u8): void;\n"
+                           "}\n"
+                           "func g[W extends IW](w: *W): void { }\n"
+                           "var pf: *File;\n"
+                           "var use = g[File](pf);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：实参类型缺成员——与 exec（generic.c）逐字对齐报第一个缺失成员；
+   约束失败实例体剔除检查域（body 的 safe_cast 错误不再级联），单一诊断。 */
+TEST(SemaCheckTest, GenericConstraintMissingMemberReportedOnce) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "interface IW {\n"
+                           "  func write(self: *i32, data: []u8): void;\n"
+                           "}\n"
+                           "func g[W extends IW](w: *W): void {\n"
+                           "  var z: str = w;\n"
+                           "}\n"
+                           "var pi: *i32;\n"
+                           "var use = g[i32](pi);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx,
+                    1u,
+                    0,
+                    "type 'i32' does not satisfy interface constraint 'IW': "
+                    "missing member 'write'");
+  EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：成员存在但签名不符——i64 vs i32 形参不匹配。 */
+TEST(SemaCheckTest, GenericConstraintSignatureMismatchReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct S {\n"
+                           "  func write(self: *S, n: i64): void { }\n"
+                           "}\n"
+                           "interface IW {\n"
+                           "  func write(self: *S, n: i32): void;\n"
+                           "}\n"
+                           "func g[W extends IW](w: *W): void { }\n"
+                           "var ps: *S;\n"
+                           "var use = g[S](ps);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx,
+                    1u,
+                    0,
+                    "type 'S' does not satisfy interface constraint 'IW': "
+                    "member 'write' signature mismatch");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 类型模式约束（非 interface）：按 clux_type_extends 派生判定——B 字段
+   前缀兼容 A 满足，i32 不满足；好组合零诊断 + 坏组合单一诊断并存。 */
+TEST(SemaCheckTest, GenericPatternConstraintExtendsJudged) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct A { x: i32; }\n"
+                           "struct B { x: i32; y: i32; }\n"
+                           "func g[T extends A](t: T): void {\n"
+                           // 满足约束的实例体里合法（B 有字段 x）；
+                           // 坏组合若未被剔除，这里会对 i32 报二次错误。
+                           "  var z: i32 = t.x;\n"
+                           "}\n"
+                           "var b: B;\n"
+                           "var i: i32 = 0;\n"
+                           "var use1 = g[B](b);\n"
+                           "var use2 = g[i32](i);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "type 'i32' does not satisfy constraint 'A'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

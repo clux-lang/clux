@@ -369,8 +369,8 @@ sema_create(ctx, out_allocator)
 ## 8. 语义合法性检查（Phase 7+）
 
 > 状态：设计稿（2026-11-26）。本节是 §4 "walk 做类型检查"锚点的落地设计。
-> 范围定稿：名字解析、类型检查全部项、DFA（确定性赋值）。约束检查
-> （泛型 where）与所有权/借用检查不进本期，随后续阶段另行定稿。
+> 范围定稿：名字解析、类型检查全部项、DFA（确定性赋值）、泛型约束检查
+> （§8.9，P12）。所有权/借用检查不进本期，随后续阶段另行定稿。
 
 ### 8.1 定位与原则
 
@@ -488,3 +488,41 @@ sema_has_error，emit 返回 NULL。
 | 9 | 语句级检查：初始化/赋值兼容 + 构造完备性 + 条件 bool + return 匹配 | 正负测对照 |
 | 10 | DFA 确定性赋值 + §2.8 渲染器消费类型表补全回填 + §5-4 断言收紧 | kRichSource 全部 STMT_VAR 有 TYPE；子集断言无条件 |
 | 11 | 泛型实例体 walk 期物化 + 检查 pass 统一 tops 表覆盖（§8.7） | 坏实参组合报定义体错误、好组合零诊断、检查失败 emit 返回 NULL |
+| 12 | 泛型约束检查（§8.9）：interface 类型真实构建 + 实例体逐参约束判定 | 不满足报第一个缺失/签名不符成员或派生失败；好组合零诊断 |
+
+### 8.9 泛型约束检查（P12 设计稿）
+
+语义来源：白皮书 §6.5（`[W extends IWriter]`——extends 后是类型模式或接口
+约束；接口约束按**结构**判定，报第一个缺失或签名不符的成员）。exec 侧已有
+对照实现（src/exec/generic.c `check_generic_constraint`：绑定后求值 + 结构
+判定/派生判定），sema 与其**错误消息逐字对齐**，测试对照保证语义一致。
+
+**载荷来源**：物化期 GENERICS 槽置 NULL（clone.c 实例体克隆），约束槽不在
+物化体内——约束检查不从物化体取，而按 `sema_instance_body_t` 走（原树
+`stmt` + `param_names` + `args` 齐备）。
+
+**前置补全——interface 类型真实构建**：check 的 STMT_INTERFACE 目前占位
+登记（type value described=NULL，`check_type_find` 恒 NULL）。P12 升级为
+真实构建：成员签名逐个求值（签名节点与 `check_func_signature` 同构）经
+`create_clux_interface_type` 入库，按名登记 type value。约束表达式由此可被
+`check_type_eval` 解析出 interface 类型。**泛型 interface（`IWriter[W]`）
+暂缓**：exec 侧明确不支持（expr.c "generic interface is not supported
+yet"），P12 同步限定为非泛型 interface 约束 + 类型模式约束；F-bounded 中
+引用正在绑定参数的 `IWriter[W]` 形态随泛型 interface 批次开放。
+
+**检查协议**（check pass 内，类型环境齐备后对每个实例体）：
+
+1. 按形参序取原树约束槽（`generic_param_node_get_constraint`）；
+2. 约束表达式做一次 inst 态克隆（`param_names`→`args` 代换，复用物化
+   代换通道）后交 `check_type_eval`，求值须为类型；
+3. 约束对象 = 该实参类型（类型实参对 args 节点直接求值；值实参暂无
+   约束检查通道，随 comptime 值参数批次定）；
+4. interface 约束 → 结构判定：`clux_interface_member_count`/`get_member`
+   逐成员查实参类型 attr 表 + `clux_type_equal` 比对签名；非 interface
+   约束 → `clux_type_extends` 派生判定；
+5. 不满足 → diag（消息对齐 exec），经 sema_has_error 汇聚，emit 返回
+   NULL；全收集不 fast-fail。
+
+**约束失败即剔除**（2026-11-26 定稿）：约束不满足的实例体从检查域剔除，
+一条约束错误足矣——物化体 body 照常检查只会对坏实参产出一串级联二次
+错误，无增量信息。与 §8.7「坏实参组合单一诊断」的测试思路一致。

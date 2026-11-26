@@ -97,6 +97,10 @@ typedef struct {
    只读 AST、只产 diag，不改节点不阻断后续 emit。 */
 int sema_check_pass(clux_sema_t *sema);
 
+/* sema.c：按 node kind 分派取声明的泛型参数表（GENERIC_PARAMS），非泛型
+   声明返回 NULL。check.c 的 §8.9 约束检查按它对齐原树形参与实例实参。 */
+node_t *sema_stmt_generics_node(node_t *stmt);
+
 /* 引用点改写条目：原 SYMBOL 文本 from → 提升名 to（to 为 NUL 结尾串，
    克隆时按 to 的内容 intern 进 program_t 的常量表）。 */
 typedef struct {
