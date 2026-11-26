@@ -1101,10 +1101,14 @@ static void check_func_decl(clux_sema_t *sema, node_t *decl) {
     node_t *param = func_params_node_get_param(params, idx);
     check_expr_checked(sema, func_param_node_get_default(param));
   }
-  check_type_eval(sema, func_decl_node_get_return(decl), 1);
+  /* P9：签名返回类型进 return_type 上下文（体内 return 匹配依据），
+     出体恢复外层（嵌套函数互不串扰）。 */
+  clux_type_t *saved_return = sema->return_type;
+  sema->return_type = check_type_eval(sema, func_decl_node_get_return(decl), 1);
   if (body) {
     check_stmt(sema, body);
   }
+  sema->return_type = saved_return;
   clux_context_pop_scope(ctx);
 }
 
@@ -1117,6 +1121,48 @@ static clux_type_t *check_value_bind_type(clux_value_t *value) {
     return NULL;
   }
   return clux_value_get_type(value);
+}
+
+/* ---- P9：语句级检查 ---- */
+
+/* 兼容判定（§8.4）：值与目标类型恒等或经引擎 safe_cast 吸收即兼容
+   （var 初始化/赋值/实参/return 与运行期走同一通道，失败消息天然与
+   exec 逐字一致）。任一侧不可演算或类型族值降级放行（P9 不硬报
+   未知形态）。不兼容返回真 error（调用侧转 diag），兼容返回 NULL。 */
+static clux_value_t *check_safe_cast_gap(clux_sema_t *sema,
+                                         clux_value_t *value,
+                                         clux_type_t *target) {
+  if (!value || !target || check_is_opaque_value(value)) {
+    return NULL;
+  }
+  clux_type_t *source = clux_value_get_type(value);
+  if (clux_type_equal(source, target)) {
+    return NULL;
+  }
+  clux_value_t *cast = clux_context_safe_cast(sema->ctx, value, target, NULL);
+  return check_is_real_error(cast) ? cast : NULL;
+}
+
+/* 条件须 bool（if/while/do-while/for/assert/static assert，与 exec/stmt.c
+   的运行期判定同构、消息逐字一致）。可演算非 bool 报 diag；不可演算
+   降级。what 为语句名（"while"/"assert" 等）。 */
+static void check_cond_bool(clux_sema_t *sema,
+                            clux_value_t *cond,
+                            node_t *node,
+                            const char *what) {
+  if (!cond || check_is_opaque_value(cond)) {
+    return;
+  }
+  clux_type_t *type = clux_value_get_type(cond);
+  if (clux_type_get_kind(type) != CLUX_TYPE_BOOL) {
+    const char *type_name = clux_type_get_name(type);
+    clux_context_diag(sema->ctx,
+                      CLUX_DIAG_ERROR,
+                      node_get_location(node),
+                      "%s condition must be 'bool', got '%s'",
+                      what,
+                      type_name ? type_name : "<unknown>");
+  }
 }
 
 static void check_stmt(clux_sema_t *sema, node_t *stmt) {
@@ -1136,28 +1182,43 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
   }
   case CLUX_NODE_STMT_VAR: {
     /* 标注优先、推断兜底（声明类型治理 var 绑定）；类型结果表锚点
-       是 STMT_VAR 语句节点本体。 */
+       是 STMT_VAR 语句节点本体。P9：标注与初值兼有时走 safe_cast
+       兼容判定（与运行期 var 初始化同一通道）。 */
     clux_type_t *type = check_type_eval(sema, stmt_var_node_get_type(stmt), 1);
-    clux_value_t *value =
-        check_expr_checked(sema, stmt_var_node_get_value(stmt));
+    node_t *value_node = stmt_var_node_get_value(stmt);
+    clux_value_t *value = check_expr_checked(sema, value_node);
+    if (type && value) {
+      clux_value_t *gap = check_safe_cast_gap(sema, value, type);
+      if (gap) {
+        check_error_diag(sema, value_node ? value_node : stmt, gap);
+      }
+    }
     clux_type_t *bind = type ? type : check_value_bind_type(value);
     check_define_value_name(sema, stmt_var_node_get_name(stmt), bind, 1);
     sema_record_node_type(sema, stmt, bind);
     return;
   }
-  case CLUX_NODE_STMT_IF:
-    check_expr_checked(sema, stmt_if_node_get_condition(stmt));
+  case CLUX_NODE_STMT_IF: {
+    node_t *cond_node = stmt_if_node_get_condition(stmt);
+    check_cond_bool(sema, check_expr_checked(sema, cond_node), cond_node, "if");
     check_stmt(sema, stmt_if_node_get_then(stmt));
     check_stmt(sema, stmt_if_node_get_else(stmt));
     return;
-  case CLUX_NODE_STMT_WHILE:
-    check_expr_checked(sema, stmt_while_node_get_condition(stmt));
+  }
+  case CLUX_NODE_STMT_WHILE: {
+    node_t *cond_node = stmt_while_node_get_condition(stmt);
+    check_cond_bool(
+        sema, check_expr_checked(sema, cond_node), cond_node, "while");
     check_stmt(sema, stmt_while_node_get_body(stmt));
     return;
-  case CLUX_NODE_STMT_DO_WHILE:
+  }
+  case CLUX_NODE_STMT_DO_WHILE: {
     check_stmt(sema, stmt_do_while_node_get_body(stmt));
-    check_expr_checked(sema, stmt_do_while_node_get_condition(stmt));
+    node_t *cond_node = stmt_do_while_node_get_condition(stmt);
+    check_cond_bool(
+        sema, check_expr_checked(sema, cond_node), cond_node, "do-while");
     return;
+  }
   case CLUX_NODE_STMT_FOR: {
     clux_context_push_scope(ctx);
     node_t *init = stmt_for_node_get_init(stmt);
@@ -1168,7 +1229,9 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
         check_expr_checked(sema, init);
       }
     }
-    check_expr_checked(sema, stmt_for_node_get_condition(stmt));
+    node_t *cond_node = stmt_for_node_get_condition(stmt);
+    check_cond_bool(
+        sema, check_expr_checked(sema, cond_node), cond_node, "for");
     check_expr_checked(sema, stmt_for_node_get_update(stmt));
     check_stmt(sema, stmt_for_node_get_body(stmt));
     clux_context_pop_scope(ctx);
@@ -1230,15 +1293,32 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
     check_stmt(sema, stmt_defer_node_get_body(stmt));
     clux_context_pop_scope(ctx);
     return;
-  case CLUX_NODE_STMT_RETURN:
-    check_expr_checked(sema, stmt_return_node_get_value(stmt));
+  case CLUX_NODE_STMT_RETURN: {
+    /* P9：return 值与签名返回类型走 safe_cast 兼容判定（与帧边界的
+       运行期 cast 同一通道）。return_type 上下文 NULL（不在函数体/
+       void/未定局）或值不可演算时放行。 */
+    node_t *value_node = stmt_return_node_get_value(stmt);
+    clux_value_t *value = check_expr_checked(sema, value_node);
+    if (value && sema->return_type) {
+      clux_value_t *gap = check_safe_cast_gap(sema, value, sema->return_type);
+      if (gap) {
+        check_error_diag(sema, value_node ? value_node : stmt, gap);
+      }
+    }
     return;
-  case CLUX_NODE_STMT_ASSERT:
-    check_expr_checked(sema, stmt_assert_node_get_condition(stmt));
+  }
+  case CLUX_NODE_STMT_ASSERT: {
+    node_t *cond_node = stmt_assert_node_get_condition(stmt);
+    check_cond_bool(
+        sema, check_expr_checked(sema, cond_node), cond_node, "assert");
     return;
-  case CLUX_NODE_STMT_STATIC_ASSERT:
-    check_expr_checked(sema, stmt_static_assert_node_get_condition(stmt));
+  }
+  case CLUX_NODE_STMT_STATIC_ASSERT: {
+    node_t *cond_node = stmt_static_assert_node_get_condition(stmt);
+    check_cond_bool(
+        sema, check_expr_checked(sema, cond_node), cond_node, "static assert");
     return;
+  }
   case CLUX_NODE_STMT_EXPR:
     check_expr_checked(sema, stmt_expr_node_get_expr(stmt));
     return;
@@ -1581,7 +1661,19 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     return result;
   }
   case CLUX_NODE_EXPR_TERNARY: {
-    clux_value_t *cond = check_expr(sema, ternary_node_get_condition(node));
+    node_t *cond_node = ternary_node_get_condition(node);
+    clux_value_t *cond = check_expr(sema, cond_node);
+    /* P9：条件须 bool（与 exec/expr.c 的运行期判定同构、消息一致）。
+       不可演算降级。 */
+    if (cond && !check_is_real_error(cond) && !check_is_opaque_value(cond) &&
+        clux_type_get_kind(clux_value_get_type(cond)) != CLUX_TYPE_BOOL) {
+      const char *type_name = clux_type_get_name(clux_value_get_type(cond));
+      clux_context_diag(ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(cond_node),
+                        "type '%s' does not support operator '?:'",
+                        type_name ? type_name : "<unknown>");
+    }
     clux_value_t *then_value = check_expr(sema, ternary_node_get_then(node));
     clux_value_t *else_value = check_expr(sema, ternary_node_get_else(node));
     if (check_is_real_error(cond)) {
@@ -1604,7 +1696,9 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     return NULL;
   }
   case CLUX_NODE_EXPR_ASSIGN: {
-    /* 双侧求值（左值形态错误照常传播）；赋值兼容性是 P9 的职责。 */
+    /* 双侧求值（左值形态错误照常传播）。P9：赋值兼容——目标可演算且
+       值可演算时走 safe_cast 判定（与运行期 assign 同一通道），不兼容
+       产真 error 沿表达式上抛（stmt 边界转 diag）。 */
     clux_value_t *target = check_expr(sema, assign_node_get_left(node));
     clux_value_t *value = check_expr(sema, assign_node_get_value(node));
     if (check_is_real_error(target)) {
@@ -1612,6 +1706,13 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     }
     if (check_is_real_error(value)) {
       return value;
+    }
+    if (target) {
+      clux_value_t *gap =
+          check_safe_cast_gap(sema, value, clux_value_get_type(target));
+      if (gap) {
+        return gap;
+      }
     }
     return value;
   }
@@ -1720,13 +1821,16 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
   case CLUX_NODE_EXPR_CONSTRUCT: {
     clux_type_t *type = check_type_eval(sema, construct_node_get_type(node), 1);
     clux_value_t *first_error = NULL;
-    for (size_t idx = 0; idx < construct_node_get_elem_count(node); idx++) {
+    size_t elem_count = construct_node_get_elem_count(node);
+    clux_value_t *values[elem_count ? elem_count : 1];
+    for (size_t idx = 0; idx < elem_count; idx++) {
       node_t *elem = construct_node_get_elem(node, idx);
       node_t *value_node =
           elem && node_get_kind(elem) == CLUX_NODE_EXPR_CONSTRUCT_FIELD
               ? construct_field_node_get_value(elem)
               : elem;
       clux_value_t *value = check_expr(sema, value_node);
+      values[idx] = value;
       if (check_is_real_error(value) && !first_error) {
         first_error = value;
       }
@@ -1737,6 +1841,85 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     }
     if (first_error) {
       return first_error;
+    }
+    /* P9：struct 构造完备性（与 exec/expr.c construct_named_struct 同构、
+       消息逐字一致）——全 named 元素：未知字段/重复字段/缺字段/字段值
+       safe_cast 兼容；位置元素按 mixed 报（位置构造随 exec 现状）。
+       非 struct（union 族等）与未定局类型随 exec 通道，不静态硬报。 */
+    if (type && clux_type_is_seal(type) &&
+        clux_type_get_kind(type) == CLUX_TYPE_STRUCT) {
+      const char *type_name = clux_type_get_name(type);
+      type_name = type_name ? type_name : "<anonymous>";
+      size_t field_count = clux_struct_field_count(type);
+      unsigned char covered[field_count ? field_count : 1];
+      memset(covered, 0, sizeof(covered));
+      for (size_t idx = 0; idx < elem_count; idx++) {
+        node_t *elem = construct_node_get_elem(node, idx);
+        if (!elem) {
+          continue;
+        }
+        if (node_get_kind(elem) != CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+          clux_context_diag(ctx,
+                            CLUX_DIAG_ERROR,
+                            node_get_location(elem),
+                            "named and positional elements cannot be mixed "
+                            "in construction");
+          continue;
+        }
+        node_t *name_node = construct_field_node_get_name(elem);
+        if (!name_node) {
+          continue;
+        }
+        char *name = location_get(node_get_location(name_node), allocator);
+        size_t midx = (size_t)-1;
+        for (size_t fidx = 0; fidx < field_count; fidx++) {
+          const clux_struct_field_t *field = clux_struct_get_field(type, fidx);
+          if (field && field->name && strcmp(field->name, name) == 0) {
+            midx = fidx;
+            break;
+          }
+        }
+        if (midx == (size_t)-1) {
+          clux_context_diag(ctx,
+                            CLUX_DIAG_ERROR,
+                            node_get_location(elem),
+                            "type '%s' has no field '%s'",
+                            type_name,
+                            name);
+          allocator_free(allocator, (void **)&name);
+          continue;
+        }
+        if (covered[midx]) {
+          clux_context_diag(ctx,
+                            CLUX_DIAG_ERROR,
+                            node_get_location(elem),
+                            "duplicate field '%s' in construction of '%s'",
+                            name,
+                            type_name);
+          allocator_free(allocator, (void **)&name);
+          continue;
+        }
+        /* 字段值兼容：与 construct_write_view 的运行期 safe_cast 同通道
+           （复用外层演算结果，不二次求值防双报）。 */
+        clux_value_t *gap = check_safe_cast_gap(
+            sema, values[idx], clux_struct_get_field(type, midx)->type);
+        if (gap) {
+          node_t *value_node2 = construct_field_node_get_value(elem);
+          check_error_diag(sema, value_node2 ? value_node2 : elem, gap);
+        }
+        allocator_free(allocator, (void **)&name);
+        covered[midx] = 1;
+      }
+      for (size_t fidx = 0; fidx < field_count; fidx++) {
+        if (!covered[fidx]) {
+          clux_context_diag(ctx,
+                            CLUX_DIAG_ERROR,
+                            node_get_location(node),
+                            "missing field '%s' in construction of '%s'",
+                            clux_struct_get_field(type, fidx)->name,
+                            type_name);
+        }
+      }
     }
     if (type && clux_type_is_seal(type)) {
       return clux_context_create_shadow_value(ctx, type);

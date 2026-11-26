@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "core/allocator.h"
+#include "core/json.h"
 #include "core/vec.h"
 #include "engine/context.h"
 #include "engine/diag.h"
@@ -327,8 +328,9 @@ TEST(SemaCheckTest, CallArgTypeMismatchIsReported) {
 }
 
 /* 类型结果表（§8.5 第一版）：STMT_VAR 锚点标注优先、推断兜底——
-   var x = 1 + 2 推断 i32；var y = 1.0f32 推断 f32；var z: f64 = 1
-   标注 f64。 */
+   var x = 1 + 2 推断 i32；var y = 1.0f32 推断 f32；var z: f64 = 1.0f64
+   标注 f64（P9：标注与初值走 safe_cast 兼容判定，i32 到 f64 的
+   裸整数字面量被拒——与运行期 var 初始化同通道）。 */
 TEST(SemaCheckTest, VarTypesAreRecorded) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -339,7 +341,7 @@ TEST(SemaCheckTest, VarTypesAreRecorded) {
                            "func main(): void {\n"
                            "  var x = 1 + 2;\n"
                            "  var y = 1.0f32;\n"
-                           "  var z: f64 = 1;\n"
+                           "  var z: f64 = 1.0f64;\n"
                            "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
@@ -355,6 +357,202 @@ TEST(SemaCheckTest, VarTypesAreRecorded) {
   EXPECT_STREQ(clux_type_get_name(y_type), "f32");
   ASSERT_NE(z_type, nullptr);
   EXPECT_STREQ(clux_type_get_name(z_type), "f64");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* ---- §8.8 P9：语句级检查（初始化/赋值兼容 + 条件 bool + return 匹配 +
+   构造完备性），负正测对照，消息与 exec 运行期逐字一致 ---- */
+
+/* 负测：var 初始化窄化——var x: i8 = 300 的 i32 字面量窄化到 i8 被拒
+   （与运行期 var 初始化的 safe_cast 同通道同消息）。 */
+TEST(SemaCheckTest, VarInitNarrowingIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func main(): void {\n"
+                           "  var x: i8 = 300;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(
+      ctx, 1u, 0, "cannot safely cast 'i32' to 'i8': narrowing conversion");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：赋值不兼容——x = 1.0f64 对 i32 目标被拒。 */
+TEST(SemaCheckTest, AssignIncompatibleIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func main(): void {\n"
+                           "  var x: i32 = 1;\n"
+                           "  x = 1.0f64;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "cannot safely cast 'f64' to 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：if/while/for 条件非 bool（整数条件），消息逐字对齐 exec。
+   条件必须带圆括号（if/while/for 同一语法规范）。 */
+TEST(SemaCheckTest, NonBoolConditionsAreReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func main(): void {\n"
+                           "  if (1) { }\n"
+                           "  while (2) { }\n"
+                           "  for (var i = 0; 3; ) { }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 3u, 0, "if condition must be 'bool', got 'i32'");
+  expect_diag_count(ctx, 3u, 1, "while condition must be 'bool', got 'i32'");
+  expect_diag_count(ctx, 3u, 2, "for condition must be 'bool', got 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：三元条件非 bool——消息对齐 exec 的 '?:' 不支持报错。 */
+TEST(SemaCheckTest, TernaryConditionMustBeBool) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func main(): void {\n"
+                           "  var x = 1 ? 2 : 3;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "type 'i32' does not support operator '?:'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：return 值与签名返回类型不匹配（窄化），与帧边界运行期 cast
+   同通道同消息。 */
+TEST(SemaCheckTest, ReturnMismatchIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): i8 {\n"
+                           "  return 300;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(
+      ctx, 1u, 0, "cannot safely cast 'i32' to 'i8': narrowing conversion");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：构造完备性——缺字段 / 字段值类型不匹配，消息对齐 exec 构造。 */
+TEST(SemaCheckTest, ConstructionIssuesAreReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct P { a: i32; b: i32; }\n"
+                           "func main(): void {\n"
+                           "  var s = .P{ .a = 1 };\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "missing field 'b' in construction of 'P'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(SemaCheckTest, ConstructionFieldTypeMismatchIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct S { a: i32; }\n"
+                           "func main(): void {\n"
+                           "  var s = .S{ .a = 1.0f64 };\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "cannot safely cast 'f64' to 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 正测：P9 全链路合法程序零诊断——var 宽化放行（i32→i64）、bool 条件
+   （if/while/for/三元）、return 匹配（含宽化）、构造完备且字段类型
+   匹配、赋值兼容。 */
+TEST(SemaCheckTest, P9CompatibleProgramHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct S { a: i32; b: f64; }\n"
+                           "func wide(): i64 {\n"
+                           "  return 1;\n"
+                           "}\n"
+                           "func main(): void {\n"
+                           "  var w: i64 = 1;\n"
+                           "  w = 2;\n"
+                           "  if (true) { }\n"
+                           "  while (false) { }\n"
+                           "  for (var i = 0; i < 3; i = i + 1) { }\n"
+                           "  var t = true ? 1 : 2;\n"
+                           "  var s = .S{ .a = 1, .b = 2.0f64 };\n"
+                           "  var r = wide();\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_FALSE(sema_has_error(sema));
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);

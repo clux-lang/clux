@@ -5710,6 +5710,95 @@ TEST_F(ExecLiteralTest, CallMissingReturnImplicitTypeName) {
   delete_node(&decl);
 }
 
+/* 场景: return 值经帧边界 safe_cast 适配签名返回类型——窄化拒绝
+   预期: func nr(): i8 { return 300; } 的 return 载荷（300 无后缀默认
+         i32）clone 出帧后 safe_cast 到 i8 被窄化守卫拒绝，调用产出
+         error "cannot safely cast 'i32' to 'i8': narrowing conversion" */
+TEST_F(ExecLiteralTest, CallReturnNarrowingIsRejectedAtFrameExit) {
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_NUMERIC, "300"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nr"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i8"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "nr"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "cannot safely cast 'i32' to 'i8': narrowing conversion")
+      << "return payload must be safe_cast to the signature return type";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: return 值经帧边界 safe_cast 适配签名返回类型——宽化放行
+   预期: func wr(): i64 { return 1; } 的 return 载荷（i32）safe_cast 到
+         i64 宽化吸收，调用产出 i64 值 1（签名返回类型，非载荷原类型） */
+TEST_F(ExecLiteralTest, CallReturnWideningAdaptsToSignature) {
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wr"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i64"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "wr"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_I64)
+      << "return value must be adapted to the signature return type";
+  EXPECT_EQ(read_i64(result), 1);
+  delete_node(&call);
+  delete_node(&decl);
+}
+
+/* 场景: 无值 return;（void 函数）不受 safe_cast 适配影响
+   预期: func vr(): void { return; } 的 return signal 无载荷，帧边界
+         解包产出 NULL（无返回值函数），不进 cast 通道 */
+TEST_F(ExecLiteralTest, CallVoidReturnWithoutValueYieldsNull) {
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "vr"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+                        body);
+  clux_value_t *func = exec_expr_func_decl(ctx, decl);
+  ASSERT_NE(func, nullptr);
+
+  node_t *call =
+      make_call_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "vr"), 0, NULL);
+  clux_value_t *result = exec_expr_call(ctx, call);
+  EXPECT_EQ(result, nullptr)
+      << "valueless return in a void function must unpack to NULL";
+  delete_node(&call);
+  delete_node(&decl);
+}
+
 /* 场景: 深度护栏——CLUX_MAX_CALL_DEPTH=3 的 ctx 上无限递归
    预期: 第 4 次 enter false，报 "maximum call depth exceeded" 完整传播
          到顶层调用表达式；配对的 leave 让调用深度归零。env 只在

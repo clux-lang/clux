@@ -54,6 +54,7 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->methods = create_vec(allocator);
   sema->type_results = create_vec(allocator);
   sema->ast = NULL;
+  sema->return_type = NULL;
   return sema;
 }
 

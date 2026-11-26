@@ -24,13 +24,16 @@ struct _clux_sema_t {
   vec_t *instants;            /* sema_instant_t*，模块级实例化表（§2.3） */
   vec_t *generic_defs;        /* sema_generic_def_t*，泛型名→定义（§2.3） */
   vec_t *instance_bodies;     /* sema_instance_body_t*，实例体表（§2.3） */
-  vec_t *const_defs; /* sema_const_def_t*，顶层 comptime 常量表（§2.1） */
-  vec_t *const_uses; /* sema_const_use_t*，常量引用点表（§2.1） */
-  vec_t *prunes;     /* sema_prune_t*，comptime if 剪枝决策表（§2.5） */
-  vec_t *anons;      /* sema_anon_t*，匿名构造表（§2.9） */
-  vec_t *methods;    /* sema_method_t*，struct 方法表（§2.10） */
+  vec_t *const_defs;   /* sema_const_def_t*，顶层 comptime 常量表（§2.1） */
+  vec_t *const_uses;   /* sema_const_use_t*，常量引用点表（§2.1） */
+  vec_t *prunes;       /* sema_prune_t*，comptime if 剪枝决策表（§2.5） */
+  vec_t *anons;        /* sema_anon_t*，匿名构造表（§2.9） */
+  vec_t *methods;      /* sema_method_t*，struct 方法表（§2.10） */
   vec_t *type_results; /* sema_type_result_t*，类型结果表（§8.5 第一版） */
-  node_t *ast;       /* 借用：walk 入参 PROGRAM（emit 只读） */
+  node_t *ast;         /* 借用：walk 入参 PROGRAM（emit 只读） */
+  clux_type_t *return_type; /* 借用：当前函数签名返回类型上下文（§8.8 P9
+                               return 匹配；NULL=不在函数体/void/未定局），
+                               check_func_decl 进出体保存恢复配对 */
 };
 
 /* 类型结果表条目（§8.5 第一版）：节点 → 类型（借用，类型归 context 的

@@ -27,15 +27,17 @@
    signal）都注册在帧 scope 内（closure 之下各层），直接 delete 后引用
    即悬空——先平衡栈并恢复调用方作用域，再转换出值（error 借 err 指针
    在调用方重建，err 本体归 context 的 errors 向量，值销毁不动本体；
-   signal 在帧边界解包——载荷克隆出帧作为调用结果，与「函数返回一律
-   copy」的值语义一致；error 出帧不走 defer），最后才销毁帧（argument
-   层连同体内未平衡层随 closure 递归销毁）、恢复调用方模块并归还调用
-   深度。 */
+   signal 在帧边界解包——载荷克隆出帧后 safe_cast 适配签名返回类型
+   （return 值与实参/赋值走同一兼容通道），与「函数返回一律 copy」的
+   值语义一致；error 出帧不走 defer），最后才销毁帧（argument 层连同
+   体内未平衡层随 closure 递归销毁）、恢复调用方模块并归还调用深度。
+   return_type 为 NULL（fail/defer 路径）时不 cast。 */
 static clux_value_t *frame_exit(clux_context_t *ctx,
                                 clux_scope_t *closure,
                                 clux_scope_t *argument,
                                 clux_scope_t *caller,
                                 clux_module_t *caller_module,
+                                clux_type_t *return_type,
                                 clux_value_t *result) {
   /* 帧内栈平衡：从真实栈顶逐层 pop 回 argument——任何未配对退出的中间
      层都走各自的 pop 通道销毁（不跳层递归删，defer 批次的挂点就在每层
@@ -54,11 +56,18 @@ static clux_value_t *frame_exit(clux_context_t *ctx,
     clux_error_t *err = *(clux_error_t **)clux_value_get_raw(result, 0);
     out = clux_context_create_error(ctx, err);
   } else if (result && clux_value_is_return_signal(result)) {
-    /* 帧边界是 return signal 的唯一消费点：解包——载荷 clone 出帧
-       作为调用结果返回（函数返回一律 copy）。无值 return; 产出 NULL
+    /* 帧边界是 return signal 的唯一消费点：解包——载荷 clone 出帧后
+       safe_cast 适配签名返回类型（return 值与实参/赋值同一兼容通道，
+       失败产 error 在 caller 作用域出帧）。无值 return; 产出 NULL
        （无返回值函数）。 */
     clux_value_t *payload = clux_return_signal_get_payload(result);
-    out = payload ? clux_context_clone(ctx, payload, NULL) : NULL;
+    if (!payload || !return_type) {
+      out = payload ? clux_context_clone(ctx, payload, NULL) : NULL;
+    } else {
+      clux_value_t *cloned = clux_context_clone(ctx, payload, NULL);
+      out = cloned ? clux_context_safe_cast(ctx, cloned, return_type, NULL)
+                   : cloned;
+    }
   }
   delete_clux_scope(&argument);
   delete_clux_scope(&closure);
@@ -231,7 +240,8 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
   }
   (void)clux_context_swap_scope(ctx, argument);
   if (fail) {
-    return frame_exit(ctx, closure, argument, caller, caller_module, fail);
+    return frame_exit(
+        ctx, closure, argument, caller, caller_module, NULL, fail);
   }
   node_t *body =
       is_defer ? stmt_defer_node_get_body(decl) : func_decl_node_get_body(decl);
@@ -241,7 +251,8 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
         decl_loc,
         is_defer ? "defer statement requires a body"
                  : "function definition requires a body");
-    return frame_exit(ctx, closure, argument, caller, caller_module, fail);
+    return frame_exit(
+        ctx, closure, argument, caller, caller_module, NULL, fail);
   }
   clux_value_t *result = exec_node(ctx, body);
   /* break/continue signal 逃逸到帧边界：循环跳转的唯一消费点是最近一层
@@ -249,18 +260,26 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
   if (clux_value_is_break_signal(result)) {
     fail = clux_context_create_error_message(
         ctx, decl_loc, "break outside of a loop");
-    return frame_exit(ctx, closure, argument, caller, caller_module, fail);
+    return frame_exit(
+        ctx, closure, argument, caller, caller_module, NULL, fail);
   }
   if (clux_value_is_continue_signal(result)) {
     fail = clux_context_create_error_message(
         ctx, decl_loc, "continue outside of a loop");
-    return frame_exit(ctx, closure, argument, caller, caller_module, fail);
+    return frame_exit(
+        ctx, closure, argument, caller, caller_module, NULL, fail);
   }
   /* defer 延期体是无参 void 闭包：fallthrough（无 return，块产出普通
      最后语句值或空块 NULL）合法——frame_exit 只转换 error 与 return
      signal，普通值即弃（void 语义不外传）。 */
   if (is_defer) {
-    return frame_exit(ctx, closure, argument, caller, caller_module, result);
+    return frame_exit(ctx,
+                      closure,
+                      argument,
+                      caller,
+                      caller_module,
+                      clux_func_get_return_type(type),
+                      result);
   }
   /* fallthrough：无 return（块产出普通最后语句值或空块 NULL）统一报
      missing return——clux 的函数体必须显式 return（白皮书 §4.11）。 */
@@ -271,9 +290,16 @@ static clux_value_t *exec_call_executor(clux_context_t *ctx,
                                              decl_loc,
                                              "missing return in function '%s'",
                                              fname ? fname : "<anonymous>");
-    return frame_exit(ctx, closure, argument, caller, caller_module, fail);
+    return frame_exit(
+        ctx, closure, argument, caller, caller_module, NULL, fail);
   }
-  return frame_exit(ctx, closure, argument, caller, caller_module, result);
+  return frame_exit(ctx,
+                    closure,
+                    argument,
+                    caller,
+                    caller_module,
+                    clux_func_get_return_type(type),
+                    result);
 }
 
 /* 懒安装帧协议执行器：任何直接走 clux_context_invoke 的路径（调用表达式、
