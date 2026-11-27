@@ -58,6 +58,10 @@ clux_value_t *exec_expr_struct_decl(clux_context_t *ctx, node_t *node);
    VALUE 表达式。 */
 clux_value_t *exec_func_decl_instance(clux_context_t *ctx, node_t *node);
 clux_value_t *exec_expr_struct_decl_instance(clux_context_t *ctx, node_t *node);
+/* 泛型 interface 实例重执行（exec/generic.c 进入）：绑定环境内建实例
+   interface 类型，不 define——实例值归实例化块出口 clone。 */
+clux_value_t *exec_expr_interface_decl_instance(clux_context_t *ctx,
+                                                node_t *node);
 clux_value_t *exec_expr_tuple(clux_context_t *ctx, node_t *node);
 /* 构造表达式 .<type?>{ elem, ... }（白皮书 §5.10）：构造必穷尽，具名按
    类型分流，匿名产出匿名 struct/tuple（经 safe_cast 鸭子类型转换到接收方）。 */

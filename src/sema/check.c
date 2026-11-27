@@ -409,6 +409,9 @@ static void check_define_template(clux_sema_t *sema,
 
 /* ---- 类型求值 ---- */
 
+/* 前置声明：SUBSCRIPT 实例通道与 interface 构建器互相引用。 */
+static clux_type_t *check_build_interface_decl(clux_sema_t *sema, node_t *decl);
+
 /* 名字 → 类型（沿 scope 链查 TYPE kind 值并解引用）。 */
 static clux_type_t *check_type_find(clux_sema_t *sema, const char *name) {
   clux_value_t *found = clux_scope_get(clux_context_get_scope(sema->ctx), name);
@@ -512,6 +515,67 @@ check_type_eval(clux_sema_t *sema, node_t *node, int report) {
         ok ? clux_context_get_tuple_type(ctx, elems, count) : NULL;
     allocator_free(allocator, (void **)&elems);
     return result;
+  }
+  case CLUX_NODE_EXPR_SUBSCRIPT: {
+    /* §8.14 P17：泛型 interface 实例使用点（类型位置/约束位置的
+       IWriter[i32] / IWriter[W]——W 已由约束通道在临时绑定 scope 内
+       define）。base 名查 type 模板值取载荷 interface decl，实参逐个
+       check_type_eval 后 push scope 按参名 define，成员签名在绑定环境
+       内经 check_build_interface_decl 构建（引擎结构去重，同组合恒等，
+       §6.10）。非 interface 模板 / comptime 值参 / 参数包 / 实参不齐
+       静默 NULL——使用点检查与实例体通道兜底。 */
+    node_t *base = subscript_node_get_base(node);
+    if (!check_is_name_form(base)) {
+      return NULL;
+    }
+    char *name = check_name_of(allocator, base);
+    clux_value_t *found =
+        name ? clux_scope_get(clux_context_get_scope(ctx), name) : NULL;
+    node_t *decl = found && clux_type_get_kind(clux_value_get_type(found)) ==
+                                CLUX_TYPE_TYPE_TEMPLATE
+                       ? (node_t *)clux_context_template_ast(found)
+                       : NULL;
+    if (decl && node_get_kind(decl) == CLUX_NODE_STMT_INTERFACE) {
+      decl = stmt_interface_node_get_interface_decl(decl);
+    }
+    allocator_free(allocator, (void **)&name);
+    node_t *generics =
+        (decl && node_get_kind(decl) == CLUX_NODE_EXPR_INTERFACE_DECL)
+            ? interface_decl_node_get_generics(decl)
+            : NULL;
+    if (!generics) {
+      return NULL;
+    }
+    vec_t *params = node_get_children(generics);
+    vec_t *children = node_get_children(node);
+    /* 下标实参自槽 1 起（槽 0 为 base），与 walk 实例化收集同构。 */
+    size_t arg_count = vec_get_size(children) - 1;
+    size_t param_count = vec_get_size(params);
+    if (!param_count || arg_count != param_count) {
+      return NULL; /* 默认值省略槽由物化/实例化通道对齐，不在此补齐 */
+    }
+    clux_context_push_scope(ctx);
+    clux_type_t *type = NULL;
+    int ok = 1;
+    for (size_t idx = 0; idx < param_count && ok; idx++) {
+      node_t *param = (node_t *)vec_get(params, idx);
+      if (!param || node_get_kind(param) != CLUX_NODE_GENERIC_PARAM ||
+          generic_param_node_get_type(param)) {
+        ok = 0; /* 参数包 / comptime 值参非 interface 实例求值形态 */
+        break;
+      }
+      clux_type_t *arg =
+          check_type_eval(sema, (node_t *)vec_get(children, idx + 1), report);
+      check_define_type_name(sema, generic_param_node_get_name(param), arg, 0);
+      if (!arg) {
+        ok = 0;
+      }
+    }
+    if (ok) {
+      type = check_build_interface_decl(sema, decl);
+    }
+    clux_context_pop_scope(ctx);
+    return type;
   }
   default:
     return NULL;
@@ -975,14 +1039,14 @@ check_func_signature(clux_sema_t *sema, node_t *decl, int report) {
 
 /* §8.9 P12：interface 真实构建——成员签名逐个经 check_func_signature 求
    值（与显式 func 类型表达式结构一致即恒等），clux_context_create_
-   interface_type 入库（结构去重、成员名经 strs 驻留）。泛型 interface
-   （[W]）暂缓（与 exec 同步：F-bounded 随泛型 interface 批次开放）；成员
-   非法（缺名/缺返回/带体/带捕获/带泛型/非签名节点）整体降级 NULL——登记
-   占位保持旧行为，定义体硬错误由 exec 通道兜底。 */
-static clux_type_t *check_build_interface(clux_sema_t *sema, node_t *stmt) {
-  node_t *decl = stmt_interface_node_get_interface_decl(stmt);
+   interface_type 入库（结构去重、成员名经 strs 驻留）。§8.14 P17：非泛型
+   定义与泛型实例体（物化后 GENERICS 已摘除，形参已代换为实参树）同构
+   构建；成员非法（缺名/缺返回/带体/带捕获/带泛型/非签名节点）整体降级
+   NULL——登记占位保持旧行为，定义体硬错误由 exec 通道兜底。 */
+static clux_type_t *check_build_interface_decl(clux_sema_t *sema,
+                                               node_t *decl) {
   node_t *body = decl ? interface_decl_node_get_body(decl) : NULL;
-  if (!decl || interface_decl_node_get_generics(decl) || !body) {
+  if (!decl || !body) {
     return NULL;
   }
   size_t count = interface_members_node_get_member_count(body);
@@ -1027,6 +1091,11 @@ static clux_type_t *check_build_interface(clux_sema_t *sema, node_t *stmt) {
   }
   allocator_free(allocator, (void **)&members);
   return type;
+}
+
+static clux_type_t *check_build_interface(clux_sema_t *sema, node_t *stmt) {
+  return check_build_interface_decl(
+      sema, stmt_interface_node_get_interface_decl(stmt));
 }
 
 /* ---- 模块级注册（第一遍，按声明序） ---- */
@@ -1173,15 +1242,23 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
   }
   case CLUX_NODE_STMT_INTERFACE: {
     /* §8.9 P12：真实构建后登记——约束表达式经 check_type_eval 可解析出
-       interface 类型（结构判定/派生判定的输入）。构建失败降级占位。 */
+       interface 类型（结构判定/派生判定的输入）。构建失败降级占位。
+       §8.14 P17：泛型定义登记模板值（与 struct/union 同构），实例体
+       （物化后 GENERICS 已摘除非泛型）走真实构建；约束/类型位置的
+       IWriter[W] 实例使用点经 check_type_eval 的 SUBSCRIPT 通道解析。 */
     node_t *decl = stmt_interface_node_get_interface_decl(stmt);
     node_t *name = decl ? interface_decl_node_get_name(decl) : NULL;
-    for (size_t didx = 0; didx < stmt_interface_node_get_decorator_count(stmt);
-         didx++) {
-      check_decorator(
-          sema, stmt_interface_node_get_decorator(stmt, didx), NULL);
+    if (decl && interface_decl_node_get_generics(decl)) {
+      check_define_template(sema, name, stmt, 0);
+    } else {
+      for (size_t didx = 0;
+           didx < stmt_interface_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(
+            sema, stmt_interface_node_get_decorator(stmt, didx), NULL);
+      }
+      check_define_type_name(sema, name, check_build_interface(sema, stmt), 0);
     }
-    check_define_type_name(sema, name, check_build_interface(sema, stmt), 0);
     return;
   }
   case CLUX_NODE_STMT_EXTERN_CFUNC:
@@ -1311,7 +1388,11 @@ static void check_local_scan(clux_sema_t *sema, node_t *node) {
   case CLUX_NODE_STMT_INTERFACE: {
     node_t *decl = stmt_interface_node_get_interface_decl(node);
     node_t *name = decl ? interface_decl_node_get_name(decl) : NULL;
-    check_define_type_name(sema, name, check_build_interface(sema, node), 0);
+    if (decl && interface_decl_node_get_generics(decl)) {
+      check_define_template(sema, name, node, 0); /* §8.14 P17 同模块级 */
+    } else {
+      check_define_type_name(sema, name, check_build_interface(sema, node), 0);
+    }
     return;
   }
   case CLUX_NODE_STMT_COMPTIME_IF:
@@ -2781,9 +2862,8 @@ typedef struct {
 
 /* ---- §8.9 P12：泛型约束检查 ---- */
 
-/* 约束子树是否引用任一形参名（F-bounded 形态如 IWriter[W]：泛型
-   interface 暂缓，exec 侧也不支持——检查同步跳过，随泛型 interface
-   批次开放）。 */
+/* 约束子树是否引用任一形参名（F-bounded 形态如 IWriter[W]，§8.14 P17
+   起在形参绑定环境内真实求值）。 */
 static int check_constraint_refs_param(node_t *node, vec_t *param_names) {
   if (!node) {
     return 0;
@@ -2868,8 +2948,9 @@ static int check_constraint_satisfied(clux_sema_t *sema,
 /* 约束检查 pass：物化体 GENERICS 槽已摘除（实例体非泛型），检查走原树
    ——sema_instance_body_t 的 stmt（泛型定义原树含约束槽）+ param_names /
    args 按 §2.3 收集序对齐。逐参判定：值参数（comptime，TYPE 槽非空）的
-   约束暂缓；约束引用形参名（F-bounded）暂缓；类型参数约束求值（双方均
-   check_type_eval，report=0——名字级错误由 P7 通道兜底防双报）后判定。
+   约束暂缓；类型参数约束求值（双方均 check_type_eval，report=0——名字级
+   错误由 P7 通道兜底防双报）后判定；F-bounded（约束引用形参名，§8.14
+   P17）在形参绑定环境内求值（IWriter[W] 经 SUBSCRIPT 通道解析实例）。
    约束求值失败对齐 exec 报 evaluation failed；实参类型不可求值时静默剔除
    （既有通道/物化体已覆盖该错误）。失败实例体从 tops 原地剔除
    （2026-11-26 定稿：单一约束诊断，防 body 级联二次错误）。 */
@@ -2899,10 +2980,28 @@ static void check_generic_constraints(clux_sema_t *sema, vec_t *tops) {
       if (!constraint || generic_param_node_get_type(param)) {
         continue; /* 无约束 / comptime 值参数约束暂缓 */
       }
+      clux_type_t *req = NULL;
       if (check_constraint_refs_param(constraint, body->param_names)) {
-        continue; /* F-bounded：随泛型 interface 批次 */
+        /* F-bounded（§8.14 P17）：约束引用形参名（IWriter[W]）——push
+           临时绑定 scope，按实例实参把全部形参 define 为类型值后在同一
+           环境求值约束（SUBSCRIPT 通道解析泛型 interface 实例），求值
+           完毕 pop 回。 */
+        clux_context_push_scope(ctx);
+        for (size_t p = 0; p < count; p++) {
+          node_t *pnode = (node_t *)vec_get(params, p);
+          if (!pnode || node_get_kind(pnode) != CLUX_NODE_GENERIC_PARAM) {
+            continue;
+          }
+          clux_type_t *arg =
+              check_type_eval(sema, (node_t *)vec_get(body->args, p), 0);
+          check_define_type_name(
+              sema, generic_param_node_get_name(pnode), arg, 0);
+        }
+        req = check_type_eval(sema, constraint, 0);
+        clux_context_pop_scope(ctx);
+      } else {
+        req = check_type_eval(sema, constraint, 0);
       }
-      clux_type_t *req = check_type_eval(sema, constraint, 0);
       if (!req) {
         clux_context_diag(ctx,
                           CLUX_DIAG_ERROR,

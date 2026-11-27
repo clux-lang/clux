@@ -18,6 +18,7 @@
 #include "parser/node.h"
 #include "parser/node_func_decl.h"
 #include "parser/node_func_param.h"
+#include "parser/node_interface_decl.h"
 #include "parser/node_generic_param.h"
 #include "parser/node_rest.h"
 #include "parser/node_stmt_type.h"
@@ -47,7 +48,7 @@ char *exec_rest_pack_name(allocator_t *allocator, node_t *rest) {
   return location_get(node_get_location(expr), allocator);
 }
 
-/* 模板 AST 取参数表节点：三个泛型声明入口的 GENERICS 槽。 */
+/* 模板 AST 取参数表节点：四个泛型声明入口的 GENERICS 槽。 */
 static node_t *template_params_node(node_t *ast) {
   switch (node_get_kind(ast)) {
   case CLUX_NODE_EXPR_FUNC_DECL:
@@ -56,6 +57,8 @@ static node_t *template_params_node(node_t *ast) {
     return struct_decl_node_get_generics(ast);
   case CLUX_NODE_STMT_TYPE:
     return stmt_type_node_get_generics(ast);
+  case CLUX_NODE_EXPR_INTERFACE_DECL:
+    return interface_decl_node_get_generics(ast);
   default:
     return NULL;
   }
@@ -324,6 +327,9 @@ static clux_value_t *instantiate_with_args(clux_context_t *ctx,
       break;
     case CLUX_NODE_EXPR_STRUCT_DECL:
       result = exec_expr_struct_decl_instance(ctx, ast);
+      break;
+    case CLUX_NODE_EXPR_INTERFACE_DECL:
+      result = exec_expr_interface_decl_instance(ctx, ast);
       break;
     case CLUX_NODE_STMT_TYPE: {
       node_t *value_node = stmt_type_node_get_value(ast);

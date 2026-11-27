@@ -1195,6 +1195,69 @@ TEST(SemaCheckTest, GenericConstraintMissingMemberReportedOnce) {
   delete_allocator(&a);
 }
 
+/* ---- §8.14 P17：F-bounded 约束（约束引用形参名，形如 T: IW[T]） ---- */
+
+/* 正测：F-bounded 约束 T extends IW[T]——约束在实例绑定环境内求值
+   （SUBSCRIPT 通道解析泛型 interface 实例 IW[T]），满足的组合零诊断。 */
+TEST(SemaCheckTest, FBoundConstraintSatisfiedHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct Buf {\n"
+                           "  func cmp(self: *Buf, other: Buf): i32 { "
+                           "return 0; }\n"
+                           "}\n"
+                           "interface IW[W] {\n"
+                           "  func cmp(self: *Buf, other: W): i32;\n"
+                           "}\n"
+                           "func g[T extends IW[T]](t: *T): void { }\n"
+                           "var pb: *Buf;\n"
+                           "var use = g[Buf](pb);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：F-bounded 约束失败——Blank 缺 write 成员，IW[Blank] 实例判定
+   报缺失成员，失败实例体从检查域剔除（单一诊断）。 */
+TEST(SemaCheckTest, FBoundConstraintMissingMemberReportedOnce) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct Blank { }\n"
+                           "interface IW[W] {\n"
+                           "  func write(self: *Blank, data: W): void;\n"
+                           "}\n"
+                           "func g[T extends IW[T]](t: *T): void {\n"
+                           "  var z: str = t;\n"
+                           "}\n"
+                           "var pb: *Blank;\n"
+                           "var use = g[Blank](pb);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx,
+                    1u,
+                    0,
+                    "type 'Blank' does not satisfy interface constraint "
+                    "'IW': missing member 'write'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 /* 负测：成员存在但签名不符——i64 vs i32 形参不匹配。 */
 TEST(SemaCheckTest, GenericConstraintSignatureMismatchReported) {
   allocator_t *a = create_allocator(malloc, free);

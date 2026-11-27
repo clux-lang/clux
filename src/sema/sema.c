@@ -257,6 +257,12 @@ static node_t *sema_interface_name_of(node_t *stmt) {
   return decl ? interface_decl_node_get_name(decl) : NULL;
 }
 
+/* 泛型 interface 的 GENERICS 槽（§8.9 P17）：非空时走模板物化通道。 */
+static node_t *sema_interface_generics_of(node_t *stmt) {
+  node_t *decl = stmt_interface_node_get_interface_decl(stmt);
+  return decl ? interface_decl_node_get_generics(decl) : NULL;
+}
+
 typedef struct {
   node_t *(*name_of)(node_t *stmt);
   node_t *(*generics_of)(node_t *stmt);
@@ -274,7 +280,9 @@ static const sema_decl_meta_t g_sema_decl_meta[] = {
     [CLUX_NODE_STMT_ENUM] = {sema_enum_name_of, NULL, 1},
     [CLUX_NODE_STMT_UNION] = {sema_union_name_of, sema_union_generics_of, 1},
     [CLUX_NODE_STMT_BITFIELD] = {sema_bitfield_name_of, NULL, 1},
-    [CLUX_NODE_STMT_INTERFACE] = {sema_interface_name_of, NULL, 1},
+    [CLUX_NODE_STMT_INTERFACE] = {sema_interface_name_of,
+                                  sema_interface_generics_of,
+                                  1},
 };
 
 /* 越界 / 未登记 kind 返回 NULL 行（等价于原 switch default）。 */

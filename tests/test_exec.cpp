@@ -10778,21 +10778,104 @@ TEST_F(ExecLiteralTest, InterfaceDeclDeduplicatesStructurallyIdentical) {
   delete_node(&ia);
 }
 
-/* 场景: 泛型 interface IG[W] { ... }
-   预期: 报 "generic interface is not supported yet"（等泛型批次接入） */
-TEST_F(ExecLiteralTest, InterfaceDeclGenericFormRejected) {
+/* 场景: 泛型 interface IG[W] { write(data: W): void; } → IG[i32] /
+        IG[str] 实例化
+   预期: 定义产出 TYPE_TEMPLATE 模板（lookup 可见，载荷为声明 AST，
+         §6.1）；下标实例化（§6.6）产出描述 INTERFACE 类型的 type value，
+         成员签名形参类型按绑定替换（i32 / str）；同组合二次实例化经
+         引擎结构去重恒等（§6.10），不同组合产出不同类型 */
+TEST_F(ExecLiteralTest, GenericInterfaceInstantiationBuildsInstanceType) {
   node_t *generics = create_generic_params_node(a);
-  node_t *decl = make_interface_decl_of(
-      a, "IG", generics, make_interface_members_of(a, "write", false, NULL));
-  clux_value_t *result = exec_expr_interface_decl(ctx, decl);
-  ASSERT_NE(result, nullptr);
-  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
-  EXPECT_STREQ(error_message_of(result),
-               "generic interface is not supported yet");
+  /* make_generic_param_of 定义在本用例之后，这里内联合成。 */
+  node_t *w_param = create_generic_param_node(a);
+  location_t w_loc;
+  w_loc.filename = "test.clux";
+  w_loc.begin.offset = "W";
+  w_loc.begin.column = 1;
+  w_loc.begin.line = 1;
+  w_loc.end.offset = &"W"[1];
+  w_loc.end.column = 1;
+  w_loc.end.line = 1;
+  node_set_location(w_param, &w_loc);
+  generic_param_node_set_name(
+      w_param, make_text_node(a, CLUX_NODE_LITERAL_IDENTIFIER, "W"));
+  generic_params_node_add_param(generics, w_param);
+  node_t *params = create_func_params_node(a);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(a,
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "data"),
+                          make_node(CLUX_NODE_LITERAL_IDENTIFIER, "W")));
+  node_t *member =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        params,
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "write"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "void"),
+                        NULL);
+  node_t *members = create_interface_members_node(a);
+  interface_members_node_add_member(members, member);
+  node_t *decl = make_interface_decl_of(a, "IG", generics, members);
+  clux_value_t *tmpl = exec_expr_interface_decl(ctx, decl);
+  ASSERT_NE(tmpl, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(tmpl)),
+            CLUX_TYPE_TYPE_TEMPLATE)
+      << "generic interface declaration must produce a type template";
   clux_value_t *probe = clux_context_lookup(ctx, "IG", NULL);
   ASSERT_NE(probe, nullptr);
-  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(probe)), CLUX_TYPE_ERROR)
-      << "a rejected declaration must not define a name";
+  EXPECT_EQ(probe, tmpl);
+  EXPECT_EQ(clux_context_template_ast(probe), decl)
+      << "the template must carry the declaration AST";
+
+  node_t *sub_i32 =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "IG"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *inst_i32 = exec_expr_subscript(ctx, sub_i32);
+  ASSERT_NE(inst_i32, nullptr);
+  ASSERT_FALSE(clux_value_is_error(inst_i32));
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(inst_i32)), CLUX_TYPE_TYPE);
+  clux_type_t *i32_iface = type_described_by(inst_i32);
+  ASSERT_NE(i32_iface, nullptr);
+  EXPECT_EQ(clux_type_get_kind(i32_iface), CLUX_TYPE_INTERFACE);
+  ASSERT_EQ(clux_interface_member_count(i32_iface), 1u);
+  const clux_interface_member_t *sig = clux_interface_get_member(i32_iface, 0);
+  ASSERT_NE(sig, nullptr);
+  EXPECT_STREQ(sig->name, "write");
+  EXPECT_EQ(clux_func_param_count(sig->func), 1u);
+  EXPECT_EQ(clux_func_get_param(sig->func, 0),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "member signature must substitute W with i32";
+
+  /* 同组合二次实例化：结构去重恒等（§6.10）。 */
+  node_t *sub_i32_again =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "IG"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  clux_value_t *inst_again = exec_expr_subscript(ctx, sub_i32_again);
+  ASSERT_NE(inst_again, nullptr);
+  ASSERT_FALSE(clux_value_is_error(inst_again));
+  EXPECT_EQ(type_described_by(inst_again), i32_iface)
+      << "the same combination must dedupe to the resident instance type";
+
+  /* 不同组合：独立实例，成员签名形参替换为 str。 */
+  node_t *sub_str =
+      make_subscript_of(make_node(CLUX_NODE_LITERAL_IDENTIFIER, "IG"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "str"));
+  clux_value_t *inst_str = exec_expr_subscript(ctx, sub_str);
+  ASSERT_NE(inst_str, nullptr);
+  ASSERT_FALSE(clux_value_is_error(inst_str));
+  clux_type_t *str_iface = type_described_by(inst_str);
+  ASSERT_NE(str_iface, nullptr);
+  EXPECT_NE(str_iface, i32_iface);
+  const clux_interface_member_t *str_sig =
+      clux_interface_get_member(str_iface, 0);
+  ASSERT_NE(str_sig, nullptr);
+  EXPECT_EQ(clux_func_get_param(str_sig->func, 0),
+            clux_context_builtin_type(ctx, CLUX_TYPE_STR));
+
+  delete_node(&sub_str);
+  delete_node(&sub_i32_again);
+  delete_node(&sub_i32);
   delete_node(&decl);
 }
 

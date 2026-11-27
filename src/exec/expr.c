@@ -1689,12 +1689,15 @@ clux_value_t *exec_expr_bitfield_decl_value(clux_context_t *ctx, node_t *node) {
    缺省）合法——引擎类型名用关键字文本回退，不 define。interface 类型
    本身永不 seal：作值类型（var x: I 等）由 create_value 的 seal 门禁
    拒绝（"cannot create a value of incomplete type"）。泛型 interface
-   （[W]）暂不支持，等泛型批次接入。declare_named=false 时仅求值出
-   不具名的 type value（装饰器包装路径：具名化推迟到包装完成后的
-   declare_value）。 */
+   定义产 type 模板值（白皮书 §6.1，与 struct 同构）：data 存声明
+   AST 本身，实例化通道在绑定环境内重执行（is_instance=true）建
+   实例 interface 类型（同组合经引擎结构去重恒等，§6.10）。
+   declare_named=false 时仅求值出不具名的 type value（装饰器包装
+   路径：具名化推迟到包装完成后的 declare_value）。 */
 static clux_value_t *exec_expr_interface_decl_impl(clux_context_t *ctx,
                                                    node_t *node,
-                                                   bool declare_named) {
+                                                   bool declare_named,
+                                                   bool is_instance) {
   allocator_t *allocator = clux_context_get_allocator(ctx);
   const location_t *loc = node_get_location(node);
   node_t *name_node = interface_decl_node_get_name(node);
@@ -1706,11 +1709,13 @@ static clux_value_t *exec_expr_interface_decl_impl(clux_context_t *ctx,
   if (!type_name) {
     type_name = "interface";
   }
-  if (interface_decl_node_get_generics(node)) {
-    clux_value_t *fail = clux_context_create_error_message(
-        ctx, loc, "generic interface is not supported yet");
+  if (interface_decl_node_get_generics(node) && !is_instance) {
+    /* 泛型定义产 type 模板值（白皮书 §6.1）：data 存声明 AST 本身，
+       实例化通道（generic.c）按下标实参在绑定环境内重执行。 */
+    clux_value_t *template_value = clux_context_create_type_template(
+        ctx, node, declare_named ? name : NULL, loc);
     allocator_free(allocator, (void **)&name);
-    return fail;
+    return template_value;
   }
   node_t *body = interface_decl_node_get_body(node);
   size_t count = body ? interface_members_node_get_member_count(body) : 0;
@@ -1902,14 +1907,21 @@ static clux_value_t *exec_expr_interface_decl_impl(clux_context_t *ctx,
 }
 
 clux_value_t *exec_expr_interface_decl(clux_context_t *ctx, node_t *node) {
-  return exec_expr_interface_decl_impl(ctx, node, true);
+  return exec_expr_interface_decl_impl(ctx, node, true, false);
 }
 
 /* 匿名 interface 值求值：仅求值出不具名的 type value（不按名 define），
    interface 语句装饰器包装路径用——包装完成后由 declare_value 具名化。 */
 clux_value_t *exec_expr_interface_decl_value(clux_context_t *ctx,
                                              node_t *node) {
-  return exec_expr_interface_decl_impl(ctx, node, false);
+  return exec_expr_interface_decl_impl(ctx, node, false, false);
+}
+
+/* 泛型 interface 实例重执行（generic.c 分派）：在绑定环境内建实例
+   interface 类型，不具名不 define——实例值归实例化块出口 clone。 */
+clux_value_t *exec_expr_interface_decl_instance(clux_context_t *ctx,
+                                                node_t *node) {
+  return exec_expr_interface_decl_impl(ctx, node, false, true);
 }
 
 /* struct 定义（白皮书 §3.5）两阶段构造：func 成员形参类型急切求值

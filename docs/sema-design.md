@@ -493,6 +493,7 @@ sema_has_error，emit 返回 NULL。
 | 14 | 装饰器编译期计算（§8.11）：exec_apply_decorator 公有化 + pass C 成员装饰器链式应用 + STMT_STRUCT 装饰三段式 | 方法装饰器值级包装 end-to-end、同定义双实例独立计算、标记/失败路径回归 |
 | 15 | check 层装饰器检查通道（§8.12）：表达式求值诊断 + func 形态签名交验 + 挂点全覆盖（模块 register/install_methods/check_stmt） | 未定义名/签名不符恰报一条且消息与 exec 逐字一致、标记/TDZ 零诊断、包装后类型可被后续消费验证 |
 | 16 | 类型位置装饰器语义收尾（§8.13）：STMT_TYPE 装饰器 exec 真实计算 + FIELD 装饰器全链路消费 + check 端 eval-only 同构 | 标记透传不改写类型本体、求值/invoke error 在 define 前拦截名字不落地、check 端未定义名报而标记零诊断 |
+| 17 | 泛型 interface 实例化与 F-bounded 约束（§8.14）：exec 定义产 type 模板 + 下标实例化通道 + check 端模板登记/SUBSCRIPT 求值/F-bounded 绑定环境内真实求值 | 定义产 TYPE_TEMPLATE、实例成员签名按实参代换、同组合去重恒等、F-bounded 好组合零诊断坏组合单一约束诊断 |
 
 ### 8.9 泛型约束检查（P12 设计稿）
 
@@ -509,10 +510,11 @@ sema_has_error，emit 返回 NULL。
 登记（type value described=NULL，`check_type_find` 恒 NULL）。P12 升级为
 真实构建：成员签名逐个求值（签名节点与 `check_func_signature` 同构）经
 `create_clux_interface_type` 入库，按名登记 type value。约束表达式由此可被
-`check_type_eval` 解析出 interface 类型。**泛型 interface（`IWriter[W]`）
-暂缓**：exec 侧明确不支持（expr.c "generic interface is not supported
-yet"），P12 同步限定为非泛型 interface 约束 + 类型模式约束；F-bounded 中
-引用正在绑定参数的 `IWriter[W]` 形态随泛型 interface 批次开放。
+`check_type_eval` 解析出 interface 类型。~~**泛型 interface（`IWriter[W]`）
+暂缓**~~：P17 已开放（见 §8.14）——exec 侧定义产出 type 模板 + 下标
+实例化通道，check 侧模板登记 + `check_type_eval` 的 SUBSCRIPT 实例求值
+通道；F-bounded 中引用正在绑定参数的 `IWriter[W]` 形态在实例绑定环境内
+真实求值。
 
 **检查协议**（check pass 内，类型环境齐备后对每个实例体）：
 
@@ -684,3 +686,53 @@ type value 属 TYPE kind，会被 `check_call_value` 的 opaque gate
   表达"接收 type value 的形参类型"），测试中构造 func 装饰器须走引擎
   直建（create_func_type + func_set_ast + declare_value），与
   `StmtUnionDecoratorWrapsTypeValueEndToEnd` 同一通道。
+
+### 8.14 泛型 interface 实例化与 F-bounded 约束（P17 已落地）
+
+语义来源：白皮书 §6.1/§6.6/§6.10。P12 时泛型 interface 在 exec 与
+check 两侧均为明确暂缓项（expr.c 拒绝 + 约束限定非泛型），P17 将其
+对齐 func/struct 的既有"定义产模板 + 下标实例化"协议，并放开 F-bounded
+约束（`[T: IWriter[T]]`——约束引用正在绑定的形参）。
+
+**exec 侧（定义/实例同构协议，与 struct 先例一致）**：
+
+1. **定义产模板**：`exec_expr_interface_decl` 命中非空 GENERICS 槽时
+   产出 `CLUX_TYPE_TYPE_TEMPLATE` 模板值（`clux_context_create_type_template`，
+   data 存声明 AST，§6.1），具名时照常 define；
+2. **实例化通道**：generic.c 的 GENERICS 槽取值（`template_params_node`）
+   与重执行分派（`exec_expr_interface_decl_instance`，is_instance=true）
+   各加 INTERFACE_DECL case——在绑定 scope 内重执行建实例 interface
+   类型，不具名不 define，实例值归实例化块出口 clone；同组合经引擎
+   结构去重恒等（§6.10）。
+
+**sema walk 侧**：`g_sema_decl_meta` 的 STMT_INTERFACE 行补 generics_of
+（解包 INTERFACE_DECL 取 GENERICS 槽）——泛型 interface 定义自动进入
+模板物化通道：使用点 `EXPR_SUBSCRIPT` base 命中泛型名即拼实例名登记
+实例体，物化走 clone env（GENERICS 槽 kind 级摘除 + 成员签名形参经
+代换通道替换为实参树），实例体与非泛型定义同构。
+
+**check 侧**：
+
+1. **模板登记**：`check_module_register`/`check_local_scan` 的
+   STMT_INTERFACE 分支对非空 GENERICS 走 `check_define_template`
+   （载荷传 STMT_INTERFACE 包装节点，与 struct/union 一致），非泛型
+   保持原样；
+2. **SUBSCRIPT 实例求值**：`check_type_eval` 新增 EXPR_SUBSCRIPT
+   case——base 名经 `clux_scope_get` 查 TYPE_TEMPLATE 值取载荷 AST，
+   STMT_INTERFACE 解包后：参数包/comptime 值参/实参数不齐静默 NULL；
+   否则 push scope 逐参把实参求值结果 define 为类型值，同一环境
+   `check_build_interface_decl` 构建实例 interface 类型，pop 返回；
+   `check_build_interface` 拆为 decl 级构建器 + 解包转发（物化实例体
+   GENERICS 已摘、形参已代换，与非泛型定义同构构建）；
+3. **F-bounded 真实求值**：`check_generic_constraints` 检测约束表达式
+   引用形参名（`check_constraint_refs_param`）时，push 临时绑定 scope
+   把全部形参按实例实参 define 为类型值，在同一环境求值约束
+   （SUBSCRIPT 通道解析 `IWriter[T]` 实例），pop 后照常走
+   `check_constraint_satisfied` 结构判定——不再对 F-bounded 形态
+   continue 静默放行。
+
+**测试锚**：exec 端 `GenericInterfaceInstantiationBuildsInstanceType`
+（模板 kind/lookup/AST 载荷、i32/str 实例成员签名代换、二次去重
+恒等）；check 端 `FBoundConstraintSatisfiedHasNoDiag` /
+`FBoundConstraintMissingMemberReportedOnce`（好组合零诊断；坏组合
+单一约束诊断且失败实例体剔除）。
