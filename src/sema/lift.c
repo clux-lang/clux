@@ -241,9 +241,14 @@ int sema_lift_materialize_return(sema_clone_env_t *env,
   if (!src_value) {
     return 0;
   }
-  /* 类型取 return 值根的 §8.5 锚点（P3a：CALL/CONSTRUCT 已锚）。锚点
-     缺失不物化，调用方沿用裸形态。 */
+  /* 类型取 return 值根的 §8.5 锚点（P3a：CALL/CONSTRUCT 已锚）；锚点
+     缺失时按 unwind 链反查绑定类型（§4.17.3 return 值引用待析构绑定
+     形态，如 return g;——根 identifier 无锚点，条目登记时已带类型）。
+     两者皆无仍不物化，调用方沿用裸形态。 */
   clux_type_t *type = sema_get_node_type(env->sema, src_value);
+  if (!type) {
+    type = sema_unwind_lookup_type(env, src_value);
+  }
   if (!type) {
     return 0;
   }
@@ -472,8 +477,13 @@ sema_lift_lower_while(node_t *src, node_t *block, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(src);
   node_t *gate =
       sema_lift_cond_gate(stmt_while_node_get_condition(src), env, loc);
+  /* §4.17.3 循环体水位：降维体是手工构造不经循环节点通道，body 克隆期
+     在此手动设置——体内 break/continue 的 unwind 底。 */
+  size_t saved_loop_mark = env->unwind_loop_mark;
+  env->unwind_loop_mark = vec_get_size(env->unwind);
   node_t *body_clone =
       sema_clone_node_renamed(stmt_while_node_get_body(src), env);
+  env->unwind_loop_mark = saved_loop_mark;
   node_t *for_body = create_stmt_block_node(env->out);
   node_set_location(for_body, loc);
   node_add_child(for_body, gate);
@@ -499,8 +509,12 @@ sema_lift_lower_do_while(node_t *src, node_t *block, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(src);
   node_t *gate =
       sema_lift_cond_gate(stmt_do_while_node_get_condition(src), env, loc);
+  /* §4.17.3 循环体水位：同 lower_while，body 克隆期的 unwind 底。 */
+  size_t saved_loop_mark = env->unwind_loop_mark;
+  env->unwind_loop_mark = vec_get_size(env->unwind);
   node_t *body_clone =
       sema_clone_node_renamed(stmt_do_while_node_get_body(src), env);
+  env->unwind_loop_mark = saved_loop_mark;
   vec_t *hits = create_vec(env->out);
   sema_collect_exit_hits(body_clone, hits, env->out, 1);
   for (size_t h = vec_get_size(hits); h > 0; h--) {
@@ -566,8 +580,13 @@ sema_lift_lower_for(node_t *src, node_t *block, sema_clone_env_t *env) {
   } else if (update_src) {
     update_clone = sema_clone_node_renamed(update_src, env);
   }
+  /* §4.17.3 循环体水位：同 lower_while，body 克隆期的 unwind 底
+     （init/cond/update 是表达式槽不入链，无关水位）。 */
+  size_t saved_loop_mark = env->unwind_loop_mark;
+  env->unwind_loop_mark = vec_get_size(env->unwind);
   node_t *body_clone =
       sema_clone_node_renamed(stmt_for_node_get_body(src), env);
+  env->unwind_loop_mark = saved_loop_mark;
   node_t *for_body = create_stmt_block_node(env->out);
   node_set_location(for_body, loc);
   if (cond_gate) {

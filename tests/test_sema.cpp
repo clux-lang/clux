@@ -2251,6 +2251,9 @@ TEST(SemaTest, RaiiUnionVariantDisposeSynthAsNormalizedText) {
                    "  var u: U = .U{r = $tmp$0};\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  if (u is n) {\n"
+                   /* §4.17.3：臂内深 return unwind 全链——u（臂外
+                      层函数体块登记项）析构前插到 return 前。 */
+                   "    $dispose$U(u.&);\n"
                    "    return;\n"
                    "  }\n"
                    "  $dispose$U(u.&);\n"
@@ -2443,6 +2446,88 @@ TEST(SemaTest, RaiiReturnTupleRootAnchor) {
                    "  $dispose$Res($tmp$1.&);\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  return $ret$2;\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17.3 $ret 物化扩展：return 值纯 identifier 引用本 return 将展开
+   的 unwind 区间内待析构绑定（return x;）——析构前插先于 return 表达式
+   求值即 use-after-dispose。物化条件扩展（lifted || unwind 引用命中）：
+   [var $ret$N: T = x;]→[unwind 析构]→[return $ret$N]，$ret 经
+   __init_copy__ 拷贝（源 x 按值传参 copy 语义未被置空，析构为真实
+   释放）。类型经 unwind 条目反查（根 identifier 无 §8.5 锚点）。 */
+TEST(SemaTest, RaiiReturnRefDisposeBindingMaterialized) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func g(): Res {\n"
+                   "  return .Res{ .v = 1 };\n"
+                   "}\n"
+                   "func f(): Res {\n"
+                   "  var x: Res = g();\n"
+                   "  return x;\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func g(): Res {\n"
+                   "  return .Res{v = 1};\n"
+                   "}\n"
+                   "func f(): Res {\n"
+                   "  var x: Res = g();\n"
+                   "  var $ret$0: Res = x;\n"
+                   "  $dispose$Res(x.&);\n"
+                   "  return $ret$0;\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17.3 深形态：if 臂内深 return 引用外层块绑定——臂块是块通道克隆，
+   return 为其 exit 点，unwind 栈上外层块登记的 x 未截断（func_mark..top
+   全链），物化 var 与析构前插落臂块内。路径互斥保证 x 单次析构。 */
+TEST(SemaTest, RaiiDeepReturnRefOuterBindingMaterialized) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func g(): Res {\n"
+                   "  return .Res{ .v = 1 };\n"
+                   "}\n"
+                   "func f(c: bool): Res {\n"
+                   "  var x: Res = g();\n"
+                   "  if (c) {\n"
+                   "    return x;\n"
+                   "  }\n"
+                   "  return .Res{ .v = 2 };\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func g(): Res {\n"
+                   "  return .Res{v = 1};\n"
+                   "}\n"
+                   "func f(c: bool): Res {\n"
+                   "  var x: Res = g();\n"
+                   "  if (c) {\n"
+                   "    var $ret$0: Res = x;\n"
+                   "    $dispose$Res(x.&);\n"
+                   "    return $ret$0;\n"
+                   "  }\n"
+                   "  $dispose$Res(x.&);\n"
+                   "  return .Res{v = 2};\n"
                    "}\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
@@ -2719,8 +2804,152 @@ TEST(SemaTest, RaiiForeachItemDisposeAtExits) {
       false);
 }
 
-/* §4.17.6 P2：FFI 边界禁令——cfunc 形参与返回类型、extern var 类型
-   拒绝 disposable（C ABI 无法运行 clux 析构协议）；*Res 指针形参放行。 */
+/* §4.17.3：深 return 穿 foreach 体——臂内 return 沿 unwind 全链 LIFO
+   展开：元素 x → __iter → 函数体块登记的 it（v1 只展开臂内直接链，
+   __iter/it 会漏）。 */
+TEST(SemaTest, RaiiForeachDeepReturnUnwindsFullChain) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var it: [2]Res = <.Res{ .v = 1 }, .Res{ .v = 2 }>;\n"
+                   "  foreach (var x of it) {\n"
+                   "    if (x.v == 1) {\n"
+                   "      return;\n"
+                   "    }\n"
+                   "  }\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var $tmp$0: Res = .Res{v = 1};\n"
+                   "  var $tmp$1: Res = .Res{v = 2};\n"
+                   "  var it: [2]Res = <$tmp$0, $tmp$1>;\n"
+                   "  $dispose$Res($tmp$1.&);\n"
+                   "  $dispose$Res($tmp$0.&);\n"
+                   "  {\n"
+                   "    var __iter: [2]Res = it;\n"
+                   "    var __i: i32 = 0i32;\n"
+                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
+                   "      var x: Res = __iter[__i];\n"
+                   "      {\n"
+                   "        if (x.v == 1) {\n"
+                   "          $dispose$Res(x.&);\n"
+                   "          $dispose$$x5b2$x5dRes(__iter.&);\n"
+                   "          $dispose$$x5b2$x5dRes(it.&);\n"
+                   "          return;\n"
+                   "        }\n"
+                   "      }\n"
+                   "      $dispose$Res(x.&);\n"
+                   "    }\n"
+                   "    $dispose$$x5b2$x5dRes(__iter.&);\n"
+                   "  }\n"
+                   "  $dispose$$x5b2$x5dRes(it.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$$x5b2$x5dRes(self: *[2]Res): void {\n"
+                   "  for (var i = 2; i > 0; i = i - 1) {\n"
+                   "    $dispose$Res(self.*[i - 1].&);\n"
+                   "  }\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17.3：循环体内 disposable var 的 break 前析构——break 的 unwind
+   底是循环体水位：体内登记项 g 与元素 x 展开，__iter 不触发（出循环
+   后落到块尾显式析构）。v1 该场景 g 直接漏析构。 */
+TEST(SemaTest, RaiiLoopBodyVarDisposeAtBreak) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var it: [2]Res = <.Res{ .v = 1 }, .Res{ .v = 2 }>;\n"
+                   "  foreach (var x of it) {\n"
+                   "    var g: Res = .Res{ .v = 0 };\n"
+                   "    break;\n"
+                   "  }\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var $tmp$0: Res = .Res{v = 1};\n"
+                   "  var $tmp$1: Res = .Res{v = 2};\n"
+                   "  var it: [2]Res = <$tmp$0, $tmp$1>;\n"
+                   "  $dispose$Res($tmp$1.&);\n"
+                   "  $dispose$Res($tmp$0.&);\n"
+                   "  {\n"
+                   "    var __iter: [2]Res = it;\n"
+                   "    var __i: i32 = 0i32;\n"
+                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
+                   "      var x: Res = __iter[__i];\n"
+                   "      {\n"
+                   "        var g: Res = .Res{v = 0};\n"
+                   "        $dispose$Res(g.&);\n"
+                   "        $dispose$Res(x.&);\n"
+                   "        break;\n"
+                   "      }\n"
+                   "      $dispose$Res(x.&);\n"
+                   "    }\n"
+                   "    $dispose$$x5b2$x5dRes(__iter.&);\n"
+                   "  }\n"
+                   "  $dispose$$x5b2$x5dRes(it.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$$x5b2$x5dRes(self: *[2]Res): void {\n"
+                   "  for (var i = 2; i > 0; i = i - 1) {\n"
+                   "    $dispose$Res(self.*[i - 1].&);\n"
+                   "  }\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17.3：函数体边界水位——函数声明体内 return 的 unwind 底是其自身
+   体边界，不外泄到外层块登记项（a 不被内层 return 前插）。 */
+TEST(SemaTest, RaiiNestedFuncReturnDoesNotUnwindOuter) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  func gg(): void {\n"
+                   "    return;\n"
+                   "  }\n"
+                   "  var a: Res = .Res{ .v = 1 };\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var a: Res = .Res{v = 1};\n"
+                   "  $dispose$Res(a.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   /* 提升函数排在 emit 尾部（dispose 合成之后）。 */
+                   "func f$gg(): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
 TEST(SemaTest, RaiiFfiBoundaryRejectsDisposableTypes) {
   const char *src = "struct Res {\n"
                     "  v: i32;\n"

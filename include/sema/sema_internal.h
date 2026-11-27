@@ -284,7 +284,26 @@ typedef struct {
   int lift_skip_top;   /* 槽内顶层单一临时根直通不捕获（§4.17 P3） */
   int lift_active; /* 槽驱动武装位：仅块级语句槽克隆期为 1，惰性
                       （&&/||/?:）与闭包（defer/展开）上下文抑制 */
+  vec_t *unwind; /* §4.17.3 出口 unwind 链：defer/dispose 登记项
+                      （sema_defer_ref_t*，clone.c/lift.c 共享，条目
+                      结构体 out 持有），随克隆路径 push/截断维护（块级
+                      水位协议：进块记水位，出块截断回水位并释放条目）。 */
+  size_t unwind_func_mark; /* 函数体边界水位：return unwind 的底。 */
+  size_t unwind_loop_mark; /* 最近循环体边界水位：break/continue unwind
+                              的底（循环体克隆期由循环通道设置，foreach
+                              元素绑定登记在水位之上、__iter 之下）。 */
 } sema_clone_env_t;
+
+/* §4.17.3 unwind 登记项（如上）。type 为析构形态登记的绑定类型（借用
+   引擎类型表，defer 形态 NULL）——return 值引用链上待析构绑定时 $ret
+   物化的类型反查数据源。 */
+typedef struct {
+  const char *name; /* __deferN 或 $dispose$T（intern 文本） */
+  const location_t *loc;
+  int dispose;          /* 1=析构调用形态：追加实参 var_name.& */
+  const char *var_name; /* dispose 目标变量名（intern 文本） */
+  clux_type_t *type;    /* 借用：dispose 形态登记的绑定类型。 */
+} sema_defer_ref_t;
 
 /* env 初始化：out/program 随 emit 创建；renames/skip 由 emit 按 stmt
    覆写；subst_* 初始 NULL。instants/consts/prunes 为 sema 整个 walk
@@ -425,5 +444,19 @@ void sema_collect_exit_hits(node_t *block,
                             vec_t *hits,
                             allocator_t *out,
                             int continue_only);
+
+/* ---- §4.17.3 return 值引用待析构绑定的 $ret 物化（clone.c） ---- */
+
+/* return 值子树保守文本扫描：func_mark..top 区间内有 dispose 条目且
+   子树任一 LITERAL_IDENTIFIER 文本命中其 var_name 时返回 1——析构前插
+   先于 return 表达式求值（use-after-dispose），须物化 $ret 先求值拷贝。
+   内层同名遮蔽的误判只导致多余物化（copy 语义等价 + 钩子幂等，无害）。
+   跳过嵌套函数体（EXPR_FUNC_DECL 子树，其 return 是该函数自己的）。 */
+int sema_unwind_return_captures(sema_clone_env_t *env, node_t *ret_stmt);
+
+/* unwind 链按名反查绑定类型：根 identifier 文本命中 func_mark..top 区间
+   内 dispose 条目 var_name 时返回该条目登记的绑定类型（借用），否则
+   NULL——materialize_return 锚点 miss 时的类型兜底。 */
+clux_type_t *sema_unwind_lookup_type(sema_clone_env_t *env, node_t *value);
 
 #endif
