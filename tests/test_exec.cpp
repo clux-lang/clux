@@ -9352,6 +9352,236 @@ TEST_F(ExecLiteralTest, TypeAliasPropagatesNullValue) {
   delete_node(&node);
 }
 
+/* ---- P16：type 别名 / struct 字段装饰器（§9.6 类型位置语义）---- */
+
+/* 定义 func name(t: type): type { return t; } 并注册进当前作用域
+   （P16 类型位置装饰器测试助手：func 装饰器以 type value 为实参
+   invoke 的成功路径；decl AST 被函数值借用，须在调用结束后释放）。
+   元类型 type 不在 builtin 命名注册表（AST 无法表达"接收 type value
+   的形参类型"），与 StmtUnionDecoratorWrapsTypeValueEndToEnd 同一
+   通道：引擎直建 func type，AST 只被帧协议消费。 */
+static clux_value_t *define_type_identity(clux_context_t *ctx,
+                                          allocator_t *allocator,
+                                          const char *name,
+                                          node_t **decl_out) {
+  clux_type_t *meta = clux_context_get_type_type(ctx);
+  clux_type_t *identity_params[1] = {meta};
+  clux_type_t *func_type = clux_context_create_func_type(
+      ctx, name, NULL, 0, identity_params, 1, meta);
+  if (!func_type) {
+    return NULL;
+  }
+  node_t *params = create_func_params_node(allocator);
+  func_params_node_add_param(
+      params,
+      make_named_param_of(
+          allocator,
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "t"),
+          make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "type")));
+  node_t *body = create_stmt_block_node(allocator);
+  node_t *ret = create_stmt_return_node(allocator);
+  stmt_return_node_set_value(
+      ret, make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "t"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *decl = make_func_decl_of(
+      allocator,
+      NULL,
+      NULL,
+      params,
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, name),
+      make_text_node(allocator, CLUX_NODE_LITERAL_IDENTIFIER, "type"),
+      body);
+  *decl_out = decl;
+  clux_value_t *func = clux_context_create_func(ctx, func_type, NULL, NULL);
+  if (!func || clux_context_func_set_ast(ctx, func, decl, NULL, NULL) != func) {
+    return NULL;
+  }
+  return clux_context_declare_value(ctx, func, name, node_get_location(decl));
+}
+
+/* 场景: [[7]] type T = i32（标记类装饰器）
+   预期: 透传——别名正常 define，绑定保持原 type value（描述 i32） */
+TEST_F(ExecLiteralTest, TypeAliasMarkerDecoratorDefinesAlias) {
+  node_t *node = make_stmt_type(
+      a, "type T = i32", "T", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  stmt_type_node_add_decorator(
+      node, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "marker decorator must pass the alias type value through";
+  EXPECT_EQ(clux_context_lookup(ctx, "T", NULL), result);
+  delete_node(&node);
+}
+
+/* 场景: [[missing]] type T = i32（装饰器表达式求值失败）
+   预期: "use of undeclared identifier 'missing'"，别名在 define 前拦截
+         （与 struct 语句三段式一致，名字不落地） */
+TEST_F(ExecLiteralTest, TypeAliasDecoratorErrorBlocksDefine) {
+  node_t *node = make_stmt_type(
+      a, "type T = i32", "T", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  stmt_type_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "missing")));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'missing'");
+  clux_value_t *bound = clux_context_lookup(ctx, "T", NULL);
+  ASSERT_NE(bound, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bound))
+      << "failed decorator must block the alias define";
+  delete_node(&node);
+}
+
+/* 场景: [[echo]] type T = i32（echo = func(t: type): type { return t; }）
+   预期: func 装饰器真实 invoke（执行器懒安装），但包装结果只消费
+         error 后丢弃（§9.6 类型装饰器不改写类型本体）——绑定仍描述 i32 */
+TEST_F(ExecLiteralTest, TypeAliasFuncDecoratorResultIsDiscarded) {
+  node_t *echo_decl = nullptr;
+  clux_value_t *echo = define_type_identity(ctx, a, "echo", &echo_decl);
+  ASSERT_NE(echo, nullptr);
+
+  node_t *node = make_stmt_type(
+      a, "type T = i32", "T", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  stmt_type_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "echo")));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  EXPECT_EQ(clux_type_kind_unwrap(clux_value_get_type(result)), CLUX_TYPE_TYPE);
+  clux_type_t *described = type_described_by(result);
+  ASSERT_NE(described, nullptr);
+  EXPECT_EQ(described, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "the func decorator result must be discarded (§9.6)";
+  EXPECT_EQ(clux_context_lookup(ctx, "T", NULL), result);
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "the func decorator invoke path must have really run";
+  delete_node(&node);
+  delete_node(&echo_decl);
+}
+
+/* 场景: [[zero]] type T = i32（zero = func(): i32 { return 1; }，零参）
+   预期: invoke 以 type value 为唯一实参——个数交验失败原样上抛，
+         别名在 define 前拦截 */
+TEST_F(ExecLiteralTest, TypeAliasFuncDecoratorArityErrorBlocksDefine) {
+  node_t *body = create_stmt_block_node(a);
+  node_t *ret = create_stmt_return_node(a);
+  stmt_return_node_set_value(ret, make_node(CLUX_NODE_LITERAL_NUMERIC, "1"));
+  stmt_block_node_add_stmt(body, ret);
+  node_t *zero_decl =
+      make_func_decl_of(a,
+                        NULL,
+                        NULL,
+                        create_func_params_node(a),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "zero"),
+                        make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"),
+                        body);
+  clux_value_t *zero = exec_expr_func_decl(ctx, zero_decl);
+  ASSERT_NE(zero, nullptr);
+
+  node_t *node = make_stmt_type(
+      a, "type T = i32", "T", make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  stmt_type_node_add_decorator(
+      node,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "zero")));
+  clux_value_t *result = exec_stmt_type(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "function expects 0 arguments, got 1")
+      << "the type value must be passed as the single argument";
+  clux_value_t *bound = clux_context_lookup(ctx, "T", NULL);
+  ASSERT_NE(bound, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bound))
+      << "failed decorator must block the alias define";
+  delete_node(&node);
+  delete_node(&zero_decl);
+}
+
+/* 场景: struct S { [[7]] a: i32; [[missing]] b: i32; }（标记类之后混入
+        求值失败的字段装饰器）
+   预期: 任一字段装饰器失败即 fail——struct 不 define，错误原样上抛 */
+TEST_F(ExecLiteralTest, StructFieldDecoratorErrorBlocksDefine) {
+  node_t *members = create_struct_members_node(a);
+  node_t *field_a = create_field_node(a);
+  field_node_set_name(field_a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"));
+  field_node_set_type(field_a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  field_node_add_decorator(
+      field_a, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  struct_members_node_add_member(members, field_a);
+  node_t *field_b = create_field_node(a);
+  field_node_set_name(field_b, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"));
+  field_node_set_type(field_b, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  field_node_add_decorator(
+      field_b,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "missing")));
+  struct_members_node_add_member(members, field_b);
+  node_t *decl = create_struct_decl_node(a);
+  struct_decl_node_set_name(decl, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "S"));
+  struct_decl_node_set_generics(decl, NULL);
+  struct_decl_node_set_body(decl, members);
+
+  clux_value_t *result = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "use of undeclared identifier 'missing'");
+  clux_value_t *bound = clux_context_lookup(ctx, "S", NULL);
+  ASSERT_NE(bound, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bound))
+      << "failed field decorator must block the struct define";
+  delete_node(&decl);
+}
+
+/* 场景: struct S { [[7]] a: i32; [[echo]] b: i32; }
+        （echo = func(t: type): type { return t; }）
+   预期: 标记类透传、func 类 invoke 成功但结果丢弃（§9.6）——struct
+         正常 define，字段表类型保持声明本体 i32 */
+TEST_F(ExecLiteralTest, StructFieldDecoratorKeepsFieldType) {
+  node_t *echo_decl = nullptr;
+  clux_value_t *echo = define_type_identity(ctx, a, "echo", &echo_decl);
+  ASSERT_NE(echo, nullptr);
+
+  node_t *members = create_struct_members_node(a);
+  node_t *field_a = create_field_node(a);
+  field_node_set_name(field_a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "a"));
+  field_node_set_type(field_a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  field_node_add_decorator(
+      field_a, make_decorator_of(a, make_node(CLUX_NODE_LITERAL_NUMERIC, "7")));
+  struct_members_node_add_member(members, field_a);
+  node_t *field_b = create_field_node(a);
+  field_node_set_name(field_b, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "b"));
+  field_node_set_type(field_b, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  field_node_add_decorator(
+      field_b,
+      make_decorator_of(a, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "echo")));
+  struct_members_node_add_member(members, field_b);
+  node_t *decl = create_struct_decl_node(a);
+  struct_decl_node_set_name(decl, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "S"));
+  struct_decl_node_set_generics(decl, NULL);
+  struct_decl_node_set_body(decl, members);
+
+  clux_value_t *result = exec_expr_struct_decl(ctx, decl);
+  ASSERT_NE(result, nullptr);
+  EXPECT_FALSE(clux_value_is_error(result)) << error_message_of(result);
+  clux_type_t *s_type = type_described_by(result);
+  ASSERT_NE(s_type, nullptr);
+  EXPECT_EQ(clux_struct_field_count(s_type), 2u);
+  const clux_struct_field_t *fb = clux_struct_find_field(s_type, "b");
+  ASSERT_NE(fb, nullptr);
+  EXPECT_EQ(fb->type, clux_context_builtin_type(ctx, CLUX_TYPE_I32))
+      << "the field decorator result must be discarded (§9.6)";
+  EXPECT_NE(clux_context_get_executor(ctx), nullptr)
+      << "the func field decorator invoke must have really run";
+  delete_node(&decl);
+  delete_node(&echo_decl);
+}
+
 /* ===== exec_stmt_block 块内提升（hoist pass 正式用例） ===== */
 
 /* 场景: 块级前向调用——调用语句先于 func 声明（体内无自由名字）

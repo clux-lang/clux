@@ -2032,6 +2032,30 @@ static clux_value_t *exec_expr_struct_decl_impl(clux_context_t *ctx,
       allocator_free(allocator, (void **)&field_name);
       break;
     }
+    /* 字段装饰器（§9.1/§9.6，与 struct 语句三段式同构）：以字段类型的
+       type value 为实参逐个 apply（func 类编译期计算，标记类透传），
+       包装结果只消费 error——字段类型保持声明本体（§9.6 类型装饰器
+       不改写类型本体）；失败即 fail，struct 不 define。type value
+       不具名（name=NULL），不进词法作用域。 */
+    size_t decorator_count = field_node_get_decorator_count(member);
+    if (decorator_count > 0) {
+      clux_value_t *subject = clux_context_create_type_value(
+          ctx, fields[filled].type, NULL, node_get_location(member));
+      for (size_t didx = 0; didx < decorator_count && !fail; didx++) {
+        clux_value_t *computed =
+            exec_apply_decorator(ctx,
+                                 subject,
+                                 field_node_get_decorator(member, didx),
+                                 node_get_location(member));
+        if (!computed || clux_value_is_error(computed)) {
+          fail = computed;
+        }
+      }
+      if (fail) {
+        allocator_free(allocator, (void **)&field_name);
+        break;
+      }
+    }
     filled++;
   }
   clux_type_t *type = NULL;

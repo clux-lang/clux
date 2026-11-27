@@ -492,6 +492,7 @@ sema_has_error，emit 返回 NULL。
 | 13 | 物化对齐默认值与参数包协议（§8.10）：§6.2 缺参默认补齐 + §6.4 尾部包聚合 | 缺参无默认报 missing、省略与显式折叠同名、包空/展开零诊断 |
 | 14 | 装饰器编译期计算（§8.11）：exec_apply_decorator 公有化 + pass C 成员装饰器链式应用 + STMT_STRUCT 装饰三段式 | 方法装饰器值级包装 end-to-end、同定义双实例独立计算、标记/失败路径回归 |
 | 15 | check 层装饰器检查通道（§8.12）：表达式求值诊断 + func 形态签名交验 + 挂点全覆盖（模块 register/install_methods/check_stmt） | 未定义名/签名不符恰报一条且消息与 exec 逐字一致、标记/TDZ 零诊断、包装后类型可被后续消费验证 |
+| 16 | 类型位置装饰器语义收尾（§8.13）：STMT_TYPE 装饰器 exec 真实计算 + FIELD 装饰器全链路消费 + check 端 eval-only 同构 | 标记透传不改写类型本体、求值/invoke error 在 define 前拦截名字不落地、check 端未定义名报而标记零诊断 |
 
 ### 8.9 泛型约束检查（P12 设计稿）
 
@@ -585,11 +586,12 @@ P11 物化通道按 `param_count == arg_count` 严格校验，§6.2 泛型默认
   （exec_func_decl_impl → exec_operand_type），被装饰类型须先于装饰器
   定义存在，前向引用将报 undeclared。
 
-**留后续的三个缺口**（P14 不含，随对应批次开放）：
+**缺口收敛**（原三条，P16 后仅余一条）：
 
-1. STMT_TYPE 声明上的装饰器 exec 期静默丢弃（parser 保留节点）；
-2. FIELD（枚举字段）装饰器全链路零消费；
-3. 带装饰器的 comptime var 随 emit 常量摘除丢弃（emit 期不回放装饰器）。
+1. ~~STMT_TYPE 声明上的装饰器 exec 期静默丢弃~~（P16 关闭，见 §8.13）；
+2. ~~FIELD（struct 字段）装饰器全链路零消费~~（P16 关闭，见 §8.13）；
+3. 带装饰器的 comptime var 随 emit 常量摘除丢弃（emit 期不回放装饰器）
+   ——真正应用 func 装饰器需 CTFE 支持函数 invoke，随 CTFE 批次开放。
 
 ### 8.12 check 层装饰器检查通道（P15 已落地）
 
@@ -628,11 +630,57 @@ P14 之前装饰器表达式在 check pass 零检查零诊断——未定义名�
   （装饰器引用后续名两端同报 undefined）；局部检查放 check_stmt（预
     扫描名字全就位 = exec 块提升环境），而非 check_local_scan（scan
     序会漏后续提升名产生假阳性）。
-- **跳过项**：STMT_TYPE 装饰器（exec 静默丢弃，缺口 1 同构跳过）；
-  模板定义分支（实例体的克隆副本通过模块 register 逐实例检查——
-  `GenericInstanceBodyDecoratorErrorPerInstance` 每实例各报一次）；
-  TDZ（`= undefined`）/无初值 var（exec 不适用装饰器）。
+- **跳过项**：STMT_TYPE 装饰器不再跳过（P16 起纳入 eval-only，见
+  §8.13）；模板定义分支（实例体的克隆副本通过模块 register 逐实例
+  检查——`GenericInstanceBodyDecoratorErrorPerInstance` 每实例各报
+  一次）；TDZ（`= undefined`）/无初值 var（exec 不适用装饰器）。
 - **已知边界**：comptime var 装饰器照常检查（exec emit 丢弃是 §8.11
   缺口 3，验而不应用）；本地 struct 顶层装饰器引用壳名属假阴性（壳
   在预扫描登记，签名不可演算时 eval-only 降级）；attr 成员仅做装饰
   器表达式检查（attr 安装通道不存在，值级语义无检查域）。
+
+### 8.13 类型位置装饰器协议（P16 已落地）
+
+P14/P15 之后仅剩类型位置装饰器无语义：STMT_TYPE 装饰器 exec 静默
+丢弃、FIELD（struct 字段）装饰器全链路零消费。P16 把两处补齐，
+并固化**正交规则**：值位置装饰器（var/func/method）check 端做签名
+交验；类型位置装饰器（STMT_TYPE 别名 + struct FIELD 字段 + 五类
+类型族顶层）check 端一律 **eval-only**，func 类的 invoke 交验留 exec
+运行期报告。
+
+**eval-only 的技术依据**：exec 端 func 装饰器对类型位置以 **type
+value**（值类型为 type_type，TYPE kind）为唯一实参 invoke——check
+若传字段/别名类型作 subject，两端实参形态不一致（假阳/假阴）；且
+type value 属 TYPE kind，会被 `check_call_value` 的 opaque gate
+（不可演算实参不硬报）跳过，check 层强行模拟 invoke 得不到任何交验
+结果。P15 对 STMT_STRUCT 顶层 eval-only 是同一先例。
+
+- **exec STMT_TYPE**（exec_stmt_type 非泛型分支）：seal 门禁通过后、
+  define 前对装饰器链逐个 `exec_apply_decorator`（subject = 别名的
+  type value）——func 类编译期计算，**包装结果只消费 error**（绑定
+  保持原 type value，§9.6 不改写类型本体）；标记类透传；失败在
+  define 之前拦截（名字不 define，与 struct 三段式一致）。
+- **exec FIELD**（exec struct pass B，字段类型求值成功后、入表前）：
+  以 `clux_context_create_type_value(ctx, 字段类型, NULL, loc)` 为
+  subject 链式 apply——type value 不具名（name=NULL 不进词法作用域）；
+  结果同样只消费 error，字段类型保持声明本体；失败置 fail，struct
+  不 define。仅 struct 字段允许装饰器（parser 对 tag union/cunion
+  字段 allow_decorators=false）。
+- **check 端三处 eval-only**：`check_module_register` STMT_TYPE
+  非泛型分支（define 前）、`check_stmt` 局部 STMT_TYPE（与模块级
+  同构）、`check_build_struct` FIELD 循环（`check_type_eval` 后）——
+  均只做装饰器表达式求值诊断（undefined name 等），func 形态不交验。
+- **测试锚**：exec 端 `TypeAliasMarkerDecoratorDefinesAlias` /
+  `TypeAliasDecoratorErrorBlocksDefine` /
+  `TypeAliasFuncDecoratorResultIsDiscarded`（执行器懒安装证 invoke
+  真实发生）/ `TypeAliasFuncDecoratorArityErrorBlocksDefine` /
+  `StructFieldDecoratorErrorBlocksDefine` /
+  `StructFieldDecoratorKeepsFieldType`；check 端
+  `TypeAliasDecoratorUndefinedNameIsReported` /
+  `TypeAliasDecoratorMarkerHasNoDiag` /
+  `StructFieldDecoratorUndefinedNameIsReported` /
+  `StructFieldDecoratorMarkerHasNoDiag`。
+- **测试通道注意**：元类型 `type` 不在 builtin 命名注册表（AST 无法
+  表达"接收 type value 的形参类型"），测试中构造 func 装饰器须走引擎
+  直建（create_func_type + func_set_ast + declare_value），与
+  `StmtUnionDecoratorWrapsTypeValueEndToEnd` 同一通道。

@@ -1703,3 +1703,93 @@ TEST(SemaCheckTest, GenericInstanceBodyDecoratorErrorPerInstance) {
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }
+
+/* §8.13 P16：STMT_TYPE 装饰器 eval-only——未定义名报，标记值零诊断；
+   局部（函数体内）type 别名同构。 */
+TEST(SemaCheckTest, TypeAliasDecoratorUndefinedNameIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "[[missing_dec]] type T = i32;\n"
+                           "func f(): void {\n"
+                           "  [[missing_local]] type U = i32;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 2u, 0, "undefined name 'missing_dec'");
+  expect_diag_count(ctx, 2u, 1, "undefined name 'missing_local'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(SemaCheckTest, TypeAliasDecoratorMarkerHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "[[7]] type T = i32;\n"
+                           "func f(): void {\n"
+                           "  [[7]] type U = i32;\n"
+                           "}\n"
+                           "var v: T;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, NULL);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* §8.13 P16：struct 字段装饰器 eval-only——未定义名报，标记值零诊断，
+   字段表构建不受影响。 */
+TEST(SemaCheckTest, StructFieldDecoratorUndefinedNameIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct S {\n"
+                           "  [[missing_f]] a: i32;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "undefined name 'missing_f'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(SemaCheckTest, StructFieldDecoratorMarkerHasNoDiag) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct S {\n"
+                           "  [[7]] a: i32;\n"
+                           "  [[8]] b: str;\n"
+                           "}\n"
+                           "var v: S;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, NULL);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}

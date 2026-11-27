@@ -223,6 +223,21 @@ clux_value_t *exec_stmt_type(clux_context_t *ctx, node_t *node) {
         "cannot alias incomplete type '%s'",
         target_name ? target_name : "<unknown>");
   }
+  /* 装饰器按源码顺序应用（§9.1/§9.6）：func 类以别名 type value 为
+     实参 invoke（编译期计算），包装结果只消费 error——类型绑定保持
+     原 type value（§9.6 类型装饰器不改写类型本体）；标记类透传；
+     失败在 define 之前拦截（名字不 define，与 struct 语句一致）。 */
+  size_t decorator_count = stmt_type_node_get_decorator_count(node);
+  for (size_t idx = 0; idx < decorator_count; idx++) {
+    clux_value_t *computed =
+        exec_apply_decorator(ctx,
+                             value,
+                             stmt_type_node_get_decorator(node, idx),
+                             node_get_location(node));
+    if (!computed || clux_value_is_error(computed)) {
+      return computed;
+    }
+  }
   allocator_t *allocator = clux_context_get_allocator(ctx);
   char *name = location_get(node_get_location(name_node), allocator);
   clux_value_t *bound = clux_context_declare_value(

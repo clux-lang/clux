@@ -554,6 +554,13 @@ static clux_type_t *check_build_struct(clux_sema_t *sema, node_t *stmt) {
     }
     char *name = check_name_of(allocator, field_node_get_name(member));
     clux_type_t *type = check_type_eval(sema, field_node_get_type(member), 0);
+    /* §8.13 P16：字段装饰器 eval-only（exec 端以 type value 为实参
+       invoke，check 层不可模拟同一形态——opaque gate）；求值诊断
+       只报告，不影响字段表构建。 */
+    for (size_t didx = 0; didx < field_node_get_decorator_count(member);
+         didx++) {
+      check_decorator(sema, field_node_get_decorator(member, didx), NULL);
+    }
     if (name && type) {
       fields[filled].name = name;
       fields[filled].type = type;
@@ -1100,6 +1107,12 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
     } else {
       clux_type_t *type =
           check_type_eval(sema, stmt_type_node_get_value(stmt), 0);
+      /* §8.13 P16：类型位置装饰器 eval-only（func 交验留 exec 运行期
+         报告），define 前求值以对齐 exec 拦截语义。 */
+      for (size_t didx = 0; didx < stmt_type_node_get_decorator_count(stmt);
+           didx++) {
+        check_decorator(sema, stmt_type_node_get_decorator(stmt, didx), NULL);
+      }
       check_define_type_name(sema, name, type, 0);
     }
     return;
@@ -1254,6 +1267,11 @@ static void check_local_scan(clux_sema_t *sema, node_t *node) {
     } else {
       clux_type_t *type =
           check_type_eval(sema, stmt_type_node_get_value(node), 0);
+      /* §8.13 P16：类型位置装饰器 eval-only，与模块级 STMT_TYPE 同构。 */
+      for (size_t didx = 0; didx < stmt_type_node_get_decorator_count(node);
+           didx++) {
+        check_decorator(sema, stmt_type_node_get_decorator(node, didx), NULL);
+      }
       check_define_type_name(sema, name, type, 0);
     }
     return;
