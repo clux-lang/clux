@@ -408,4 +408,22 @@ int sema_lift_materialize_return(sema_clone_env_t *env,
 int sema_lift_loop_applies(node_t *stmt, sema_clone_env_t *env);
 void sema_lift_lower_loop(node_t *src, node_t *block, sema_clone_env_t *env);
 
+/* 直接层退出点命中（循环体视角）：parent 为命中语句所在块，idx 为该块
+   children 内下标。 */
+typedef struct {
+  node_t *parent;
+  size_t idx;
+} sema_exit_hit_t;
+
+/* 收集块语句序列内的直接层 continue/break：块/if 臂/switch 臂递归；嵌套
+   循环体（for/foreach/while/do-while）不深入——其中的 continue/break
+   属于嵌套层；defer 体与嵌套函数体同理不深入。continue_only 非 0 时只
+   收 CONTINUE（do-while 降维 continue 前插 gate 用——break 跳出循环
+   本就不该再求值 cond，无需前插）。命中点先收集后按 idx 逆序前插
+   （前插不扰动更小 idx 的命中位）。调用方负责释放收集的 hit 条目。 */
+void sema_collect_exit_hits(node_t *block,
+                            vec_t *hits,
+                            allocator_t *out,
+                            int continue_only);
+
 #endif

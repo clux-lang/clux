@@ -340,7 +340,8 @@ func work(): void {
 - **`return` 物化**：捕获非空时 return 表达式引用 `$tmp`，直接
   [析构][return] 会 use-after-dispose——先物化 `var $ret$N: T = <return
   表达式>;`（经 `__init_copy__` 置空 `$tmp` 源），析构 `$tmp` 后
-  `return $ret$N`。`$ret` 不析构（所有权流出）。类型锚点缺失时沿用裸
+  `return $ret$N`。`$ret` 不析构（所有权流出）。`T` 取 return 值根的
+  类型锚点（CALL / CONSTRUCT / 元组根）；锚点缺失的残余形态沿用裸
   形态并跳过析构（保守泄漏，保语义正确）。
 - **惰性上下文不捕获**：`&&` / `||` / `?:` 的子表达式条件求值，提升即
   提前求值、破坏短路——整个惰性父节点解除捕获，其内临时值按引擎既有
@@ -353,8 +354,10 @@ gate 块内每轮声明、每轮析构（块每执行 push 新作用域），临
 封闭在轮次内，cond 求值次数与原语义一致：
 
 - `while (C) B` → `for (;;) { gate(C); B' }`
-- `do B while (C)` → `for (;;) { B'; gate(C); }`（`continue` 跳过 gate
-  为 v1 已知偏差：原语义 continue 会再求值一次 cond）
+- `do B while (C)` → `for (;;) { B'; gate(C); }`——原语义 `continue` 会
+  再求值一次 cond，体内直接层 `continue` 语句前同构前插一份独立 gate
+  （cond 假→析构→break 正确终止，真→落到 `continue` 回块顶正确继续）；
+  `break` 无需前插（跳出循环本就不再求值 cond）。
 - `for (I; C; U) B`：I 的临时物化到循环**外**（var 形态直通绑定）；
   C 有根时 gate 入 body 首（COND 槽空 = 恒真，§4.8）；U 有根时 gate
   块入 UPDATE 槽（`continue` 先走 update 再走 cond，对齐原语义）。
@@ -365,9 +368,14 @@ gate 块结构：`{ [vars]; if (C') {} else { [析构] break; } [析构]; }`。
 方案把同样的差异编码为 **gate 块的作用域结构**——降维纯 AST 层，无
 运行期代价，也无可忘置的标志位。
 
-**已知限制（v1）**：`do-while` 的 continue 偏差（见上）；`foreach` 元素
-var 不做逐轮析构（元素为 copy，逐轮析构语义待后续版本定夺）；深
-`return` 穿过循环时不触发 iterable 的出口析构。
+**foreach 元素逐轮析构**：var 形态且元素类型需要析构时，循环体每轮
+末尾追加元素析构（元素是 copy，析构的是拷贝而非容器成分）；体内
+直接层（不穿嵌套循环体）的 `continue` / `break` 语句前同构前插——
+break/continue signal 在循环边界被消费、跳过块尾语句，纯体尾追加
+对该两形态轮次漏析构。裸名形态（每轮给外层既有绑定赋值）元素
+所有权不归循环，不做逐轮析构。
+
+**已知限制（v1）**：深 `return` 穿过循环时不触发 iterable 的出口析构。
 
 ### 4.17.6 FFI 边界
 

@@ -666,6 +666,42 @@ static node_t *sema_foreach_binary(const char *op,
   return binary;
 }
 
+/* ---- §4.17 P3 遗留2：foreach 元素 var 逐轮析构 ----
+   元素类型 disposable 时循环体每轮末尾析构元素拷贝。break/continue
+   signal 在循环边界被 exec 消费、跳过块尾语句——体尾追加之外，体内
+   直接层（不穿嵌套循环体）的 continue/break 语句前同构前插析构。
+   命中点由 sema_collect_exit_hits（lift.c 共享版）先收集后按 idx
+   逆序插入（前插不扰动更小 idx 的命中位）。 */
+
+/* 直接层退出点命中（sema_exit_hit_t）与收集器见 lift.c——foreach
+   前插析构与 do-while 降维前插 gate（遗留3）共用。 */
+
+/* $dispose$T(x.&) 语句工厂：每个插入点独立构造一份（产物树节点
+   不共享），x 名节点按源 name 克隆走同一变换通道。 */
+static node_t *sema_item_dispose_stmt(const char *callee,
+                                      node_t *name_src,
+                                      sema_clone_env_t *env) {
+  const location_t *loc = node_get_location(name_src);
+  node_t *call = create_call_node(env->out);
+  node_set_location(call, loc);
+  call_node_set_callee(
+      call,
+      sema_render_text_node(
+          env->out, env->program, CLUX_NODE_LITERAL_IDENTIFIER, callee, loc));
+  node_t *addr = create_binary_node(env->out);
+  node_set_location(addr, loc);
+  binary_node_set_left(addr, sema_clone_impl(name_src, env));
+  binary_node_set_symbol(
+      addr,
+      sema_render_text_node(
+          env->out, env->program, CLUX_NODE_SYMBOL, ".&", loc));
+  call_node_add_arg(call, addr);
+  node_t *wrap = create_stmt_expr_node(env->out);
+  node_set_location(wrap, loc);
+  stmt_expr_node_set_expr(wrap, call);
+  return wrap;
+}
+
 static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(src);
   node_t *iter_src = stmt_foreach_node_get_iterable(src);
@@ -795,8 +831,39 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
     stmt_expr_node_set_expr(item_stmt, item_assign);
     node_add_child(body_block, item_stmt);
   }
-  node_add_child(body_block,
-                 sema_clone_impl(stmt_foreach_node_get_body(src), env));
+  node_t *body_clone = sema_clone_impl(stmt_foreach_node_get_body(src), env);
+  node_add_child(body_block, body_clone);
+  /* §4.17 P3 遗留2：var 形态元素类型 disposable（§8.5 name 锚点）时
+     每轮末尾析构元素拷贝；体内直接层 continue/break 前同构前插（signal
+     在循环边界被消费，纯体尾追加对该两形态轮次漏析构）。裸名形态
+     赋值外层既有绑定，元素所有权不归循环，不做逐轮析构。 */
+  if (stmt_foreach_node_get_keyword(src) && env->sema && env->disposes) {
+    clux_type_t *elem_type = sema_get_node_type(env->sema, name_src);
+    const char *elem_callee = NULL;
+    if (sema_type_needs_dispose(env->sema, elem_type)) {
+      const char *elem_type_name = clux_type_get_name(elem_type);
+      elem_callee =
+          elem_type_name
+              ? sema_dispose_callee_name(env->out, env->program, elem_type_name)
+              : NULL;
+    }
+    if (elem_callee) {
+      vec_t *hits = create_vec(env->out);
+      sema_collect_exit_hits(body_clone, hits, env->out, 0);
+      for (size_t h = vec_get_size(hits); h > 0; h--) {
+        sema_exit_hit_t *hit = (sema_exit_hit_t *)vec_get(hits, h - 1);
+        node_t *dispose_stmt =
+            sema_item_dispose_stmt(elem_callee, name_src, env);
+        node_set_parent(dispose_stmt, hit->parent);
+        vec_insert(node_get_children(hit->parent), hit->idx, dispose_stmt);
+        allocator_free(env->out, (void **)&hit);
+      }
+      delete_vec(&hits);
+      node_add_child(body_block,
+                     sema_item_dispose_stmt(elem_callee, name_src, env));
+      sema_dispose_register(env, elem_type, node_get_location(name_src));
+    }
+  }
   /* for 槽序 INIT/CONDITION/UPDATE/BODY。 */
   node_t *loop = create_stmt_for_node(env->out);
   node_set_location(loop, loc);

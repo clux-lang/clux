@@ -19,10 +19,11 @@
    - 循环降维（零 flag 方案）：cond/update（for 另含 init）含临时根的
      while/do-while/for 统一降为 for(;;) + 段内 gate 块——临时在 gate
      块内每轮声明每轮析构（exec 块每执行 push 新 scope），cond 求值
-     次数与原语义一致。do-while 的 gate 放 body 尾（continue 跳过
-     cond_gate 为 v1 已知偏差：原语义 continue 会再求值 cond）；
-     for 的 update gate 放 UPDATE 槽（STMT_BLOCK：[vars]update'[析构]，
-     continue 经 for 出口协议先走 update 再走 cond，对齐原语义）。 */
+     次数与原语义一致。do-while 的 gate 放 body 尾，体内直接层
+     continue 前同构前插独立 gate（原语义 continue 会再求值 cond；
+     遗留3 收口）；for 的 update gate 放 UPDATE 槽（STMT_BLOCK：
+     [vars]update'[析构]，continue 经 for 出口协议先走 update 再走
+     cond，对齐原语义）。 */
 #include "sema/sema_internal.h"
 #include "core/program.h"
 #include "core/vec.h"
@@ -38,8 +39,10 @@
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_switch.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_stmt_while.h"
+#include "parser/node_switch_branch.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -403,6 +406,65 @@ int sema_lift_loop_applies(node_t *stmt, sema_clone_env_t *env) {
   return 0;
 }
 
+/* ---- 直接层退出点收集（§4.17 P3：foreach 前插析构 / do-while 前插
+   gate 共用）：break/continue signal 在循环边界被 exec 消费、跳过块尾
+   语句——纯块尾追加对该两形态轮次漏析构/漏求值。 */
+
+void sema_collect_exit_hits(node_t *block,
+                            vec_t *hits,
+                            allocator_t *out,
+                            int continue_only) {
+  if (!block) {
+    return;
+  }
+  vec_t *kids = node_get_children(block);
+  size_t count = vec_get_size(kids);
+  for (size_t idx = 0; idx < count; idx++) {
+    node_t *child = (node_t *)vec_get(kids, idx);
+    if (!child) {
+      continue;
+    }
+    switch (node_get_kind(child)) {
+    case CLUX_NODE_STMT_CONTINUE:
+    case CLUX_NODE_STMT_BREAK: {
+      if (continue_only && node_get_kind(child) != CLUX_NODE_STMT_CONTINUE) {
+        break;
+      }
+      sema_exit_hit_t *hit = allocator_alloc(out, sizeof(sema_exit_hit_t));
+      if (hit) {
+        hit->parent = block;
+        hit->idx = idx;
+        vec_push(hits, hit);
+      }
+      break;
+    }
+    case CLUX_NODE_STMT_BLOCK:
+      sema_collect_exit_hits(child, hits, out, continue_only);
+      break;
+    case CLUX_NODE_STMT_IF:
+      sema_collect_exit_hits(
+          stmt_if_node_get_then(child), hits, out, continue_only);
+      sema_collect_exit_hits(
+          stmt_if_node_get_else(child), hits, out, continue_only);
+      break;
+    case CLUX_NODE_STMT_SWITCH: {
+      node_t *branches = stmt_switch_node_get_body(child);
+      vec_t *brs = branches ? node_get_children(branches) : NULL;
+      for (size_t b = 0; brs && b < vec_get_size(brs); b++) {
+        sema_collect_exit_hits(
+            switch_branch_node_get_body((node_t *)vec_get(brs, b)),
+            hits,
+            out,
+            continue_only);
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+}
+
 /* while (C) B → for(;;) { gate(C); B'; }（B' 保持源块嵌套：作用域层次
    与原语义一致，break/continue 仍绑最近循环=for）。 */
 static void
@@ -425,10 +487,13 @@ sema_lift_lower_while(node_t *src, node_t *block, sema_clone_env_t *env) {
   node_add_child(block, loop);
 }
 
-/* do B while (C) → for(;;) { B'; gate(C); }——gate 在 body 块尾：
-   continue 跳过 cond_gate 为 v1 已知偏差（原语义 continue 会再求值
-   cond）。gate 不能放 UPDATE 槽（exec for-update 不消费 break 信号，
-   gate 的 break 会被吞掉导致死循环）。 */
+/* do B while (C) → for(;;) { B'; gate(C); }——gate 在 body 块尾；体内
+   直接层 continue 语句前同构前插独立 gate（原语义 continue 会再求值
+   一次 cond：cond 假→gate 内析构后 break 正确终止，真→落到 continue
+   回块顶正确继续；每次 gate 调用独立克隆 cond、独立 $tmp 编号、独立
+   块作用域，LIFO/幂等与尾 gate 同构）。break 无需前插（跳出循环不再
+   求值 cond）。gate 不能放 UPDATE 槽（exec for-update 不消费 break
+   信号，gate 的 break 会被吞掉导致死循环）。 */
 static void
 sema_lift_lower_do_while(node_t *src, node_t *block, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(src);
@@ -436,6 +501,17 @@ sema_lift_lower_do_while(node_t *src, node_t *block, sema_clone_env_t *env) {
       sema_lift_cond_gate(stmt_do_while_node_get_condition(src), env, loc);
   node_t *body_clone =
       sema_clone_node_renamed(stmt_do_while_node_get_body(src), env);
+  vec_t *hits = create_vec(env->out);
+  sema_collect_exit_hits(body_clone, hits, env->out, 1);
+  for (size_t h = vec_get_size(hits); h > 0; h--) {
+    sema_exit_hit_t *hit = (sema_exit_hit_t *)vec_get(hits, h - 1);
+    node_t *cont_gate =
+        sema_lift_cond_gate(stmt_do_while_node_get_condition(src), env, loc);
+    node_set_parent(cont_gate, hit->parent);
+    vec_insert(node_get_children(hit->parent), hit->idx, cont_gate);
+    allocator_free(env->out, (void **)&hit);
+  }
+  delete_vec(&hits);
   node_t *for_body = create_stmt_block_node(env->out);
   node_set_location(for_body, loc);
   node_add_child(for_body, body_clone);

@@ -2418,6 +2418,41 @@ TEST(SemaTest, RaiiReturnRetMaterialization) {
                    false);
 }
 
+/* §4.17.5 P3 遗留1：元组 return 根锚点——return 值为元组字面量（非
+   CALL/CONSTRUCT 根）时 §8.5 锚点由值位置元组分派登记（聚合类型），
+   $ret 物化照常发生：[$tmp 提升]→[var $ret$N: 类型]→[$tmp 析构]→
+   [return $ret]。v1 保守泄漏路径（锚点缺失静默跳过物化+析构）由此
+   收口。 */
+TEST(SemaTest, RaiiReturnTupleRootAnchor) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void {\n"
+                   "    return;\n"
+                   "  }\n"
+                   "}\n"
+                   "func gs(): [2]Res {\n"
+                   "  return <.Res{ .v = 1 }, .Res{ .v = 2 }>;\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func gs(): [2]Res {\n"
+                   "  var $tmp$0: Res = .Res{v = 1};\n"
+                   "  var $tmp$1: Res = .Res{v = 2};\n"
+                   "  var $ret$2: <Res, Res> = <$tmp$0, $tmp$1>;\n"
+                   "  $dispose$Res($tmp$1.&);\n"
+                   "  $dispose$Res($tmp$0.&);\n"
+                   "  return $ret$2;\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
 /* §4.17.5 P3：惰性上下文抑制——|| 子表达式条件求值，提升即提前求值
    破坏短路，v1 整棵不捕获（泄漏保守固化）。 */
 TEST(SemaTest, RaiiLazyContextNoCapture) {
@@ -2505,11 +2540,73 @@ TEST(SemaTest, RaiiLoopLowerWhileCond) {
                    false);
 }
 
+/* §4.17.5 P3 遗留3：do-while 降维的 continue 偏差收口——原语义
+   continue 会再求值一次 cond，体内直接层 continue 前同构前插独立
+   gate（独立 $tmp 编号与块作用域）；break 无需前插；尾 gate 照常。 */
+TEST(SemaTest, RaiiLoopLowerDoWhileContinue) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func g(): Res {\n"
+                   "  return .Res{ .v = 1 };\n"
+                   "}\n"
+                   "func check(r: Res): bool {\n"
+                   "  return true;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  do {\n"
+                   "    continue;\n"
+                   "  } while (check(g()));\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func g(): Res {\n"
+                   "  return .Res{v = 1};\n"
+                   "}\n"
+                   "func check(r: Res): bool {\n"
+                   "  return true;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  for (; ; ) {\n"
+                   "    {\n"
+                   "      {\n"
+                   "        var $tmp$1: Res = g();\n"
+                   "        if (check($tmp$1)) {\n"
+                   "        } else {\n"
+                   "          $dispose$Res($tmp$1.&);\n"
+                   "          break;\n"
+                   "        }\n"
+                   "        $dispose$Res($tmp$1.&);\n"
+                   "      }\n"
+                   "      continue;\n"
+                   "    }\n"
+                   "    {\n"
+                   "      var $tmp$0: Res = g();\n"
+                   "      if (check($tmp$0)) {\n"
+                   "      } else {\n"
+                   "        $dispose$Res($tmp$0.&);\n"
+                   "        break;\n"
+                   "      }\n"
+                   "      $dispose$Res($tmp$0.&);\n"
+                   "    }\n"
+                   "  }\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
 /* §4.17.5 P3：foreach iterable 所有权——iterable 顶层直通绑入 __iter
    （copy 语义求值一次），iterable 类型 disposable 时循环出口追加
-   __iter 析构；元素 var 逐轮析构为 v1 gap（本用例只断言 __iter 通道）。
-   it 的初始化元组内嵌 CONSTRUCT 根照常捕获提升（var 槽 skip_top 只放行
-   顶层），it 本体由 P1 作用域出口析构。 */
+   __iter 析构；元素 var 逐轮析构（P3 遗留2 收口：体尾追加 + 体内直接层
+   continue/break 前插）。it 的初始化元组内嵌 CONSTRUCT 根照常捕获提升
+   （var 槽 skip_top 只放行顶层），it 本体由 P1 作用域出口析构。 */
 TEST(SemaTest, RaiiForeachIterDispose) {
   expect_sema_text("struct Res {\n"
                    "  v: i32;\n"
@@ -2536,6 +2633,7 @@ TEST(SemaTest, RaiiForeachIterDispose) {
                    "      var x: Res = __iter[__i];\n"
                    "      {\n"
                    "      }\n"
+                   "      $dispose$Res(x.&);\n"
                    "    }\n"
                    "    $dispose$$x5b2$x5dRes(__iter.&);\n"
                    "  }\n"
@@ -2553,6 +2651,72 @@ TEST(SemaTest, RaiiForeachIterDispose) {
                    "  Res$__dispose__(self);\n"
                    "}\n",
                    false);
+}
+
+/* §4.17.5 P3 遗留2：foreach 体内直接层 continue/break 前插元素析构
+   ——signal 在循环边界被 exec 消费、跳过体尾语句，命中点由块/if 臂
+   扫描收集（不穿嵌套循环体）。 */
+TEST(SemaTest, RaiiForeachItemDisposeAtExits) {
+  expect_sema_text(
+      "struct Res {\n"
+      "  v: i32;\n"
+      "  func __dispose__(self: *Res): void { return; }\n"
+      "}\n"
+      "func f(): void {\n"
+      "  var it: [3]Res = <.Res{ .v = 1 }, .Res{ .v = 2 }, .Res{ .v = 3 }>;\n"
+      "  foreach (var x of it) {\n"
+      "    if (x.v == 2) {\n"
+      "      continue;\n"
+      "    }\n"
+      "    if (x.v == 3) {\n"
+      "      break;\n"
+      "    }\n"
+      "  }\n"
+      "}\n",
+      "struct Res {\n"
+      "  v: i32;\n"
+      "}\n"
+      "func f(): void {\n"
+      "  var $tmp$0: Res = .Res{v = 1};\n"
+      "  var $tmp$1: Res = .Res{v = 2};\n"
+      "  var $tmp$2: Res = .Res{v = 3};\n"
+      "  var it: [3]Res = <$tmp$0, $tmp$1, $tmp$2>;\n"
+      "  $dispose$Res($tmp$2.&);\n"
+      "  $dispose$Res($tmp$1.&);\n"
+      "  $dispose$Res($tmp$0.&);\n"
+      "  {\n"
+      "    var __iter: [3]Res = it;\n"
+      "    var __i: i32 = 0i32;\n"
+      "    for (; __i < #len(__iter); __i = __i + 1) {\n"
+      "      var x: Res = __iter[__i];\n"
+      "      {\n"
+      "        if (x.v == 2) {\n"
+      "          $dispose$Res(x.&);\n"
+      "          continue;\n"
+      "        }\n"
+      "        if (x.v == 3) {\n"
+      "          $dispose$Res(x.&);\n"
+      "          break;\n"
+      "        }\n"
+      "      }\n"
+      "      $dispose$Res(x.&);\n"
+      "    }\n"
+      "    $dispose$$x5b3$x5dRes(__iter.&);\n"
+      "  }\n"
+      "  $dispose$$x5b3$x5dRes(it.&);\n"
+      "}\n"
+      "func Res$__dispose__(self: *Res): void {\n"
+      "  return;\n"
+      "}\n"
+      "func $dispose$$x5b3$x5dRes(self: *[3]Res): void {\n"
+      "  for (var i = 3; i > 0; i = i - 1) {\n"
+      "    $dispose$Res(self.*[i - 1].&);\n"
+      "  }\n"
+      "}\n"
+      "func $dispose$Res(self: *Res): void {\n"
+      "  Res$__dispose__(self);\n"
+      "}\n",
+      false);
 }
 
 /* §4.17.6 P2：FFI 边界禁令——cfunc 形参与返回类型、extern var 类型

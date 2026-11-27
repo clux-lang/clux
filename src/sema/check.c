@@ -2554,6 +2554,12 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     if (ok) {
       clux_type_t *type = clux_context_get_tuple_type(ctx, elems, count);
       result = type ? clux_context_create_shadow_value(ctx, type) : NULL;
+      /* 类型结果表锚点：元组根节点记录聚合类型（§4.17 P3 return 槽
+         $ret 物化的类型来源——锚点缺失时 materialize_return 保守跳过
+         物化+析构，已捕获的 $tmp 泄漏）。 */
+      if (result) {
+        sema_record_node_type(sema, node, check_value_bind_type(result));
+      }
     }
     allocator_free(allocator, (void **)&elems);
     return result;
