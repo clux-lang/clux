@@ -633,7 +633,7 @@ node_t *parser_read_func_decl_captures(allocator_t *allocator,
 
 /* 泛型参数列表 [T, U, ...]（白皮书 §6.1–§6.5）。
    调用前当前 token 必须是 '['（由调用方保证）。
-   单个参数的写法：`T`、`N: comptime usize`、`W extends IWriter[W]`、
+   单个参数的写法：`T`、`N: usize`、`W extends IWriter[W]`、
    `T = i32`，以及参数包 `...Args`。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_func_decl_generics(allocator_t *allocator,
@@ -671,14 +671,22 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
       generic_param_node_set_name(param, name);
       parser_skip_trivia(parser);
       token = parser_peek_token(parser);
-      /* 编译期值参数：N: comptime usize。
-         `comptime` 是纯语法标记，不进入 AST，类型槽存 `usize`。 */
+      /* 编译期值参数：N: usize。泛型参数恒为 comptime，无需修饰词。
+         旧语法的 `comptime` 不再支持：报单条诊断后跳过继续解析类型。 */
       if (token_is(token, CLUX_TOKEN_SYMBOL, ":")) {
         parser_next(parser); /* ':' */
         parser_skip_trivia(parser);
         token = parser_peek_token(parser);
         if (token_is(token, CLUX_TOKEN_KEYWORD, "comptime")) {
-          parser_next(parser); /* comptime */
+          const location_t *kw_loc = token_get_location(token);
+          parser_push_error(
+              parser,
+              create_error(
+                  allocator,
+                  kw_loc,
+                  "generic parameters are always comptime: "
+                  "write 'N: <type>' instead of 'N: comptime <type>'"));
+          parser_next(parser); /* comptime（错误恢复：跳过继续解析类型） */
           parser_skip_trivia(parser);
         }
         /* 类型解析用 ternary 层：顶层 assign 会把 `= default` 吃掉

@@ -8,7 +8,7 @@ extern "C" {
 
 /* 单个泛型参数，按白皮书 §6.1–§6.5 的写法：
      T                      —— 类型参数
-     N: comptime usize      —— 编译期值参数（TYPE 非 NULL）
+     N: usize               —— 编译期值参数（TYPE 非 NULL）
      W extends IWriter[W]   —— 约束（CONSTRAINT 非 NULL）
      T = i32                —— 默认值（DEFAULT 非 NULL）
    NAME 必有；其余槽位按需出现，顺序为 TYPE → CONSTRAINT → DEFAULT。

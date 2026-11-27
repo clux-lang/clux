@@ -22,7 +22,7 @@ M1–M7 are implemented and runnable end-to-end (lex → parse → desugar → s
 C backend → host C compiler). `clux run` / `clux test` use the C backend.
 M7 (generics) is implemented: generic functions, generic types
 (`struct`/`enum`/`union`/alias instances with methods, generic methods and
-recursive structs), comptime value parameters (`Matrix[T, N: comptime u64]`),
+recursive structs), comptime value parameters (`Matrix[T, N: u64]`),
 type parameter packs including `<...Args>` type expansion, `extends` structure
 constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
 `implements` have landed. See `docs/whitepaper/README.md`.
@@ -86,7 +86,7 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
 - M7 generics: generic `func f[T]` with monomorphization, explicit/inferred
   type arguments, defaults and asymmetric ownership inference; generic
   `struct`/`enum`/`union`/`type` aliases with methods (including recursive
-  structs); comptime value parameters (`N: comptime u64`, explicit / inferred
+  structs); comptime value parameters (`N: u64`, explicit / inferred
   from array lengths / defaulted) for functions and types; type parameter
   packs (`func f[...Args](args: ...Args)`, explicit or inferred, empty packs,
   `#len(args)` / `args[i]` over the entry tuple); `extends` structure
@@ -98,8 +98,8 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   static generic methods, `<...Args>` tuple type expansion (alias and struct
   parameter packs), cross-module instantiation (`mod::Box[i32]`,
   `mod::id[i32](...)`, generic methods, generic re-exports), interface
-  composition with `&`, and comptime value parameter packs (`...N: comptime
-  u64` with `N[i]` / `#len(N)`). Remaining M7 gaps are tracked in
+  composition with `&`, and comptime value parameter packs (`...N: u64`
+  with `N[i]` / `#len(N)`). Remaining M7 gaps are tracked in
   `docs/whitepaper/06-generics.md`.
 - `clux build` (single-file C backend): generates C and invokes the host C
   compiler (`--emit-c[=PATH]` writes the C only). See

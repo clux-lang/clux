@@ -7556,7 +7556,8 @@ TEST(ExpressionFuncDeclTest, CfuncWithCapturesAndGenericsIsParsed) {
 /* 泛型：编译期值参数、约束、默认值、多参数、参数包。 */
 TEST(ExpressionFuncDeclTest, GenericParameterForms) {
   const char *sources[] = {"func f[T, U](x: T): T { a; }",
-                           "func f[N: comptime usize](x: i32): i32 { a; }",
+                           "func f[N: usize](x: i32): i32 { a; }",
+                           "func f[N: usize = 4](): i32 { a; }",
                            "func f[W extends IWriter[W]](w: *W): void { a; }",
                            "func f[T = i32](): u64 { a; }",
                            "func first[...Args](args: ...Args): void { a; }",
@@ -7572,6 +7573,24 @@ TEST(ExpressionFuncDeclTest, GenericParameterForms) {
     delete_parser(&p);
     delete_allocator(&a);
   }
+}
+
+/* 泛型参数恒为 comptime：旧修饰词语法已删除，报单条诊断后仍完成解析。 */
+TEST(ExpressionFuncDeclTest, GenericValueParamComptimeModifierRejected) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a,
+                               &p,
+                               "func f[N: comptime usize](x: i32): i32 "
+                               "{ a; }");
+  expect_func_decl(expr, "func");
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(parser_get_error(p), 0);
+  EXPECT_NE(err, nullptr);
+  EXPECT_STRNE(strstr(error_get_message(err), "always comptime"), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
 }
 
 /* 无名字的 rest 形参 `...`（C FFI 变参）。 */
@@ -7947,7 +7966,7 @@ TEST(ExpressionFuncDeclTest, NoLeakOnFuncDecl) {
                            "func f",
                            "cfunc f(a: i32, ...): i32 { a; }",
                            "func f[T, U](x: T): T { a; }",
-                           "func f[N: comptime usize](x: i32): i32 { a; }",
+                           "func f[N: usize](x: i32): i32 { a; }",
                            "func f[W extends IWriter[W]](w: *W): void { a; }",
                            "func f[T = i32](): u64 { a; }",
                            "func f[](): void {}",

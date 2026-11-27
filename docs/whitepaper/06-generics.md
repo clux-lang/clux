@@ -31,12 +31,14 @@ func f[T, U = i32](x: T): T { return x; }
 ## 6.3 编译期值参数
 
 ```clux
-func buffer[N: comptime usize](value: i32): [N]i32 {
+func buffer[N: usize](value: i32): [N]i32 {
     return .[N]i32{ <value, N> };
 }
 ```
 
-值参数必须显式写 `: comptime <type>`。它在编译期绑定为常量。
+值参数显式写 `N: <type>`。泛型参数永远在编译期绑定（整个参数列表都在
+编译期单态化），没有"运行期泛型参数"这一形态，因此不需要 `comptime`
+修饰词——写 `N: usize` 即可，它在编译期绑定为常量。
 
 ## 6.4 参数包
 

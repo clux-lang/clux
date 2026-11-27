@@ -1464,7 +1464,7 @@ TEST(SemaCheckTest, GenericComptimeDefaultOmittedIsFilled) {
   parser_t *p;
   node_t *ast = parse_clux(a,
                            &p,
-                           "func k[N: comptime usize = 4](): void {\n"
+                           "func k[N: usize = 4](): void {\n"
                            "  var z: str = 0;\n"
                            "}\n"
                            "k[]();\n");

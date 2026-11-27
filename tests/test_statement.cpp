@@ -1498,7 +1498,7 @@ TEST(StmtTypeTest, GenericAlias) {
 /* 多参数、约束、默认值、参数包都走同一套泛型解析。 */
 TEST(StmtTypeTest, GenericAliasForms) {
   const char *sources[] = {"type Pair[T, U] = <T, U>;",
-                           "type B[N: comptime usize] = [N]u8;",
+                           "type B[N: usize] = [N]u8;",
                            "type C[W extends IWriter[W]] = *W;",
                            "type D[T = i32] = []T;",
                            "type E[...Args] = <...Args>;",
