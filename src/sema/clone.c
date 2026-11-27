@@ -11,6 +11,8 @@
 #include "core/location.h"
 #include "core/string.h"
 #include "core/vec.h"
+#include "engine/ptr.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "parser/node_assign.h"
 #include "parser/node_builtin.h"
@@ -268,10 +270,14 @@ sema_clone_var_fixup(node_t *clone, node_t *src, sema_clone_env_t *env) {
 
 /* ---- §2.4 defer 脱糖 ---- */
 
-/* 已登记 defer 的回执（name 为 intern 文本，loc 借用源 defer 语句）。 */
+/* 已登记 defer / dispose 的回执（name 为 intern 文本，loc 借用源语句）。
+   §4.17：dispose 形态与 defer 共用同一条 LIFO 栈——登记序即执行逆序，
+   块内 defer 与析构交错（先声明的 var 先析构在 defer 之后执行）。 */
 typedef struct {
-  const char *name;
+  const char *name; /* __deferN 或 $dispose$T（intern 文本） */
   const location_t *loc;
+  int dispose;          /* 1=析构调用形态：追加实参 var_name.& */
+  const char *var_name; /* dispose 目标变量名（intern 文本） */
 } sema_defer_ref_t;
 
 static int sema_stmt_is_exit_point(node_t *stmt) {
@@ -303,7 +309,8 @@ static node_t *sema_resolve_prune_stmt(node_t *stmt, sema_clone_env_t *env) {
 
 static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env);
 
-/* 退出点调用 __deferN(); —— STMT_EXPR(EXPR_CALL)。 */
+/* 退出点调用 __deferN(); / $dispose$T(x.); —— STMT_EXPR(EXPR_CALL)。
+   dispose 形态实参为 x.&（左值零拷贝取址，析构函数按地址写目标）。 */
 static node_t *sema_defer_call(const sema_defer_ref_t *ref,
                                sema_clone_env_t *env) {
   node_t *call = create_call_node(env->out);
@@ -314,6 +321,21 @@ static node_t *sema_defer_call(const sema_defer_ref_t *ref,
                                          ref->name,
                                          ref->loc);
   call_node_set_callee(call, callee);
+  if (ref->dispose) {
+    node_t *var = sema_render_text_node(env->out,
+                                        env->program,
+                                        CLUX_NODE_LITERAL_IDENTIFIER,
+                                        ref->var_name,
+                                        ref->loc);
+    node_t *addr = create_binary_node(env->out);
+    node_set_location(addr, ref->loc);
+    binary_node_set_left(addr, var);
+    binary_node_set_symbol(
+        addr,
+        sema_render_text_node(
+            env->out, env->program, CLUX_NODE_SYMBOL, ".&", ref->loc));
+    call_node_add_arg(call, addr);
+  }
   node_t *wrap = create_stmt_expr_node(env->out);
   node_set_location(wrap, ref->loc);
   stmt_expr_node_set_expr(wrap, call);
@@ -452,6 +474,8 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
     if (node_get_kind(child) == CLUX_NODE_STMT_DEFER) {
       sema_defer_ref_t *ref =
           allocator_alloc(env->out, sizeof(sema_defer_ref_t));
+      ref->dispose = 0;
+      ref->var_name = NULL;
       node_t *synth = sema_defer_def_synth(child, env, ref);
       if (!synth) {
         allocator_free(env->out, (void **)&ref);
@@ -460,6 +484,32 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
       node_add_child(clone, synth);
       vec_push(deferred, ref);
       continue;
+    }
+    /* §4.17 disposable 局部 var：登记作用域出口析构（与 defer 同栈）。 */
+    if (env->disposes && env->sema &&
+        node_get_kind(child) == CLUX_NODE_STMT_VAR) {
+      clux_type_t *var_type = sema_get_node_type(env->sema, child);
+      if (sema_type_needs_dispose(env->sema, var_type)) {
+        node_t *name_node = stmt_var_node_get_name(child);
+        char *var_name =
+            name_node ? location_get(node_get_location(name_node), env->out)
+                      : NULL;
+        const char *type_name = clux_type_get_name(var_type);
+        if (var_name && type_name) {
+          char buf[strlen("$dispose$") + strlen(type_name) + 1];
+          (void)snprintf(buf, sizeof(buf), "$dispose$%s", type_name);
+          sema_defer_ref_t *ref =
+              allocator_alloc(env->out, sizeof(sema_defer_ref_t));
+          ref->dispose = 1;
+          ref->name = program_intern_string(env->program, buf, strlen(buf));
+          ref->var_name =
+              program_intern_string(env->program, var_name, strlen(var_name));
+          ref->loc = node_get_location(name_node);
+          vec_push(deferred, ref);
+          sema_dispose_register(env, var_type, ref->loc);
+        }
+        allocator_free(env->out, (void **)&var_name);
+      }
     }
     node_add_child(clone, sema_clone_impl(child, env));
   }
@@ -765,6 +815,81 @@ static node_t *sema_desugar_member_call(node_t *node, sema_clone_env_t *env) {
   return call;
 }
 
+/* §4.17 #dispose(x) 脱糖：实参类型可命中 disposable 谓词时改写为
+   $dispose$T 调用——指针实参（*T 且 T disposable）直接作用于目标，
+   左值实参（T disposable）自动取址 x.&（零拷贝，不触发 __init_copy__）。
+   谓词假返回 NULL 走通用克隆（实参照常求值后丢弃=静默无操作），
+   编译期不做重复释放静态检查。实参类型锚点由 check pass 在
+   EXPR_BUILTIN 分支登记（§8.5 类型结果表）。 */
+static node_t *sema_desugar_dispose_builtin(node_t *node,
+                                            sema_clone_env_t *env) {
+  if (!env->sema || !env->disposes) {
+    return NULL;
+  }
+  if (builtin_node_get_arg_count(node) != 1) {
+    return NULL;
+  }
+  node_t *name_sym = builtin_node_get_name(node);
+  char *bname =
+      name_sym ? location_get(node_get_location(name_sym), env->out) : NULL;
+  int is_dispose = bname && strcmp(bname, "dispose") == 0;
+  allocator_free(env->out, (void **)&bname);
+  if (!is_dispose) {
+    return NULL;
+  }
+  node_t *arg = builtin_node_get_arg(node, 0);
+  if (!arg) {
+    return NULL;
+  }
+  clux_type_t *type = sema_get_node_type(env->sema, arg);
+  clux_type_t *target = NULL;
+  int take_addr = 0;
+  if (type && clux_type_kind_unwrap(type) == CLUX_TYPE_PTR) {
+    /* 指针实参：析构指向对象，指针直传不改写。 */
+    target = clux_type_get_ptr_base(type);
+  } else if (sema_type_needs_dispose(env->sema, type)) {
+    /* 左值实参：自动取址。 */
+    target = type;
+    take_addr = 1;
+  }
+  if (!sema_type_needs_dispose(env->sema, target)) {
+    /* 谓词假：静默无操作——#dispose(x) 退化为裸实参表达式（实参照常
+       求值后丢弃），不留 exec 无法执行的 builtin 节点。 */
+    return type ? sema_clone_impl(arg, env) : NULL;
+  }
+  const char *type_name = clux_type_get_name(target);
+  if (!type_name) {
+    return NULL;
+  }
+  const location_t *loc = node_get_location(node);
+  char buf[strlen("$dispose$") + strlen(type_name) + 1];
+  (void)snprintf(buf, sizeof(buf), "$dispose$%s", type_name);
+  node_t *call = create_call_node(env->out);
+  node_set_location(call, loc);
+  call_node_set_callee(
+      call,
+      sema_render_text_node(
+          env->out,
+          env->program,
+          CLUX_NODE_LITERAL_IDENTIFIER,
+          program_intern_string(env->program, buf, strlen(buf)),
+          loc));
+  node_t *arg_clone = sema_clone_impl(arg, env);
+  if (take_addr) {
+    node_t *addr = create_binary_node(env->out);
+    node_set_location(addr, loc);
+    binary_node_set_left(addr, arg_clone);
+    binary_node_set_symbol(
+        addr,
+        sema_render_text_node(
+            env->out, env->program, CLUX_NODE_SYMBOL, ".&", loc));
+    arg_clone = addr;
+  }
+  call_node_add_arg(call, arg_clone);
+  sema_dispose_register(env, target, loc);
+  return call;
+}
+
 /* 递归主体：全部通道经 env 注入。 */
 static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
   if (!node) {
@@ -838,6 +963,13 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
   }
   if (kind == CLUX_NODE_EXPR_CALL && env->methods) {
     node_t *call = sema_desugar_member_call(node, env);
+    if (call) {
+      return call;
+    }
+  }
+  /* §4.17 #dispose 脱糖：谓词命中即改写为 $dispose$T 调用。 */
+  if (kind == CLUX_NODE_EXPR_BUILTIN) {
+    node_t *call = sema_desugar_dispose_builtin(node, env);
     if (call) {
       return call;
     }
@@ -991,6 +1123,7 @@ void sema_clone_env_init(sema_clone_env_t *env,
   env->instantiate = 0;
   env->reown_from = NULL;
   env->defer_counter = 0;
+  env->disposes = NULL;
   env->sema = sema;
 }
 

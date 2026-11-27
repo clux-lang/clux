@@ -241,6 +241,9 @@ sema_render_strip_suffix(const char *text, size_t len, size_t *num_len);
      renames[0].from）整体折叠为代换后的实例名、GENERIC_PARAMS 槽
      摘除（实例体非泛型）；
    - STMT_VAR 后处理（§2.8）：TYPE 槽 NULL 时按 VALUE 字面量回填类型；
+   - disposes（§4.17）：disposable 局部 var 的作用域出口析构登记
+     （与 defer 共用同一条 LIFO 栈），#dispose 内建实参可命中时脱糖为
+     $dispose$T 调用（谓词假静默走通用克隆=无操作）；
    - 结构改写（§2.4/2.6/2.7）：STMT_DEFER → 立即捕获闭包 var + 退出点
      LIFO 调用；STMT_FOREACH → 索引 for；STMT_COMPTIME_FOREACH（ITERABLE
      为 EXPR_TUPLE）→ 按元素逐份展开并替换迭代变量引用
@@ -267,7 +270,9 @@ typedef struct {
                             intern 进目标 program——产物新造文本不得借用
                             sema 生命周期，可 NULL */
   size_t defer_counter; /* __deferN 编号 */
-  clux_sema_t *sema;    /* 借用：walk 主体（§8.5 类型结果表查询），可 NULL */
+  vec_t *disposes; /* §4.17 收集表（sema_dispose_type_t*，emit 持有），
+                           NULL=RAII 通道关闭（登记/脱糖全部静默） */
+  clux_sema_t *sema; /* 借用：walk 主体（§8.5 类型结果表查询），可 NULL */
 } sema_clone_env_t;
 
 /* env 初始化：out/program 随 emit 创建；renames/skip 由 emit 按 stmt
@@ -282,5 +287,34 @@ void sema_clone_env_init(sema_clone_env_t *env,
                          clux_sema_t *sema);
 
 node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env);
+
+/* ---- §4.17 RAII P1：自动析构（dispose.c） ---- */
+
+/* 需合成析构函数的 struct 类型条目（emit 期收集，out allocator 持有）：
+   type 借用引擎类型表；loc 为收集点（登记处的源位置），合成节点的
+   location 模板。 */
+typedef struct {
+  clux_type_t *type; /* 借用：struct 引擎类型（字段表/名字来源） */
+  location_t loc;    /* 源位置模板（合成节点与渲染文本的 location） */
+} sema_dispose_type_t;
+
+/* disposable 谓词（白皮书 §4.17.1）——struct 实现 __dispose__ 钩子，
+   或传递性包含需要析构的字段；指针/切片/基础类型/容器（?T、[N]T、
+   元组、union 族）不析构（容器展开留 P2）。钩子判定走 sema->methods
+   预扫描表（check 期引擎 struct 类型只有字段表，method 三表在 exec
+   两阶段 install，clux_struct_is_method 不可用）。 */
+int sema_type_needs_dispose(clux_sema_t *sema, clux_type_t *type);
+
+/* 登记需合成 $dispose$T 的类型（按引擎类型指针去重，递归登记
+   disposable 字段类型），env->disposes 为 NULL 时静默。 */
+void sema_dispose_register(sema_clone_env_t *env,
+                           clux_type_t *type,
+                           const location_t *loc);
+
+/* 合成顶层语句 func $dispose$T(self: *T): void { ... }——钩子（若有）
+   先执行，随后逆声明序递归析构 disposable 字段（$dispose$F(self.f.&)）。
+   合成体不经 check（emit 尾部直接进产物）。 */
+node_t *sema_dispose_synth(sema_clone_env_t *env,
+                           const sema_dispose_type_t *entry);
 
 #endif

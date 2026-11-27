@@ -29,10 +29,18 @@
 ## 1.3 标识符
 
 标识符首字符必须是 Unicode `ID_Start` 或 `_`；后续字符必须是 `ID_Continue`
-或 `_`。
+或 `_`（外加 `$`，见下）。
 
 以下划线开头并后接另一个下划线的名字（`__name`）属于编译器保留名字空间，
 用户源码不得声明。
+
+`$` 只出现在标识符**后续字符**位置（不能作首字符），整个含 `$` 的名字空间
+同样由编译器保留：用户源码不得声明或引用含 `$` 的名字。它专供编译器
+合成名使用——sema 归一化产生的混名（提升方法 `Box$get`、局部声明提升
+`f$Foo`、泛型实例 `List$i32`、匿名构造 `nonamed$1`、RAII 合成析构
+`$dispose$T` 与临时绑定 `$tmp0` 等）。把这批名字纳入词法合法集，
+归一化 AST 序列化（unparse）后就能零错误再解析，编译器中间产物
+保持可读、可 diff、可 round-trip。
 
 ## 1.4 关键字
 
@@ -45,7 +53,6 @@ if       implements import   interface is        lib
 of       return    static_assert       struct
 switch   true      type
 undefined union     var       volatile  while
-using
 ```
 
 内建类型名（`bool`、`str`、`void`、`i8`..`i64`、`u8`..`u64`、

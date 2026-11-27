@@ -1188,6 +1188,10 @@ vec_t *sema_emit(clux_sema_t *sema) {
   /* §2.3 P11：物化期已消耗若干 __deferN 编号（物化体闭包 var 固化名），
      emit 主循环从物化已消耗值之后起计数，防模块内撞名。 */
   env.defer_counter = sema->inst_defer_counter;
+  /* §4.17：disposable 类型收集表（emit 持有，克隆期命中即登记，
+     尾部按收集序合成 $dispose$T）。 */
+  vec_t *disposes = create_vec(out);
+  env.disposes = disposes;
   sema_rename_t *renames = NULL;
   vec_t *skip = NULL;
   for (size_t idx = 0; idx < program_node_get_stmt_count(sema->ast); idx++) {
@@ -1346,6 +1350,19 @@ vec_t *sema_emit(clux_sema_t *sema) {
     stmt_struct_node_set_export(stmt, NULL);
     program_node_add_stmt(ast, stmt);
   }
+  /* §4.17 合成析构函数：按收集序产出 func $dispose$T（登记时已递归
+     收集 disposable 字段类型，被引用的 $dispose$F 必然同批存在）。
+     合成体直接进产物、不经 check（内容全部由谓词保证可解析）；
+     条目与收集 vec 为 non-own，用毕即释。 */
+  for (size_t idx = 0; idx < vec_get_size(disposes); idx++) {
+    sema_dispose_type_t *entry = (sema_dispose_type_t *)vec_get(disposes, idx);
+    node_t *synth = sema_dispose_synth(&env, entry);
+    if (synth) {
+      program_node_add_stmt(ast, synth);
+    }
+    allocator_free(out, (void **)&entry);
+  }
+  delete_vec(&disposes);
   program_set_decls(program, ast);
   vec_push(programs, program);
   return programs;

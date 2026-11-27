@@ -68,8 +68,7 @@ static node_t *read_member(allocator_t *allocator, parser_t *parser) {
         token_is(keyword, CLUX_TOKEN_KEYWORD, "cfunc")) {
       return parser_read_stmt_func(allocator, parser);
     }
-    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "var") ||
-        token_is(keyword, CLUX_TOKEN_KEYWORD, "using")) {
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "var")) {
       return parser_read_stmt_var(allocator, parser);
     }
     /* 其余情况按带装饰器的字段处理。 */
@@ -79,8 +78,7 @@ static node_t *read_member(allocator_t *allocator, parser_t *parser) {
       token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
     return parser_read_stmt_func(allocator, parser);
   }
-  if (token_is(token, CLUX_TOKEN_KEYWORD, "var") ||
-      token_is(token, CLUX_TOKEN_KEYWORD, "using")) {
+  if (token_is(token, CLUX_TOKEN_KEYWORD, "var")) {
     return parser_read_stmt_var(allocator, parser);
   }
   if (token && token_get_kind(token) == CLUX_TOKEN_IDENTIFIER) {

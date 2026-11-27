@@ -1079,24 +1079,15 @@ TEST(StmtVarTest, ComplexInitializer) {
   delete_allocator(&a);
 }
 
-TEST(StmtVarTest, UsingWithoutType) {
+/* using 已废除（白皮书删 §4.12.1）：不再是变量语句关键字，
+   parser_read_stmt_var 不认领，游标不动。 */
+TEST(StmtVarTest, UsingIsNoLongerVarStatement) {
   allocator_t *a = create_allocator(malloc, free);
-  parser_t *p;
-  node_t *node = parse_stmt(a, &p, "using a = expr;");
-  expect_var_stmt(node, "using", false, 0);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
-  delete_node(&node);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(StmtVarTest, UsingWithType) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p;
-  node_t *node = parse_stmt(a, &p, "using b: T = expr;");
-  expect_var_stmt(node, "using", true, 0);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
-  delete_node(&node);
+  parser_t *p = create_parser(a, "test.clux", "using a = expr;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_var(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -1116,17 +1107,14 @@ TEST(StmtVarTest, ComptimeVar) {
   delete_allocator(&a);
 }
 
-/* comptime using 语法上可解析，合法性留给语义阶段检查。 */
-TEST(StmtVarTest, ComptimeUsingParses) {
+/* comptime 后接 using（已废除）时不认领为变量语句，游标不动。 */
+TEST(StmtVarTest, DoesNotStealComptimeUsing) {
   allocator_t *a = create_allocator(malloc, free);
-  parser_t *p;
-  node_t *node = parse_stmt(a, &p, "comptime using a = e;");
-  expect_var_stmt(node, "using", false, 0);
-  node_t *comptime = node_get_child(node, CLUX_STMT_VAR_COMPTIME);
-  ASSERT_NE(comptime, nullptr);
-  EXPECT_EQ(node_get_kind(comptime), CLUX_NODE_SYMBOL);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
-  delete_node(&node);
+  parser_t *p = create_parser(a, "test.clux", "comptime using a = e;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_var(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -1183,8 +1171,8 @@ TEST(StmtVarTest, MultipleDecoratorsKeepSourceOrder) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *node =
-      parse_stmt(a, &p, "[[trace]] [[metadata(\"k\", 1)]] using a = e;");
-  expect_var_stmt(node, "using", false, 2);
+      parse_stmt(a, &p, "[[trace]] [[metadata(\"k\", 1)]] var a = e;");
+  expect_var_stmt(node, "var", false, 2);
   node_t *first = node_get_child(node, CLUX_STMT_VAR_FIRST_DECORATOR);
   node_t *second = node_get_child(node, CLUX_STMT_VAR_FIRST_DECORATOR + 1);
   ASSERT_NE(first, nullptr);
@@ -1199,7 +1187,7 @@ TEST(StmtVarTest, MultipleDecoratorsKeepSourceOrder) {
   delete_allocator(&a);
 }
 
-/* 装饰器内部含方括号时，分派仍能正确找到 var/using 关键字。 */
+/* 装饰器内部含方括号时，分派仍能正确找到 var 关键字。 */
 TEST(StmtVarTest, DecoratorWithSubscriptDispatchesVar) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -1228,7 +1216,7 @@ TEST(StmtVarTest, DecoratorBeforeFuncStillDispatchesFunc) {
 TEST(StmtVarTest, InsideBlock) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  node_t *node = parse_stmt(a, &p, "{ var x = 1; using y = e; }");
+  node_t *node = parse_stmt(a, &p, "{ var x = 1; var y = e; }");
   expect_block(node, 2);
   EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_VAR);
   EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_VAR);
@@ -1324,7 +1312,7 @@ TEST(StmtVarTest, MissingSemicolonReportsError) {
   delete_allocator(&a);
 }
 
-/* 装饰器后既不是 var/using 也不是 func/cfunc。 */
+/* 装饰器后既不是 var 也不是 func/cfunc。 */
 TEST(StmtVarTest, DecoratorFollowedByNonDeclarationReportsError) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -1361,7 +1349,7 @@ TEST(StmtVarTest, DecoratorsThenEofReportsError) {
   delete_allocator(&a);
 }
 
-/* 直接调用 var 入口且装饰器后不是 var/using：报错。 */
+/* 直接调用 var 入口且装饰器后不是 var：报错。 */
 TEST(StmtVarTest, DecoratorFollowedByNonVarReportsError) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
@@ -1371,7 +1359,7 @@ TEST(StmtVarTest, DecoratorFollowedByNonVarReportsError) {
   vec_t *errors = parser_get_error(p);
   ASSERT_GE(vec_get_size(errors), 1u);
   EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
-               "expected 'var' or 'using' in variable statement");
+               "expected 'var' in variable statement");
   delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);

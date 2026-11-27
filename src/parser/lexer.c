@@ -120,10 +120,10 @@ token_t *lexer_read_string(allocator_t *allocator,
 static const char *keywords[] = {
     "var",       "func",     "cfunc",     "import",  "export",
     "if",        "else",     "for",       "foreach", "while",
-    "do",        "break",    "continue",  "return",  "using",
-    "const",     "volatile", "defer",     "struct",  "union",
-    "cunion",    "enum",     "undefined", "none",    "true",
-    "false",     "as",       "is",        "extends", "implements",
+    "do",        "break",    "continue",  "return",  "const",
+    "volatile",  "defer",    "struct",    "union",   "cunion",
+    "enum",      "undefined", "none",     "true",    "false",
+    "as",        "is",       "extends",   "implements",
     "comptime",  "type",     "of",        "switch",  "default",
     "bitfield",  "from",     "extern",    "lib",     "static_assert",
     "interface", NULL,
@@ -131,6 +131,8 @@ static const char *keywords[] = {
 
 /* ---- identifier ----
    ID_Start 开头，后跟零或多个 ID_Continue 字符（Unicode 属性）。
+   `$` 只允许出现在后续字符位置（不能作首字符），含 `$` 的名字空间
+   编译器保留，专供合成名（见白皮书 §1.3）。
    非标识符开头返回 NULL。 */
 token_t *lexer_read_identifier(allocator_t *allocator,
                                position_t *position,
@@ -144,7 +146,8 @@ token_t *lexer_read_identifier(allocator_t *allocator,
 
   while (1) {
     c = peek_codepoint(&current);
-    if (c < 0 || !u_isIDPart(c)) break;
+    /* u_isIDPart 遵循 UAX#31 不含 `$`，显式补上（仅后续字符） */
+    if (c < 0 || !(c == '$' || u_isIDPart(c))) break;
     position_next(&current);
   }
   location_t loc = {
@@ -181,7 +184,8 @@ token_t *lexer_read_builtin(allocator_t *allocator,
 
   while (1) {
     c = peek_codepoint(&current);
-    if (c < 0 || !u_isIDPart(c)) break;
+    /* 与标识符一致：`$` 仅作后续字符 */
+    if (c < 0 || !(c == '$' || u_isIDPart(c))) break;
     position_next(&current);
   }
 

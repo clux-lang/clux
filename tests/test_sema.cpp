@@ -1969,6 +1969,145 @@ TEST(SemaTest, DeferDesugarsToClosureAndTailCallAsNormalizedText) {
                    "}\n");
 }
 
+/* RAII §4.17 P1：局部 disposable var 在块尾插入 $dispose$T(x.&)，
+   合成体 func $dispose$T 追加到顶层尾部（钩子先执行）。 */
+TEST(SemaTest, RaiiLocalDisposableVarInsertsDisposeAtExitAsNormalizedText) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var x: Res = .Res{ .v = 1 };\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var x: Res = .Res{v = 1};\n"
+                   "  $dispose$Res(x.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* RAII 与 defer 共用同一条 LIFO 栈：后登记的析构先执行。 */
+TEST(SemaTest, RaiiDeferDisposeLifoInterleaveAsNormalizedText) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  defer { var t = 1; }\n"
+                   "  var x: Res = .Res{ .v = 1 };\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var __defer0: func () -> void = func (): void {\n"
+                   "    var t: i32 = 1i32;\n"
+                   "  };\n"
+                   "  var x: Res = .Res{v = 1};\n"
+                   "  $dispose$Res(x.&);\n"
+                   "  __defer0();\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* #dispose：指针实参直传、左值自动取址、非 disposable 静默退化为裸
+   实参表达式（实参照常求值）。 */
+TEST(SemaTest, RaiiDisposeBuiltinDesugarsAsNormalizedText) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func g(p: *Res): void {\n"
+                   "  #dispose(p);\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var x: Res = .Res{ .v = 1 };\n"
+                   "  var n = 2;\n"
+                   "  #dispose(x);\n"
+                   "  #dispose(n);\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func g(p: *Res): void {\n"
+                   "  $dispose$Res(p);\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var x: Res = .Res{v = 1};\n"
+                   "  var n: i32 = 2i32;\n"
+                   "  $dispose$Res(x.&);\n"
+                   "  n;\n"
+                   "  $dispose$Res(x.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17 禁令：全局/模块级 var 禁 disposable（无作用域出口，RAII 无
+   插入点）；cunion 成员禁 disposable（无 vtable，析构无法分派）。 */
+TEST(SemaTest, RaiiRejectsModuleLevelDisposableVarAndCunionField) {
+  const char *src = "struct Res {\n"
+                    "  v: i32;\n"
+                    "  func __dispose__(self: *Res): void { return; }\n"
+                    "}\n"
+                    "var g: Res = .Res{ .v = 1 };\n"
+                    "cunion U {\n"
+                    "  r: Res;\n"
+                    "  n: i32;\n"
+                    "}\n";
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, src);
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  EXPECT_EQ(clux_context_diag_count(ctx), 2u);
+  /* 诊断一：模块级 var。诊断二：cunion 成员。 */
+  const clux_diag_t *global_diag = clux_context_get_diag(ctx, 0);
+  EXPECT_EQ(clux_diag_get_level(global_diag), CLUX_DIAG_ERROR);
+  string_t *text = clux_diag_to_string((clux_diag_t *)global_diag, a);
+  EXPECT_NE(strstr(string_get_data(text),
+                   "module-level variable 'g' has a disposable type (RAII); "
+                   "use a local variable or #dispose"),
+            nullptr);
+  delete_string(&text);
+  const clux_diag_t *cunion_diag = clux_context_get_diag(ctx, 1);
+  EXPECT_EQ(clux_diag_get_level(cunion_diag), CLUX_DIAG_ERROR);
+  text = clux_diag_to_string((clux_diag_t *)cunion_diag, a);
+  EXPECT_NE(strstr(string_get_data(text),
+                   "cunion member 'r' has a disposable type (RAII); cunion is "
+                   "never disposed"),
+            nullptr);
+  delete_string(&text);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(SemaTest, ForeachDesugarsToIndexedForAsNormalizedText) {
   expect_sema_text("var items: [3]i32 = <0, 0, 0>;\n"
                    "func f(): void {\n"

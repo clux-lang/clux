@@ -82,7 +82,6 @@ TEST(UnparseTest, IdempotentRoundTrip) {
 TEST(UnparseTest, VarStatement) {
   expect_unparse("var x: i32 = 1;", "var x: i32 = 1;\n");
   expect_unparse("var y = x;", "var y = x;\n");
-  expect_unparse("using z = x;", "using z = x;\n");
 }
 
 TEST(UnparseTest, ExportAndDecoratorBeforeVar) {

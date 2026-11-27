@@ -216,6 +216,32 @@ TEST(LexerIdentifierTest, UnicodeIdentifier) {
   delete_allocator(&a);
 }
 
+TEST(LexerIdentifierTest, DollarAsContinuationChar) {
+  allocator_t *a = create_allocator(malloc, free);
+  /* `$` 仅允许作后续字符：合成名空间（白皮书 §1.3） */
+  const char *src = "Box$get";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_IDENTIFIER);
+  EXPECT_EQ(p.offset, src + 7);
+  char *text = lexer_test_text(tok, a);
+  EXPECT_STREQ(text, "Box$get");
+  allocator_free(a, (void **)&text);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerIdentifierTest, DollarStartReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  /* `$` 不能作首字符 */
+  const char *src = "$tmp0";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+  EXPECT_EQ(tok, nullptr);
+  delete_allocator(&a);
+}
+
 TEST(LexerIdentifierTest, IdentifierStopsAtNonIDChar) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "foo+bar";

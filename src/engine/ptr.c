@@ -263,6 +263,14 @@ static clux_vtable_t g_ptr_vtable = {
 
 clux_vtable_t *get_clux_ptr_vtable(void) { return &g_ptr_vtable; }
 
+clux_type_t *clux_type_get_ptr_base(clux_type_t *type) {
+  if (clux_type_kind_unwrap(type) != CLUX_TYPE_PTR) {
+    return NULL;
+  }
+  clux_ptr_meta_t *meta = clux_type_get_meta(type);
+  return meta ? meta->base : NULL;
+}
+
 /* 桶去重判据：base 语义相等即视为同一 ptr 类型（跨实例、递归复合均命中），
    由 clux_type_equal 回答。 */
 static bool ptr_child_base_matches(clux_type_t *child, void *user_data) {

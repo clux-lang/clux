@@ -41,8 +41,7 @@ node_t *parser_read_stmt_for(allocator_t *allocator, parser_t *parser) {
   if (token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
     parser_next(parser);
     parser_skip_trivia(parser);
-  } else if (token_is(token, CLUX_TOKEN_KEYWORD, "var") ||
-             token_is(token, CLUX_TOKEN_KEYWORD, "using")) {
+  } else if (token_is(token, CLUX_TOKEN_KEYWORD, "var")) {
     node_t *init = parser_read_stmt_var(allocator, parser);
     stmt_for_node_set_init(node, init);
     parser_skip_trivia(parser);

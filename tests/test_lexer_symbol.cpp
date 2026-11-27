@@ -194,11 +194,10 @@ TEST(LexerKeywordTest, ControlFlowKeywords) {
   delete_allocator(&a);
 }
 
-TEST(LexerKeywordTest, ImportExportUsingAreKeywords) {
+TEST(LexerKeywordTest, ImportExportEtcAreKeywords) {
   allocator_t *a = create_allocator(malloc, free);
   const char *kws[] = {"import",
                        "export",
-                       "using",
                        "from",
                        "extern",
                        "lib",
@@ -212,6 +211,17 @@ TEST(LexerKeywordTest, ImportExportUsingAreKeywords) {
     EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_KEYWORD) << "kw=" << kws[i];
     delete_token(&tok);
   }
+  delete_allocator(&a);
+}
+
+/* using 已废除（白皮书 §4.12.1 删除），词法层按普通标识符产出。 */
+TEST(LexerKeywordTest, UsingIsIdentifierNotKeyword) {
+  allocator_t *a = create_allocator(malloc, free);
+  position_t p = lexer_test_pos("using");
+  token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_IDENTIFIER);
+  delete_token(&tok);
   delete_allocator(&a);
 }
 

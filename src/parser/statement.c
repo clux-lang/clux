@@ -363,13 +363,12 @@ static token_t *peek_next_non_trivia(parser_t *parser, size_t pos) {
   return NULL;
 }
 
-/* 变量定义语句 <decorator>* [export]? [comptime]? (var|using) name
-   [: type]? = expr;（白皮书 §4.1、§3.4、§4.12.1、§8.1）。
-   调用前当前 token 不一定是装饰器、export、comptime 或 var/using，不是时
-   返回 NULL 且游标不动。comptime 只有在后接 var/using 时才由本函数认领，
+/* 变量定义语句 <decorator>* [export]? [comptime]? var name
+   [: type]? = expr;（白皮书 §4.1、§3.4、§8.1）。
+   调用前当前 token 不一定是装饰器、export、comptime 或 var，不是时
+   返回 NULL 且游标不动。comptime 只有在后接 var 时才由本函数认领，
    以便 `comptime if` 留给 comptime if 语句。
    类型只取后缀层，避免把 `=` 当作赋值运算符吃掉；初值走顶层入口。
-   `comptime using` 语法上可解析，是否合法由语义阶段检查。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
@@ -387,16 +386,14 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
     lookahead_pos = next_non_trivia_position(parser, lookahead_pos + 1);
     lookahead = peek_next_non_trivia(parser, lookahead_pos);
   }
-  bool is_var_stmt = token_is(lookahead, CLUX_TOKEN_KEYWORD, "var") ||
-                     token_is(lookahead, CLUX_TOKEN_KEYWORD, "using");
+  bool is_var_stmt = token_is(lookahead, CLUX_TOKEN_KEYWORD, "var");
   if (!is_var_stmt && token_is(lookahead, CLUX_TOKEN_KEYWORD, "comptime")) {
     size_t after_pos = next_non_trivia_position(parser, lookahead_pos + 1);
     token_t *after = peek_next_non_trivia(parser, after_pos);
-    is_var_stmt = token_is(after, CLUX_TOKEN_KEYWORD, "var") ||
-                  token_is(after, CLUX_TOKEN_KEYWORD, "using");
+    is_var_stmt = token_is(after, CLUX_TOKEN_KEYWORD, "var");
   }
-  /* 保留旧契约：装饰器后不是 var/using 时由本函数报错；但 comptime/export
-     后不是 var/using（如 comptime if、export func）必须返回 NULL，
+  /* 保留旧契约：装饰器后不是 var 时由本函数报错；但 comptime/export
+     后不是 var（如 comptime if、export func）必须返回 NULL，
      交给其他语句处理。 */
   bool claim_anyway = has_decorators &&
                       !token_is(lookahead, CLUX_TOKEN_KEYWORD, "comptime") &&
@@ -429,23 +426,20 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
     token = parser_peek_token(parser);
   }
 
-  /* var / using 关键字。 */
+  /* var 关键字。 */
   token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_KEYWORD, "var") &&
-      !token_is(token, CLUX_TOKEN_KEYWORD, "using")) {
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, "var")) {
     location_t loc = stmt_error_location(parser, &begin_loc);
     parser_push_error(
         parser,
-        create_error(allocator,
-                     &loc,
-                     "expected 'var' or 'using' in variable statement"));
+        create_error(allocator, &loc, "expected 'var' in variable statement"));
     return node;
   }
   location_t keyword_loc = *token_get_location(token);
   node_t *keyword = create_symbol_node(allocator);
   node_set_location(keyword, &keyword_loc);
   stmt_var_node_set_keyword(node, keyword);
-  parser_next(parser); /* var / using */
+  parser_next(parser); /* var */
   parser_skip_trivia(parser);
 
   /* 变量名。 */
@@ -922,11 +916,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   if (parser_peek_decorator(parser) ||
       token_is(first, CLUX_TOKEN_KEYWORD, "export")) {
     token_t *keyword = peek_decl_keyword(parser);
-    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "var") ||
-        token_is(keyword, CLUX_TOKEN_KEYWORD, "using")) {
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "var")) {
       return parser_read_stmt_var(allocator, parser);
     }
-    /* 装饰器后可能是 comptime var / comptime using；若不是变量语句，
+    /* 装饰器后可能是 comptime var；若不是变量语句，
        交给函数语句路径报错（装饰器不适用于 comptime if）。 */
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "comptime")) {
       node_t *var_stmt = parser_read_stmt_var(allocator, parser);

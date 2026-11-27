@@ -837,6 +837,17 @@ static clux_type_t *check_build_union(clux_sema_t *sema, node_t *stmt) {
     char *mname = check_name_of(allocator, field_node_get_name(member));
     clux_type_t *type = check_type_eval(sema, field_node_get_type(member), 0);
     if (mname && type) {
+      /* §4.17 P1：cunion 成员禁 disposable——cunion 无 vtable、析构协议
+         无法分派，disposable 字段一经写入即泄漏。照常构型（emit 被
+         has_error 阻断），报错不降级防级联。 */
+      if (is_cunion && sema_type_needs_dispose(sema, type)) {
+        clux_context_diag(sema->ctx,
+                          CLUX_DIAG_ERROR,
+                          node_get_location(member),
+                          "cunion member '%s' has a disposable type "
+                          "(RAII); cunion is never disposed",
+                          mname);
+      }
       members[filled].name = mname;
       members[filled].type = type;
       filled++;
@@ -1138,6 +1149,20 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
           bound = subject;
         }
       }
+    }
+    /* §4.17 P1：全局/模块级 var 禁 disposable——全局生存期无作用域出口，
+       RAII 析构无插入点（显式 #dispose 不受限，但全局本就罕见）。
+       报错后照常登记名字，防级联未定义错误（emit 被 has_error 阻断）。 */
+    if (sema_type_needs_dispose(sema, bound)) {
+      allocator_t *diag_alloc = clux_context_get_allocator(sema->ctx);
+      char *diag_name = check_name_of(diag_alloc, stmt_var_node_get_name(stmt));
+      clux_context_diag(sema->ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(stmt),
+                        "module-level variable '%s' has a disposable type "
+                        "(RAII); use a local variable or #dispose",
+                        diag_name ? diag_name : "?");
+      allocator_free(diag_alloc, (void **)&diag_name);
     }
     check_define_value_name(sema, stmt_var_node_get_name(stmt), bound, 0);
     return;
@@ -2680,10 +2705,22 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     return result;
   }
   case CLUX_NODE_EXPR_BUILTIN: {
+    /* §4.17 #dispose 单实参：实参演算类型登记进类型结果表——emit
+       脱糖改写 $dispose$T 时按实参节点取 T。 */
+    int is_dispose = 0;
+    if (builtin_node_get_arg_count(node) == 1) {
+      char *bname = check_name_of(allocator, builtin_node_get_name(node));
+      is_dispose = bname && strcmp(bname, "dispose") == 0;
+      allocator_free(allocator, (void **)&bname);
+    }
     for (size_t idx = 0; idx < builtin_node_get_arg_count(node); idx++) {
       clux_value_t *arg = check_expr(sema, builtin_node_get_arg(node, idx));
       if (check_is_real_error(arg)) {
         return arg;
+      }
+      if (is_dispose && idx == 0) {
+        sema_record_node_type(
+            sema, builtin_node_get_arg(node, 0), check_value_bind_type(arg));
       }
     }
     return NULL; /* 内建函数的类型规则 P9+ 按名字接入 */
