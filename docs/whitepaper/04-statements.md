@@ -345,7 +345,7 @@ func work(): void {
 
 - **槽直通**：`var` / `return` 的值槽**顶层单一**临时根不提升——`var`
   直接绑定（避免 `__init_copy__` 二次拷贝），`return` 所有权随值转移；
-  `foreach` 的 iterable 由脱糖（§2.7）直连 `__iter`。嵌套子树照常捕获。
+  `foreach` 的 iterable 由脱糖（§2.7）直连 `$iter`。嵌套子树照常捕获。
 - **`return` 物化**：捕获非空，或 return 值子树引用本 return 将展开的
   unwind 区间内待析构绑定（如 `return g;`——析构前插先于表达式求值同样
   use-after-dispose）时，先物化 `var $ret$N: T = <return 表达式>;`（引用
@@ -380,11 +380,11 @@ gate 块结构：`{ [vars]; if (C') {} else { [析构] break; } [析构]; }`。
 运行期代价，也无可忘置的标志位。
 
 **foreach 元素逐轮析构**：var 形态且元素类型需要析构时，元素绑定与
-`__iter` 登记进出口 unwind 链（§4.17.3）——元素在循环体水位之上、
-`__iter` 之下：循环体每轮末尾由体块通道展开元素析构（元素是 copy，
+`$iter` 登记进出口 unwind 链（§4.17.3）——元素在循环体水位之上、
+`$iter` 之下：循环体每轮末尾由体块通道展开元素析构（元素是 copy，
 析构的是拷贝而非容器成分）；体内任意深度的 `continue` / `break` 前由
-块通道 unwind 到循环体水位（元素 + 体内绑定；`__iter` 不触发，出循环
-后落到块尾显式析构）；深 `return` 沿全链 unwind（元素 → `__iter` →
+块通道 unwind 到循环体水位（元素 + 体内绑定；`$iter` 不触发，出循环
+后落到块尾显式析构）；深 `return` 沿全链 unwind（元素 → `$iter` →
 外层）。裸名形态（每轮给外层既有绑定赋值）元素所有权不归循环，不
 登记。
 

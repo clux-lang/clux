@@ -3,7 +3,7 @@
    loc 按值浅拷（position 的 offset 仍可借用 parser 源码缓冲，
    与原树同源，program_t 不因此持有 engine 指针）。
    Phase 4 变换（§2.4–2.7）在克隆通道内做结构改写：
-   - STMT_DEFER → 立即捕获闭包 var __deferN + 退出点 LIFO 调用（§2.4）；
+   - STMT_DEFER → 立即捕获闭包 var $defer$N + 退出点 LIFO 调用（§2.4）；
    - STMT_COMPTIME_IF → walk 期 CTFE 决策的选中臂（§2.5，prunes 表）；
    - STMT_COMPTIME_FOREACH → EXPR_TUPLE 字面序列逐元素展开（§2.6）；
    - STMT_FOREACH → 索引 for 脱糖（§2.7）。 */
@@ -400,7 +400,7 @@ static node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env) {
   return subst ? subst : cloned;
 }
 
-/* 退出点调用 __deferN(); / $dispose$T(x.); —— STMT_EXPR(EXPR_CALL)。
+/* 退出点调用 $defer$N(); / $dispose$T(x.); —— STMT_EXPR(EXPR_CALL)。
    dispose 形态实参为 x.&（左值零拷贝取址，析构函数按地址写目标）。 */
 static node_t *sema_defer_call(const sema_defer_ref_t *ref,
                                sema_clone_env_t *env) {
@@ -433,14 +433,14 @@ static node_t *sema_defer_call(const sema_defer_ref_t *ref,
   return wrap;
 }
 
-/* defer → var __deferN = func |captures| (空形参): void { body };
+/* defer → var $defer$N = func |captures| (空形参): void { body };
    捕获一律 copy（值语义），捕获值在定义点（原 defer 位置）克隆求值。 */
 static node_t *sema_defer_def_synth(node_t *src,
                                     sema_clone_env_t *env,
                                     sema_defer_ref_t *ref) {
   const location_t *loc = node_get_location(src);
   char buf[32];
-  int written = snprintf(buf, sizeof(buf), "__defer%zu", env->defer_counter++);
+  int written = snprintf(buf, sizeof(buf), "$defer$%zu", env->defer_counter++);
   if (written <= 0 || (size_t)written >= sizeof(buf)) {
     return NULL;
   }
@@ -478,7 +478,7 @@ static node_t *sema_defer_def_synth(node_t *src,
                  sema_clone_impl(stmt_defer_node_get_body(src), env));
   env->unwind_func_mark = saved_func_mark;
   env->unwind_loop_mark = saved_loop_mark;
-  /* var __deferN = <闭包>；槽序 KEYWORD/NAME/TYPE/VALUE/EXPORT/COMPTIME。 */
+  /* var $defer$N = <闭包>；槽序 KEYWORD/NAME/TYPE/VALUE/EXPORT/COMPTIME。 */
   node_t *var = create_stmt_var_node(env->out);
   node_set_location(var, loc);
   node_set_child(var,
@@ -676,7 +676,7 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
     /* §4.17 P3 语句槽驱动：armed 克隆——捕获的临时 var 提升到语句前、
        $dispose 逆序追加语句后。var/foreach 槽 skip_top 置位（顶层单一
        根直通：var 直接 bind 免 __init_copy__ 二次拷贝、foreach iterable
-       由脱糖直连 __iter）；return 槽已由 exit 分支接管。 */
+       由脱糖直连 $iter）；return 槽已由 exit 分支接管。 */
     if (env->disposes && sema_lift_slot_applies(child)) {
       size_t lift_base = vec_get_size(env->lift_temps);
       node_kind_t child_kind = node_get_kind(child);
@@ -725,16 +725,16 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
 
 /* ---- §2.7 foreach 脱糖 ----
    foreach (var name [: type]? of iterable) { body }
-   → { var __iter: T? = iterable;
-       var __i = 0;
-       for (; __i < #len(__iter); __i = __i + 1) {
-           var name [: type]? = __iter[__i];
+   → { var $iter: T? = iterable;
+       var $i = 0;
+       for (; $i < #len($iter); $i = $i + 1) {
+           var name [: type]? = $iter[$i];
            <body 块>;
        } }
    foreach (name of iterable) { body }（裸名，前提 name 已在外层定义）
-   → 同上，但循环体首句改为赋值：name = __iter[__i];
+   → 同上，但循环体首句改为赋值：name = $iter[$i];
    #len 与下标是现有语言能力，零新构造；iterable 提升为隐藏 var
-   __iter（类型从 check 侧 iterable 锚点显式渲染）只求值一次——
+   $iter（类型从 check 侧 iterable 锚点显式渲染）只求值一次——
    #len 与下标两处若各自求值，call 形态 iterable 会被求值 2N 次，
    与 exec 直连路径（求值一次）语义漂移。var/裸名是两种语义：
    var 每轮重新定义迭代变量；裸名每轮给既有绑定赋值。 */
@@ -763,7 +763,7 @@ static node_t *sema_foreach_binary(const char *op,
 
 /* ---- §4.17.3：foreach 元素 var 逐轮析构 ----
    元素类型 disposable 时元素绑定登记进 unwind 链（循环体水位之上、
-   __iter 之下）：体块通道在每轮体尾/体内直接层退出点（不穿嵌套循环体）
+   $iter 之下）：体块通道在每轮体尾/体内直接层退出点（不穿嵌套循环体）
    的 break/continue 前自动展开析构，深 return 由链上 unwind 覆盖——
    原 lift.c 收集器前插路径已废（块通道输出形状等价且额外覆盖体内
    disposable var 的退出点）。直接层退出收集器见 lift.c（do-while
@@ -772,10 +772,10 @@ static node_t *sema_foreach_binary(const char *op,
 static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(src);
   node_t *iter_src = stmt_foreach_node_get_iterable(src);
-  /* §4.17 P3：iterable 顶层根直通由本脱糖直连 __iter 实现（不经
+  /* §4.17 P3：iterable 顶层根直通由本脱糖直连 $iter 实现（不经
      guard）；skip_top 是槽驱动的语句级旗标，不得泄入体内克隆。 */
   env->lift_skip_top = 0;
-  /* var __iter: T? = <iterable>;（求值一次；TYPE 从 iterable 锚点渲染，
+  /* var $iter: T? = <iterable>;（求值一次；TYPE 从 iterable 锚点渲染，
      合成 var 无原树锚点，§2.8 字面量回填对符号引用值推不出来）。 */
   node_t *iter_var = create_stmt_var_node(env->out);
   node_set_location(iter_var, loc);
@@ -784,7 +784,7 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
                  sema_render_text_node(
                      env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
   node_set_child(
-      iter_var, CLUX_STMT_VAR_NAME, sema_foreach_ident("__iter", loc, env));
+      iter_var, CLUX_STMT_VAR_NAME, sema_foreach_ident("$iter", loc, env));
   node_t *iter_type = NULL;
   if (env->sema) {
     const char *iter_type_name =
@@ -801,9 +801,9 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   node_set_child(iter_var, CLUX_STMT_VAR_VALUE, sema_clone_impl(iter_src, env));
   node_set_child(iter_var, CLUX_STMT_VAR_EXPORT, NULL);
   node_set_child(iter_var, CLUX_STMT_VAR_COMPTIME, NULL);
-  node_t *len_iter = sema_foreach_ident("__iter", loc, env);
-  node_t *idx_iter = sema_foreach_ident("__iter", loc, env);
-  /* var __i = 0;（§2.8 回填 i32） */
+  node_t *len_iter = sema_foreach_ident("$iter", loc, env);
+  node_t *idx_iter = sema_foreach_ident("$iter", loc, env);
+  /* var $i = 0;（§2.8 回填 i32） */
   node_t *idx_var = create_stmt_var_node(env->out);
   node_set_location(idx_var, loc);
   node_set_child(idx_var,
@@ -811,7 +811,7 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
                  sema_render_text_node(
                      env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
   node_set_child(
-      idx_var, CLUX_STMT_VAR_NAME, sema_foreach_ident("__i", loc, env));
+      idx_var, CLUX_STMT_VAR_NAME, sema_foreach_ident("$i", loc, env));
   node_set_child(idx_var, CLUX_STMT_VAR_TYPE, NULL);
   node_set_child(
       idx_var,
@@ -821,7 +821,7 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   node_set_child(idx_var, CLUX_STMT_VAR_EXPORT, NULL);
   node_set_child(idx_var, CLUX_STMT_VAR_COMPTIME, NULL);
   sema_clone_var_fixup(idx_var, NULL, env);
-  /* for (; __i < #len(iterable); __i = __i + 1) */
+  /* for (; $i < #len(iterable); $i = $i + 1) */
   node_t *len = create_builtin_node(env->out);
   node_set_location(len, loc);
   builtin_node_set_name(
@@ -830,10 +830,10 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
           env->out, env->program, CLUX_NODE_SYMBOL, "len", loc));
   builtin_node_add_arg(len, len_iter);
   node_t *cond = sema_foreach_binary(
-      "<", sema_foreach_ident("__i", loc, env), len, loc, env);
+      "<", sema_foreach_ident("$i", loc, env), len, loc, env);
   node_t *step = create_assign_node(env->out);
   node_set_location(step, loc);
-  assign_node_set_left(step, sema_foreach_ident("__i", loc, env));
+  assign_node_set_left(step, sema_foreach_ident("$i", loc, env));
   assign_node_set_symbol(
       step,
       sema_render_text_node(
@@ -842,19 +842,19 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
       step,
       sema_foreach_binary(
           "+",
-          sema_foreach_ident("__i", loc, env),
+          sema_foreach_ident("$i", loc, env),
           sema_render_text_node(
               env->out, env->program, CLUX_NODE_LITERAL_NUMERIC, "1", loc),
           loc,
           env));
-  /* 循环体首句：var 形态为 var name[:T]? = __iter[__i];
-     裸名形态为赋值 name = __iter[__i]（每轮给既有绑定赋值）。 */
+  /* 循环体首句：var 形态为 var name[:T]? = $iter[$i];
+     裸名形态为赋值 name = $iter[$i]（每轮给既有绑定赋值）。 */
   node_t *body_block = create_stmt_block_node(env->out);
   node_set_location(body_block, loc);
   node_t *index = create_subscript_node(env->out);
   node_set_location(index, loc);
   subscript_node_set_base(index, idx_iter);
-  subscript_node_add_arg(index, sema_foreach_ident("__i", loc, env));
+  subscript_node_add_arg(index, sema_foreach_ident("$i", loc, env));
   node_t *name_src = stmt_foreach_node_get_name(src);
   if (stmt_foreach_node_get_keyword(src)) {
     node_t *item_var = create_stmt_var_node(env->out);
@@ -883,7 +883,7 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
     node_set_child(item_var, CLUX_STMT_VAR_COMPTIME, NULL);
     node_add_child(body_block, item_var);
   } else {
-    /* 裸名：name = __iter[__i];（name 已在外层定义，每轮赋值）。 */
+    /* 裸名：name = $iter[$i];（name 已在外层定义，每轮赋值）。 */
     node_t *item_assign = create_assign_node(env->out);
     node_set_location(item_assign, node_get_location(name_src));
     assign_node_set_left(item_assign, sema_clone_impl(name_src, env));
@@ -899,12 +899,12 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
     node_add_child(body_block, item_stmt);
   }
   /* §4.17.3 出口 unwind 链：iterable 为 disposable（§8.5 锚点）时
-     __iter 登记进链（深 return 穿循环体时出口析构不再漏，正常退出/
+     $iter 登记进链（深 return 穿循环体时出口析构不再漏，正常退出/
      break 落到块尾显式析构）；var 形态元素类型 disposable 时元素绑定
-     随 __iter 入链——体内任意深度的 break/continue 前由块通道 unwind
+     随 $iter 入链——体内任意深度的 break/continue 前由块通道 unwind
      到循环体水位（元素 + 体内绑定），深 return 沿全链 unwind。元素
-     绑定登记在循环体水位之上、__iter 之下（break/continue 出循环后
-     才落到 __iter 的块尾析构）。裸名形态赋值外层既有绑定，元素
+     绑定登记在循环体水位之上、$iter 之下（break/continue 出循环后
+     才落到 $iter 的块尾析构）。裸名形态赋值外层既有绑定，元素
      所有权不归循环，不登记。 */
   sema_defer_ref_t *iter_ref = NULL;
   sema_defer_ref_t *item_ref = NULL;
@@ -921,7 +921,7 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
         iter_ref = allocator_alloc(env->out, sizeof(sema_defer_ref_t));
         iter_ref->dispose = 1;
         iter_ref->name = iter_callee;
-        iter_ref->var_name = program_intern_string(env->program, "__iter", 6);
+        iter_ref->var_name = program_intern_string(env->program, "$iter", 5);
         iter_ref->loc = loc;
         iter_ref->type = iter_type;
         vec_push(env->unwind, iter_ref);
@@ -951,7 +951,7 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
       allocator_free(env->out, (void **)&item_name);
     }
   }
-  /* 循环体水位在 __iter 之上、元素绑定之下；体克隆期间深 return/
+  /* 循环体水位在 $iter 之上、元素绑定之下；体克隆期间深 return/
      break/continue 经块通道展开（§4.17.3）。 */
   size_t saved_loop_mark = env->unwind_loop_mark;
   env->unwind_loop_mark = vec_get_size(env->unwind);
@@ -970,17 +970,17 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   /* for 槽序 INIT/CONDITION/UPDATE/BODY。 */
   node_t *loop = create_stmt_for_node(env->out);
   node_set_location(loop, loc);
-  node_set_child(loop, CLUX_STMT_FOR_INIT, NULL); /* __i 在块首声明 */
+  node_set_child(loop, CLUX_STMT_FOR_INIT, NULL); /* $i 在块首声明 */
   node_set_child(loop, CLUX_STMT_FOR_CONDITION, cond);
   node_set_child(loop, CLUX_STMT_FOR_UPDATE, step);
   node_set_child(loop, CLUX_STMT_FOR_BODY, body_block);
-  /* 外层块：{ var __iter: T? = ...; var __i = 0; for (...); } */
+  /* 外层块：{ var $iter: T? = ...; var $i = 0; for (...); } */
   node_t *block = create_stmt_block_node(env->out);
   node_set_location(block, loc);
   node_add_child(block, iter_var);
   node_add_child(block, idx_var);
   node_add_child(block, loop);
-  /* §4.17 loop 出口析构 __iter（正常退出/break 均落到该语句；深 return
+  /* §4.17 loop 出口析构 $iter（正常退出/break 均落到该语句；深 return
      由 unwind 链在 return 前插调用）。 */
   if (iter_ref) {
     node_add_child(block, sema_defer_call(iter_ref, env));

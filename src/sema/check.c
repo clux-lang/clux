@@ -300,7 +300,24 @@ static clux_value_t *check_literal_value(clux_sema_t *sema, node_t *node) {
      ambiguous 通道报过，check 不重复报。
    - 命中 global 内建类型名（TYPE kind 值）：报 "cannot shadow builtin
      type"，仍继续登记（外层名字允许遮蔽，遮蔽本身合法只是要提示）。
+   - §1.3 三分法：'$' 为编译器保留（$ 前缀合成符号 / $ 中缀连接符；
+     lexer 禁 '$' 首字符故合成名用户不可写出）。用户声明名含 '$' 报
+     "reserved for compiler-generated symbols" 并引导改名，仍继续
+     登记（防级联）。物化实例体豁免——名字即实例名 List$i32（与
+     sema_instance_body_t.name 对位），体内源码代换名不含 '$' 照常
+     受检。
    返回 1 = 允许登记（*name_out 由调用方释放），0 = 跳过。 */
+static int check_is_instance_name(clux_sema_t *sema, const char *name) {
+  for (size_t idx = 0; idx < vec_get_size(sema->instance_bodies); idx++) {
+    const char *inst =
+        ((sema_instance_body_t *)vec_get(sema->instance_bodies, idx))->name;
+    if (inst && strcmp(inst, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int check_define_gate(clux_sema_t *sema,
                              node_t *name_node,
                              int dup_diag,
@@ -313,6 +330,14 @@ static int check_define_gate(clux_sema_t *sema,
   char *name = check_name_of(allocator, name_node);
   if (!name) {
     return 0;
+  }
+  if (strchr(name, '$') && !check_is_instance_name(sema, name)) {
+    clux_context_diag(ctx,
+                      CLUX_DIAG_ERROR,
+                      node_get_location(name_node),
+                      "declaration name '%s' contains '$', which is reserved "
+                      "for compiler-generated symbols; rename without '$'",
+                      name);
   }
   clux_scope_t *scope = clux_context_get_scope(ctx);
   if (clux_scope_defined_here(scope, name)) {
@@ -1890,7 +1915,7 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
        类型兼容性走 safe_cast 判定（与赋值同通道）。 */
     clux_value_t *iterable =
         check_expr_checked(sema, stmt_foreach_node_get_iterable(stmt));
-    /* 类型结果表锚点：iterable 节点（脱糖 __iter 提升的类型回填）。 */
+    /* 类型结果表锚点：iterable 节点（脱糖 $iter 提升的类型回填）。 */
     sema_record_node_type(sema,
                           stmt_foreach_node_get_iterable(stmt),
                           iterable ? clux_value_get_type(iterable) : NULL);
@@ -2803,9 +2828,7 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
       /* 类型结果表锚点：方法调用产出类型（§4.17 P3 临时根判定，
          与下方 call_done 处的普通调用同规则）。 */
       if (member_result && !check_is_real_error(member_result)) {
-        sema_record_node_type(sema,
-                              node,
-                              check_value_bind_type(member_result));
+        sema_record_node_type(sema, node, check_value_bind_type(member_result));
       }
       return member_result;
     }

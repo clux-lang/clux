@@ -9,7 +9,7 @@
      隔离外层 pending），$dispose$T($tmp.&) 逆序追加语句后，随后 drain。
    - 槽直通（lift_skip_top）：var/return 的 VALUE 槽顶层单一临时根不
      捕获——var 直接 bind（避免 __init_copy__ 二次拷贝）、return 所有权
-     随值转移；foreach iterable 由脱糖直连 __iter。槽位在 children 循环
+     随值转移；foreach iterable 由脱糖直连 $iter。槽位在 children 循环
      按 idx 结构化识别消费（clone.c），嵌套子树照常捕获。
    - return 槽 $ret 物化：捕获非空时 return 表达式引用 $tmp，直接
      [析构][return] 会 use-after-dispose——先物化 var $ret$N: T =

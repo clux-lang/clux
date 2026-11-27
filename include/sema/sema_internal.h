@@ -29,7 +29,7 @@ struct _clux_sema_t {
                                  例体时创建），物化体的新造名 location 借
                                  其缓冲——与产物借 parser 源码缓冲同构：
                                  调用方先消费产物后销毁 sema */
-  size_t inst_defer_counter; /* 物化循环已消耗的 __deferN 计数（§2.3
+  size_t inst_defer_counter; /* 物化循环已消耗的 $defer$N 计数（§2.3
                                  P11）：emit env 初始化后预置起点，防物化
                                  体固化名与 emit 主循环产物撞模块级名 */
   vec_t *const_defs;   /* sema_const_def_t*，顶层 comptime 常量表（§2.1） */
@@ -248,7 +248,7 @@ sema_render_strip_suffix(const char *text, size_t len, size_t *num_len);
      LIFO 调用；STMT_FOREACH → 索引 for；STMT_COMPTIME_FOREACH（ITERABLE
      为 EXPR_TUPLE）→ 按元素逐份展开并替换迭代变量引用
      （subst_name/subst_src 是展开期的临时替换态，由展开函数进出配对置位）；
-   - defer_counter：__deferN 编号，emit 全程单调递增保证模块内唯一；
+   - defer_counter：$defer$N 编号，emit 全程单调递增保证模块内唯一；
    - lift_temps/counter/skip_top（§4.17 P3 临时值析构，lift.c）：
      克隆体语句槽内的 disposable 临时根（CALL/CONSTRUCT，类型经
      sema_get_node_type 查 §8.5 结果表）捕获为隐藏 var $tmp$N 提升到
@@ -274,7 +274,7 @@ typedef struct {
                             指针命中该文本池（sema->inst_program）时重
                             intern 进目标 program——产物新造文本不得借用
                             sema 生命周期，可 NULL */
-  size_t defer_counter; /* __deferN 编号 */
+  size_t defer_counter; /* $defer$N 编号 */
   vec_t *disposes; /* §4.17 收集表（sema_dispose_type_t*，emit 持有），
                            NULL=RAII 通道关闭（登记/脱糖全部静默） */
   clux_sema_t *sema; /* 借用：walk 主体（§8.5 类型结果表查询），可 NULL */
@@ -291,14 +291,14 @@ typedef struct {
   size_t unwind_func_mark; /* 函数体边界水位：return unwind 的底。 */
   size_t unwind_loop_mark; /* 最近循环体边界水位：break/continue unwind
                               的底（循环体克隆期由循环通道设置，foreach
-                              元素绑定登记在水位之上、__iter 之下）。 */
+                              元素绑定登记在水位之上、$iter 之下）。 */
 } sema_clone_env_t;
 
 /* §4.17.3 unwind 登记项（如上）。type 为析构形态登记的绑定类型（借用
    引擎类型表，defer 形态 NULL）——return 值引用链上待析构绑定时 $ret
    物化的类型反查数据源。 */
 typedef struct {
-  const char *name; /* __deferN 或 $dispose$T（intern 文本） */
+  const char *name; /* $defer$N 或 $dispose$T（intern 文本） */
   const location_t *loc;
   int dispose;          /* 1=析构调用形态：追加实参 var_name.& */
   const char *var_name; /* dispose 目标变量名（intern 文本） */
@@ -401,7 +401,7 @@ sema_lift_capture(sema_clone_env_t *env, clux_type_t *type, node_t *cloned);
 /* 语句槽判定（§4.17.5 v1 槽表）：STMT_EXPR / STMT_IF / STMT_SWITCH /
    STMT_ASSERT / STMT_RETURN / STMT_VAR / STMT_FOREACH——其中
    VAR/RETURN/FOREACH 槽 lift_skip_top 置位（顶层单一临时根直通：var
-   直接 bind、return 所有权随值转移、foreach iterable 绑入 __iter）。 */
+   直接 bind、return 所有权随值转移、foreach iterable 绑入 $iter）。 */
 int sema_lift_slot_applies(node_t *stmt);
 
 /* 出口 flush 原语（clone.c 块通道组合）：base 为语句槽基线（嵌套块

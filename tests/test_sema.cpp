@@ -954,8 +954,8 @@ TEST(SemaTest, UnevaluableComptimeIfConditionIsDiagnosed) {
   delete_allocator(&a);
 }
 
-/* defer 脱糖：定义点换 var __deferN = 匿名闭包（(): void { body }），
-   块尾追加 __deferN(); 调用（STMT_EXPR 包 EXPR_CALL）。 */
+/* defer 脱糖：定义点换 var $defer$N = 匿名闭包（(): void { body }），
+   块尾追加 $defer$N(); 调用（STMT_EXPR 包 EXPR_CALL）。 */
 TEST(SemaTest, DeferDesugarsToClosureAndTailCall) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -982,7 +982,7 @@ TEST(SemaTest, DeferDesugarsToClosureAndTailCall) {
   node_t *defer_var = body_nth_stmt(body, 0);
   ASSERT_EQ(node_get_kind(defer_var), CLUX_NODE_STMT_VAR);
   char *text = node_text(a, stmt_var_node_get_name(defer_var));
-  EXPECT_STREQ(text, "__defer0");
+  EXPECT_STREQ(text, "$defer$0");
   allocator_free(a, (void **)&text);
   node_t *fn = stmt_var_node_get_value(defer_var);
   ASSERT_NE(fn, nullptr);
@@ -1006,12 +1006,12 @@ TEST(SemaTest, DeferDesugarsToClosureAndTailCall) {
   text = node_text(a, stmt_var_node_get_name(x_var));
   EXPECT_STREQ(text, "x");
   allocator_free(a, (void **)&text);
-  /* 尾部：__defer0(); 调用。 */
+  /* 尾部：$defer$0(); 调用。 */
   node_t *tail = body_nth_stmt(body, 2);
   ASSERT_EQ(node_get_kind(tail), CLUX_NODE_STMT_EXPR);
   text = call_stmt_callee_text(a, tail);
   ASSERT_NE(text, nullptr);
-  EXPECT_STREQ(text, "__defer0");
+  EXPECT_STREQ(text, "$defer$0");
   allocator_free(a, (void **)&text);
   dispose_programs(programs);
   sema_destroy(&sema);
@@ -1021,7 +1021,7 @@ TEST(SemaTest, DeferDesugarsToClosureAndTailCall) {
   delete_allocator(&a);
 }
 
-/* 双 defer 的 LIFO：先 __defer1(); 再 __defer0();；语句流中直接子级
+/* 双 defer 的 LIFO：先 $defer$1(); 再 $defer$0();；语句流中直接子级
    return 前同样逆序插入调用。 */
 TEST(SemaTest, DeferLifoOrderAndReturnPreCalls) {
   allocator_t *a = create_allocator(malloc, free);
@@ -1048,21 +1048,21 @@ TEST(SemaTest, DeferLifoOrderAndReturnPreCalls) {
   /* 闭包 var ×2 + return 前调用 ×2 + return。 */
   ASSERT_EQ(body_stmt_count(body), 5u);
   char *text = node_text(a, stmt_var_node_get_name(body_nth_stmt(body, 0)));
-  EXPECT_STREQ(text, "__defer0");
+  EXPECT_STREQ(text, "$defer$0");
   allocator_free(a, (void **)&text);
   text = node_text(a, stmt_var_node_get_name(body_nth_stmt(body, 1)));
-  EXPECT_STREQ(text, "__defer1");
+  EXPECT_STREQ(text, "$defer$1");
   allocator_free(a, (void **)&text);
-  /* LIFO：return 前先调 __defer1 再调 __defer0。 */
+  /* LIFO：return 前先调 $defer$1 再调 $defer$0。 */
   node_t *call1 = body_nth_stmt(body, 2);
   ASSERT_EQ(node_get_kind(call1), CLUX_NODE_STMT_EXPR);
   text = call_stmt_callee_text(a, call1);
-  EXPECT_STREQ(text, "__defer1");
+  EXPECT_STREQ(text, "$defer$1");
   allocator_free(a, (void **)&text);
   node_t *call0 = body_nth_stmt(body, 3);
   ASSERT_EQ(node_get_kind(call0), CLUX_NODE_STMT_EXPR);
   text = call_stmt_callee_text(a, call0);
-  EXPECT_STREQ(text, "__defer0");
+  EXPECT_STREQ(text, "$defer$0");
   allocator_free(a, (void **)&text);
   EXPECT_EQ(node_get_kind(body_nth_stmt(body, 4)), CLUX_NODE_STMT_RETURN);
   dispose_programs(programs);
@@ -1073,9 +1073,9 @@ TEST(SemaTest, DeferLifoOrderAndReturnPreCalls) {
   delete_allocator(&a);
 }
 
-/* foreach 脱糖（§2.7）：{ var __iter = items; var __i: i32 = 0i32;
-   for (; __i < #len(__iter); __i = __i + 1) { var x = __iter[__i]; <body>; } }
-   iterable 提升为 __iter 只求值一次；var 形态每轮重新定义迭代变量。 */
+/* foreach 脱糖（§2.7）：{ var $iter = items; var $i: i32 = 0i32;
+   for (; $i < #len($iter); $i = $i + 1) { var x = $iter[$i]; <body>; } }
+   iterable 提升为 $iter 只求值一次；var 形态每轮重新定义迭代变量。 */
 TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -1102,20 +1102,20 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   node_t *wrap = body_nth_stmt(body, 0);
   ASSERT_EQ(node_get_kind(wrap), CLUX_NODE_STMT_BLOCK);
   ASSERT_EQ(body_stmt_count(wrap), 3u);
-  /* var __iter = items;（iterable 求值一次；类型从 iterable 锚点渲染）。 */
+  /* var $iter = items;（iterable 求值一次；类型从 iterable 锚点渲染）。 */
   node_t *iter_var = body_nth_stmt(wrap, 0);
   ASSERT_EQ(node_get_kind(iter_var), CLUX_NODE_STMT_VAR);
   char *text = node_text(a, stmt_var_node_get_name(iter_var));
-  EXPECT_STREQ(text, "__iter");
+  EXPECT_STREQ(text, "$iter");
   allocator_free(a, (void **)&text);
   text = node_text(a, stmt_var_node_get_value(iter_var));
   EXPECT_STREQ(text, "items");
   allocator_free(a, (void **)&text);
-  /* var __i = 0（§2.8 联动回填 i32）。 */
+  /* var $i = 0（§2.8 联动回填 i32）。 */
   node_t *idx_var = body_nth_stmt(wrap, 1);
   ASSERT_EQ(node_get_kind(idx_var), CLUX_NODE_STMT_VAR);
   text = node_text(a, stmt_var_node_get_name(idx_var));
-  EXPECT_STREQ(text, "__i");
+  EXPECT_STREQ(text, "$i");
   allocator_free(a, (void **)&text);
   text = node_text(a, stmt_var_node_get_value(idx_var));
   EXPECT_STREQ(text, "0i32");
@@ -1123,8 +1123,8 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   text = node_text(a, stmt_var_node_get_type(idx_var));
   EXPECT_STREQ(text, "i32");
   allocator_free(a, (void **)&text);
-  /* for：INIT NULL、COND 为 __i < #len(__iter)、UPDATE 为
-     __i = __i + 1、BODY 含 item var（__iter[__i]）。 */
+  /* for：INIT NULL、COND 为 $i < #len($iter)、UPDATE 为
+     $i = $i + 1、BODY 含 item var（$iter[$i]）。 */
   node_t *loop = body_nth_stmt(wrap, 2);
   ASSERT_EQ(node_get_kind(loop), CLUX_NODE_STMT_FOR);
   EXPECT_EQ(stmt_for_node_get_init(loop), nullptr);
@@ -1132,7 +1132,7 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   ASSERT_NE(cond, nullptr);
   EXPECT_EQ(node_get_kind(cond), CLUX_NODE_EXPR_BINARY);
   text = node_text(a, node_get_child(cond, 0));
-  EXPECT_STREQ(text, "__i");
+  EXPECT_STREQ(text, "$i");
   allocator_free(a, (void **)&text);
   text = node_text(a, node_get_child(cond, 1));
   EXPECT_STREQ(text, "<");
@@ -1145,13 +1145,13 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   allocator_free(a, (void **)&text);
   ASSERT_EQ(builtin_node_get_arg_count(len), 1u);
   text = node_text(a, builtin_node_get_arg(len, 0));
-  EXPECT_STREQ(text, "__iter");
+  EXPECT_STREQ(text, "$iter");
   allocator_free(a, (void **)&text);
   node_t *update = stmt_for_node_get_update(loop);
   ASSERT_NE(update, nullptr);
   EXPECT_EQ(node_get_kind(update), CLUX_NODE_EXPR_ASSIGN);
   text = node_text(a, assign_node_get_left(update));
-  EXPECT_STREQ(text, "__i");
+  EXPECT_STREQ(text, "$i");
   allocator_free(a, (void **)&text);
   node_t *step = assign_node_get_value(update);
   ASSERT_NE(step, nullptr);
@@ -1162,7 +1162,7 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   text = node_text(a, node_get_child(step, 2));
   EXPECT_STREQ(text, "1");
   allocator_free(a, (void **)&text);
-  /* 循环体：var x = __iter[__i]; + 原 body 块。 */
+  /* 循环体：var x = $iter[$i]; + 原 body 块。 */
   node_t *loop_body = stmt_for_node_get_body(loop);
   ASSERT_NE(loop_body, nullptr);
   EXPECT_EQ(node_get_kind(loop_body), CLUX_NODE_STMT_BLOCK);
@@ -1176,10 +1176,10 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   ASSERT_NE(index, nullptr);
   EXPECT_EQ(node_get_kind(index), CLUX_NODE_EXPR_SUBSCRIPT);
   text = node_text(a, subscript_node_get_base(index));
-  EXPECT_STREQ(text, "__iter");
+  EXPECT_STREQ(text, "$iter");
   allocator_free(a, (void **)&text);
   text = node_text(a, subscript_node_get_arg(index, 0));
-  EXPECT_STREQ(text, "__i");
+  EXPECT_STREQ(text, "$i");
   allocator_free(a, (void **)&text);
   node_t *inner_body = body_nth_stmt(loop_body, 1);
   ASSERT_EQ(node_get_kind(inner_body), CLUX_NODE_STMT_BLOCK);
@@ -2001,12 +2001,14 @@ TEST(SemaTest, DeferDesugarsToClosureAndTailCallAsNormalizedText) {
                    "  var x = 2;\n"
                    "}\n",
                    "func f(): void {\n"
-                   "  var __defer0: func () -> void = func (): void {\n"
+                   "  var $defer$0: func () -> void = func (): void {\n"
                    "    var t: i32 = 1i32;\n"
                    "  };\n"
                    "  var x: i32 = 2i32;\n"
-                   "  __defer0();\n"
-                   "}\n");
+                   "  $defer$0();\n"
+                   "}\n",
+                   /* 合成名 '$' 前缀（lexer 不收首字符）→ round-trip 跳过。 */
+                   false);
 }
 
 /* RAII §4.17 P1：局部 disposable var 在块尾插入 $dispose$T(x.&)，
@@ -2049,12 +2051,12 @@ TEST(SemaTest, RaiiDeferDisposeLifoInterleaveAsNormalizedText) {
                    "  v: i32;\n"
                    "}\n"
                    "func f(): void {\n"
-                   "  var __defer0: func () -> void = func (): void {\n"
+                   "  var $defer$0: func () -> void = func (): void {\n"
                    "    var t: i32 = 1i32;\n"
                    "  };\n"
                    "  var x: Res = .Res{v = 1};\n"
                    "  $dispose$Res(x.&);\n"
-                   "  __defer0();\n"
+                   "  $defer$0();\n"
                    "}\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
@@ -2141,6 +2143,39 @@ TEST(SemaTest, RaiiRejectsModuleLevelDisposableVarAndCunionField) {
                    "never disposed"),
             nullptr);
   delete_string(&text);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* §1.3 三分法：'$' 为编译器保留（$ 前缀合成符号 / $ 中缀连接符）。
+   用户声明名含 '$' 报 ERROR 并引导改名（报错后照常登记防级联）；
+   物化实例名（List$i32 等）为编译器产物，豁免由既有泛型测试覆盖。 */
+TEST(SemaTest, DollarReservedRejectsUserDeclaredNames) {
+  const char *src = "var foo$bar: i32 = 1;\n"
+                    "func f$x(): void { return; }\n"
+                    "func g(): void { var y$z: i32 = 2; }\n";
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, src);
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  EXPECT_EQ(clux_context_diag_count(ctx), 3u);
+  for (size_t idx = 0; idx < clux_context_diag_count(ctx); idx++) {
+    const clux_diag_t *diag = clux_context_get_diag(ctx, idx);
+    EXPECT_EQ(clux_diag_get_level(diag), CLUX_DIAG_ERROR);
+    string_t *text = clux_diag_to_string((clux_diag_t *)diag, a);
+    EXPECT_NE(strstr(string_get_data(text),
+                     "contains '$', which is reserved for "
+                     "compiler-generated symbols; rename without '$'"),
+              nullptr);
+    delete_string(&text);
+  }
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);
@@ -2687,9 +2722,9 @@ TEST(SemaTest, RaiiLoopLowerDoWhileContinue) {
                    false);
 }
 
-/* §4.17.5 P3：foreach iterable 所有权——iterable 顶层直通绑入 __iter
+/* §4.17.5 P3：foreach iterable 所有权——iterable 顶层直通绑入 $iter
    （copy 语义求值一次），iterable 类型 disposable 时循环出口追加
-   __iter 析构；元素 var 逐轮析构（P3 遗留2 收口：体尾追加 + 体内直接层
+   $iter 析构；元素 var 逐轮析构（P3 遗留2 收口：体尾追加 + 体内直接层
    continue/break 前插）。it 的初始化元组内嵌 CONSTRUCT 根照常捕获提升
    （var 槽 skip_top 只放行顶层），it 本体由 P1 作用域出口析构。 */
 TEST(SemaTest, RaiiForeachIterDispose) {
@@ -2712,15 +2747,15 @@ TEST(SemaTest, RaiiForeachIterDispose) {
                    "  $dispose$Res($tmp$1.&);\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  {\n"
-                   "    var __iter: [2]Res = it;\n"
-                   "    var __i: i32 = 0i32;\n"
-                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
-                   "      var x: Res = __iter[__i];\n"
+                   "    var $iter: [2]Res = it;\n"
+                   "    var $i: i32 = 0i32;\n"
+                   "    for (; $i < #len($iter); $i = $i + 1) {\n"
+                   "      var x: Res = $iter[$i];\n"
                    "      {\n"
                    "      }\n"
                    "      $dispose$Res(x.&);\n"
                    "    }\n"
-                   "    $dispose$$x5b2$x5dRes(__iter.&);\n"
+                   "    $dispose$$x5b2$x5dRes($iter.&);\n"
                    "  }\n"
                    "  $dispose$$x5b2$x5dRes(it.&);\n"
                    "}\n"
@@ -2770,10 +2805,10 @@ TEST(SemaTest, RaiiForeachItemDisposeAtExits) {
       "  $dispose$Res($tmp$1.&);\n"
       "  $dispose$Res($tmp$0.&);\n"
       "  {\n"
-      "    var __iter: [3]Res = it;\n"
-      "    var __i: i32 = 0i32;\n"
-      "    for (; __i < #len(__iter); __i = __i + 1) {\n"
-      "      var x: Res = __iter[__i];\n"
+      "    var $iter: [3]Res = it;\n"
+      "    var $i: i32 = 0i32;\n"
+      "    for (; $i < #len($iter); $i = $i + 1) {\n"
+      "      var x: Res = $iter[$i];\n"
       "      {\n"
       "        if (x.v == 2) {\n"
       "          $dispose$Res(x.&);\n"
@@ -2786,7 +2821,7 @@ TEST(SemaTest, RaiiForeachItemDisposeAtExits) {
       "      }\n"
       "      $dispose$Res(x.&);\n"
       "    }\n"
-      "    $dispose$$x5b3$x5dRes(__iter.&);\n"
+      "    $dispose$$x5b3$x5dRes($iter.&);\n"
       "  }\n"
       "  $dispose$$x5b3$x5dRes(it.&);\n"
       "}\n"
@@ -2805,8 +2840,8 @@ TEST(SemaTest, RaiiForeachItemDisposeAtExits) {
 }
 
 /* §4.17.3：深 return 穿 foreach 体——臂内 return 沿 unwind 全链 LIFO
-   展开：元素 x → __iter → 函数体块登记的 it（v1 只展开臂内直接链，
-   __iter/it 会漏）。 */
+   展开：元素 x → $iter → 函数体块登记的 it（v1 只展开臂内直接链，
+   $iter/it 会漏）。 */
 TEST(SemaTest, RaiiForeachDeepReturnUnwindsFullChain) {
   expect_sema_text("struct Res {\n"
                    "  v: i32;\n"
@@ -2830,21 +2865,21 @@ TEST(SemaTest, RaiiForeachDeepReturnUnwindsFullChain) {
                    "  $dispose$Res($tmp$1.&);\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  {\n"
-                   "    var __iter: [2]Res = it;\n"
-                   "    var __i: i32 = 0i32;\n"
-                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
-                   "      var x: Res = __iter[__i];\n"
+                   "    var $iter: [2]Res = it;\n"
+                   "    var $i: i32 = 0i32;\n"
+                   "    for (; $i < #len($iter); $i = $i + 1) {\n"
+                   "      var x: Res = $iter[$i];\n"
                    "      {\n"
                    "        if (x.v == 1) {\n"
                    "          $dispose$Res(x.&);\n"
-                   "          $dispose$$x5b2$x5dRes(__iter.&);\n"
+                   "          $dispose$$x5b2$x5dRes($iter.&);\n"
                    "          $dispose$$x5b2$x5dRes(it.&);\n"
                    "          return;\n"
                    "        }\n"
                    "      }\n"
                    "      $dispose$Res(x.&);\n"
                    "    }\n"
-                   "    $dispose$$x5b2$x5dRes(__iter.&);\n"
+                   "    $dispose$$x5b2$x5dRes($iter.&);\n"
                    "  }\n"
                    "  $dispose$$x5b2$x5dRes(it.&);\n"
                    "}\n"
@@ -2863,7 +2898,7 @@ TEST(SemaTest, RaiiForeachDeepReturnUnwindsFullChain) {
 }
 
 /* §4.17.3：循环体内 disposable var 的 break 前析构——break 的 unwind
-   底是循环体水位：体内登记项 g 与元素 x 展开，__iter 不触发（出循环
+   底是循环体水位：体内登记项 g 与元素 x 展开，$iter 不触发（出循环
    后落到块尾显式析构）。v1 该场景 g 直接漏析构。 */
 TEST(SemaTest, RaiiLoopBodyVarDisposeAtBreak) {
   expect_sema_text("struct Res {\n"
@@ -2887,10 +2922,10 @@ TEST(SemaTest, RaiiLoopBodyVarDisposeAtBreak) {
                    "  $dispose$Res($tmp$1.&);\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  {\n"
-                   "    var __iter: [2]Res = it;\n"
-                   "    var __i: i32 = 0i32;\n"
-                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
-                   "      var x: Res = __iter[__i];\n"
+                   "    var $iter: [2]Res = it;\n"
+                   "    var $i: i32 = 0i32;\n"
+                   "    for (; $i < #len($iter); $i = $i + 1) {\n"
+                   "      var x: Res = $iter[$i];\n"
                    "      {\n"
                    "        var g: Res = .Res{v = 0};\n"
                    "        $dispose$Res(g.&);\n"
@@ -2899,7 +2934,7 @@ TEST(SemaTest, RaiiLoopBodyVarDisposeAtBreak) {
                    "      }\n"
                    "      $dispose$Res(x.&);\n"
                    "    }\n"
-                   "    $dispose$$x5b2$x5dRes(__iter.&);\n"
+                   "    $dispose$$x5b2$x5dRes($iter.&);\n"
                    "  }\n"
                    "  $dispose$$x5b2$x5dRes(it.&);\n"
                    "}\n"
@@ -2993,20 +3028,22 @@ TEST(SemaTest, ForeachDesugarsToIndexedForAsNormalizedText) {
                    "var items: [3]i32 = <0, 0, 0>;\n"
                    "func f(): void {\n"
                    "  {\n"
-                   "    var __iter: [3]i32 = items;\n"
-                   "    var __i: i32 = 0i32;\n"
-                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
-                   "      var x: i32 = __iter[__i];\n"
+                   "    var $iter: [3]i32 = items;\n"
+                   "    var $i: i32 = 0i32;\n"
+                   "    for (; $i < #len($iter); $i = $i + 1) {\n"
+                   "      var x: i32 = $iter[$i];\n"
                    "      {\n"
                    "        var y: i32 = x;\n"
                    "      }\n"
                    "    }\n"
                    "  }\n"
-                   "}\n");
+                   "}\n",
+                   /* 合成名 '$' 前缀（lexer 不收首字符）→ round-trip 跳过。 */
+                   false);
 }
 
 /* foreach 裸名形态（§4.9/§2.7）：前提 x 已在外层定义，脱糖为每轮
-   赋值既有绑定（x = __iter[__i]），而非重新定义。 */
+   赋值既有绑定（x = $iter[$i]），而非重新定义。 */
 TEST(SemaTest, ForeachBareNameAssignsToExistingBindingAsNormalizedText) {
   expect_sema_text("var items: [3]i32 = <0, 0, 0>;\n"
                    "func f(): void {\n"
@@ -3017,19 +3054,21 @@ TEST(SemaTest, ForeachBareNameAssignsToExistingBindingAsNormalizedText) {
                    "func f(): void {\n"
                    "  var x: i32 = 0i32;\n"
                    "  {\n"
-                   "    var __iter: [3]i32 = items;\n"
-                   "    var __i: i32 = 0i32;\n"
-                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
-                   "      x = __iter[__i];\n"
+                   "    var $iter: [3]i32 = items;\n"
+                   "    var $i: i32 = 0i32;\n"
+                   "    for (; $i < #len($iter); $i = $i + 1) {\n"
+                   "      x = $iter[$i];\n"
                    "      {\n"
                    "        var y: i32 = x;\n"
                    "      }\n"
                    "    }\n"
                    "  }\n"
-                   "}\n");
+                   "}\n",
+                   /* 合成名 '$' 前缀（lexer 不收首字符）→ round-trip 跳过。 */
+                   false);
 }
 
-/* call 形态 iterable 单次求值：脱糖后 #len 与下标的 base 都是 __iter，
+/* call 形态 iterable 单次求值：脱糖后 #len 与下标的 base 都是 $iter，
    不再出现两份 call 求值（2N 次调用回归）。 */
 TEST(SemaTest, ForeachCallIterableEvaluatesOnceAsNormalizedText) {
   expect_sema_text("func make(): [2]i32 { return <1, 2>; }\n"
@@ -3041,15 +3080,17 @@ TEST(SemaTest, ForeachCallIterableEvaluatesOnceAsNormalizedText) {
                    "}\n"
                    "func f(): void {\n"
                    "  {\n"
-                   "    var __iter: [2]i32 = make();\n"
-                   "    var __i: i32 = 0i32;\n"
-                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
-                   "      var x: i32 = __iter[__i];\n"
+                   "    var $iter: [2]i32 = make();\n"
+                   "    var $i: i32 = 0i32;\n"
+                   "    for (; $i < #len($iter); $i = $i + 1) {\n"
+                   "      var x: i32 = $iter[$i];\n"
                    "      {\n"
                    "      }\n"
                    "    }\n"
                    "  }\n"
-                   "}\n");
+                   "}\n",
+                   /* 合成名 '$' 前缀（lexer 不收首字符）→ round-trip 跳过。 */
+                   false);
 }
 
 TEST(SemaTest, ComptimeForeachExpandsTupleWithSubstitutionAsNormalizedText) {

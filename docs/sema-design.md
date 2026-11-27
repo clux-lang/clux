@@ -79,7 +79,7 @@ var a: Test[i32, i32] = .{};   →   var a: Test$i32$i32 = .{};
   文本重 intern 进产物 program（reown_from 通道），产物新造文本自持
   不借 sema 生命周期（§5-2 引擎全灭后仍可序列化）。defer_counter
   在物化循环与 emit 间连续（物化消耗记入 `inst_defer_counter`，
-  emit 预置起点），防 `__deferN` 撞名。物化失败条目（防御态 NULL）
+  emit 预置起点），防 `$defer$N` 撞名。物化失败条目（防御态 NULL）
   检查与 emit 均跳过。
 - 实例化发生在**使用它的模块**内；实例名在本模块 program 内唯一即可
   （不同模块各自实例化同名实例互不冲突，分属各自 program）。
@@ -97,10 +97,10 @@ STMT_DEFER 从树中收集，在作用域退出点（块尾 / return / break / c
 
 ```
 defer |(h = handle)| { close(h); }
-→  var __defer0 = |h| { close(h); }(handle);   /* 捕获即拷贝 */
+→  var $defer$0 = |h| { close(h); }(handle);   /* 捕获即拷贝 */
 ```
 
-退出点插入 `__defer0();`。
+退出点插入 `$defer$0();`。
 
 ### 2.5 comptime if 剪枝
 
@@ -115,16 +115,16 @@ else-if 链递归处理。条件不可求值是硬错误。
 ### 2.7 foreach 脱糖（普通形态）
 
 普通 foreach 脱糖为索引 for 循环，让 compiler 不必实现 foreach；iterable
-提升为隐藏 var `__iter`（类型从 check 侧 iterable 节点锚点显式渲染），
-`#len` 与下标引用 `__iter`，全循环只求值一次：
+提升为隐藏 var `$iter`（类型从 check 侧 iterable 节点锚点显式渲染），
+`#len` 与下标引用 `$iter`，全循环只求值一次：
 
 ```
 foreach (var item of items) { ... }
 →  {
-      var __iter: [3]i32 = items;
-      var __i = 0;
-      for (; __i < #len(__iter); __i = __i + 1) {
-          var item = __iter[__i];
+      var $iter: [3]i32 = items;
+      var $i = 0;
+      for (; $i < #len($iter); $i = $i + 1) {
+          var item = $iter[$i];
           ...
       }
   }
@@ -134,7 +134,7 @@ foreach (var item of items) { ... }
   `#len` 与下标是现有语言能力，零新构造。
 - `var` 与裸名是两种语义（白皮书 §4.9）：`var` 每轮重新定义迭代变量；
   裸名前提是名字已在外层定义，循环体首句脱糖为赋值
-  `item = __iter[__i];`（check 侧解析既有绑定并走 safe_cast 判定，
+  `item = $iter[$i];`（check 侧解析既有绑定并走 safe_cast 判定，
   exec 侧 assign 既有绑定），每轮给既有绑定赋值。
 
 ### 2.8 推断显式化归一
@@ -453,7 +453,7 @@ sema_create(ctx, out_allocator)
   类型对象归 context）。其余表达式的类型只是演算中间态，不入表。
 - emit 侧消费：克隆器的 STMT_VAR 后处理（`sema_clone_var_fixup`）
   在 TYPE 槽为 NULL 时查表回填渲染类型名——正是 Phase 6 遗留的
-  `r / z / q / __defer0` 缺口的解法。
+  `r / z / q / $defer$0` 缺口的解法。
 - 渲染用**mangled 名**（实例名 / 提升名 / 合成名，与 §3 一致）：
   检查期消费原名，产物期渲染产物名，两侧职责分离。
 - §5-4 语言子集断言中 STMT_VAR TYPE 槽断言随之**收紧为无条件**

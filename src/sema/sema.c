@@ -1180,13 +1180,13 @@ vec_t *sema_emit(clux_sema_t *sema) {
   size_t hoist_total = vec_get_size(sema->hoists);
   /* 克隆器通道环境：instants/consts/prunes 整个 walk 期收集表一次注入；
      renames/skip 按 stmt 覆写；defer_counter 跨 stmt 单调递增保证
-     __deferN 模块内唯一。 */
+     $defer$N 模块内唯一。 */
   sema_clone_env_t env;
   sema_clone_env_init(
       &env, out, program, sema->instants, sema->const_uses, sema->prunes, sema);
   env.anons = sema->anons;
   env.methods = sema->methods;
-  /* §2.3 P11：物化期已消耗若干 __deferN 编号（物化体闭包 var 固化名），
+  /* §2.3 P11：物化期已消耗若干 $defer$N 编号（物化体闭包 var 固化名），
      emit 主循环从物化已消耗值之后起计数，防模块内撞名。 */
   env.defer_counter = sema->inst_defer_counter;
   /* §4.17：disposable 类型收集表（emit 持有，克隆期命中即登记，
