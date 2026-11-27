@@ -1774,6 +1774,125 @@ TEST_F(ExecLiteralTest, PrefixUnsupportedOperatorError) {
   }
 }
 
+/* ---- exec_expr_binary：后缀一元（白皮书 §5.12/§5.13）x.& / x.* / x.! ---- */
+
+/* 场景: 后缀取址 x.& 与解引用 (x.&).* 往返
+   预期: x.& 产出 *i32 类型值（与引擎 get_ptr_type interning 恒等），
+         再经 .* 解引用取回 view，读出 42——view 与目标内存共享 */
+TEST_F(ExecLiteralTest, PostfixAddressOfAndDerefRoundTrip) {
+  clux_value_t *x = clux_context_create_i32(ctx, 42, "pf_x", NULL);
+  ASSERT_NE(x, nullptr);
+  clux_type_t *i32_type = clux_context_builtin_type(ctx, CLUX_TYPE_I32);
+
+  node_t *addr = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pf_x"),
+                                make_node(CLUX_NODE_SYMBOL, ".&"),
+                                NULL);
+  clux_value_t *ptr = exec_expr_binary(ctx, addr);
+  ASSERT_NE(ptr, nullptr);
+  EXPECT_FALSE(clux_value_is_error(ptr)) << error_message_of(ptr);
+  EXPECT_EQ(clux_value_get_type(ptr), clux_context_get_ptr_type(ctx, i32_type));
+  delete_node(&addr);
+
+  node_t *deref = make_binary_of(
+      a,
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pf_x"),
+                     make_node(CLUX_NODE_SYMBOL, ".&"),
+                     NULL),
+      make_node(CLUX_NODE_SYMBOL, ".*"),
+      NULL);
+  clux_value_t *value = exec_expr_binary(ctx, deref);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_value_get_type(value), i32_type);
+  EXPECT_EQ(read_i32(value), 42);
+  delete_node(&deref);
+}
+
+/* 场景: 后缀 .! 是 #take 的语法糖——#some(i32, 42) 经 .! 取载荷 view
+   预期: 结果类型为载荷 base i32，读回 42 */
+TEST_F(ExecLiteralTest, PostfixTakeOptionalPayload) {
+  node_t *some = make_builtin_of("some");
+  builtin_node_add_arg(some, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  builtin_node_add_arg(some, make_node(CLUX_NODE_LITERAL_NUMERIC, "42"));
+  node_t *node =
+      make_binary_of(a, some, make_node(CLUX_NODE_SYMBOL, ".!"), NULL);
+  clux_value_t *value = exec_expr_binary(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(value)) << error_message_of(value);
+  EXPECT_EQ(clux_value_get_type(value),
+            clux_context_builtin_type(ctx, CLUX_TYPE_I32));
+  EXPECT_EQ(read_i32(value), 42);
+  delete_node(&node);
+}
+
+/* 场景: .! 对 #none(i32) 断言取载荷
+   预期: none 是运行期 error——"cannot take a value from a none optional
+         of type '?i32'" */
+TEST_F(ExecLiteralTest, PostfixTakeOnNoneReportsError) {
+  node_t *none = make_builtin_of("none");
+  builtin_node_add_arg(none, make_node(CLUX_NODE_LITERAL_IDENTIFIER, "i32"));
+  node_t *node =
+      make_binary_of(a, none, make_node(CLUX_NODE_SYMBOL, ".!"), NULL);
+  clux_value_t *value = exec_expr_binary(ctx, node);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(value)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(value),
+               "cannot take a value from a none optional of type '?i32'");
+  delete_node(&node);
+}
+
+/* 场景: .! 对非 optional 操作数（i32 变量）
+   预期: 引擎 take 通道拒绝——"#take requires an optional value, got 'i32'" */
+TEST_F(ExecLiteralTest, PostfixTakeOnNonOptionalReportsError) {
+  clux_value_t *x = clux_context_create_i32(ctx, 1, "pf_t", NULL);
+  ASSERT_NE(x, nullptr);
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pf_t"),
+                                make_node(CLUX_NODE_SYMBOL, ".!"),
+                                NULL);
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "#take requires an optional value, got 'i32'");
+  delete_node(&node);
+}
+
+/* 场景: .* 对非指针操作数（i32 变量）
+   预期: 引擎 deref 通道拒绝——"type 'i32' does not support operator '*'" */
+TEST_F(ExecLiteralTest, PostfixDerefOnNonPointerReportsError) {
+  clux_value_t *x = clux_context_create_i32(ctx, 1, "pf_d", NULL);
+  ASSERT_NE(x, nullptr);
+  node_t *node = make_binary_of(a,
+                                make_node(CLUX_NODE_LITERAL_IDENTIFIER, "pf_d"),
+                                make_node(CLUX_NODE_SYMBOL, ".*"),
+                                NULL);
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result),
+               "type 'i32' does not support operator '*'");
+  delete_node(&node);
+}
+
+/* 场景: 后缀一元左操作数求值出错（超长数字字面量 .&）
+   预期: 左值经 exec_operand 求值，error 优先传播——
+         "numeric literal too long" */
+TEST_F(ExecLiteralTest, PostfixPropagatesOperandError) {
+  node_t *node =
+      make_binary_of(a,
+                     make_node(CLUX_NODE_LITERAL_NUMERIC, kTooLongNumeric),
+                     make_node(CLUX_NODE_SYMBOL, ".&"),
+                     NULL);
+  clux_value_t *result = exec_expr_binary(ctx, node);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(result), "numeric literal too long");
+  delete_node(&node);
+}
+
 /* 场景: && 短路——左值为 false、右值为超长数字（求值必错）
    预期: 不求值右值直接返回左值本身：result 即 scope 中的左值指针、
          类型 bool、值为 false，无 error */

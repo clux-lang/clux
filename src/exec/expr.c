@@ -432,6 +432,25 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
     }
     return clux_context_cast(ctx, left, type, op_loc);
   }
+  /* 后缀一元形态（白皮书 §5.12/§5.13）：x.& 取址、x.* 解引用读、
+     x.! 断言取 optional 载荷。操作数求值为值（view 与目标内存共享），
+     取址经 ref 对任意 view 成立；解引用/取载荷回 view，写路径
+     （p.* = v）由 assign 左值求值经此分支取 view 后写穿。`.?` 无
+     通道（result-like 专属），维持 unsupported。 */
+  if (!right_node && (location_is(op_loc, ".&") || location_is(op_loc, ".*") ||
+                      location_is(op_loc, ".!"))) {
+    clux_value_t *operand = exec_operand(ctx, left_node);
+    if (clux_value_is_error(operand)) {
+      return operand;
+    }
+    if (location_is(op_loc, ".&")) {
+      return clux_context_ref(ctx, operand, op_loc);
+    }
+    if (location_is(op_loc, ".*")) {
+      return clux_context_deref(ctx, operand, op_loc);
+    }
+    return clux_context_take(ctx, operand, op_loc);
+  }
   /* 成员访问 obj.field（白皮书 §3.5）：与下标同源的 view 语义——返回
      字段类型的读写双向 view（与实例内存共享，自带引用底色），读取直接
      用，写入由通用 assign 写穿 view，无读/写两分。分隔符与名字由

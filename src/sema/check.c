@@ -2508,6 +2508,22 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
       } else {
         result = check_cast_value(sema, value, right, node);
       }
+    } else if (right == NULL &&
+               (strcmp(op, ".&") == 0 || strcmp(op, ".*") == 0 ||
+                strcmp(op, ".!") == 0)) {
+      /* 后缀一元（§5.12/§5.13）：取址 / 解引用 / 断言取 optional 载荷。
+         引擎通道 shadow 感知——影子操作数产出对应类型影子、非法操作数
+         产真 error，与运行期执行语义同构。 */
+      clux_value_t *value = check_expr(sema, left);
+      if (check_is_real_error(value)) {
+        result = value;
+      } else if (strcmp(op, ".&") == 0) {
+        result = clux_context_ref(ctx, value, node_get_location(node));
+      } else if (strcmp(op, ".*") == 0) {
+        result = clux_context_deref(ctx, value, node_get_location(node));
+      } else {
+        result = clux_context_take(ctx, value, node_get_location(node));
+      }
     } else if (strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
       clux_value_t *lvalue = check_expr(sema, left);
       /* P10：短路右侧可能不执行——赋值不提升（读取照常检查）。 */
@@ -2708,6 +2724,7 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     /* §4.17 #dispose 单实参：实参演算类型登记进类型结果表——emit
        脱糖改写 $dispose$T 时按实参节点取 T。 */
     int is_dispose = 0;
+    clux_value_t *first = NULL;
     if (builtin_node_get_arg_count(node) == 1) {
       char *bname = check_name_of(allocator, builtin_node_get_name(node));
       is_dispose = bname && strcmp(bname, "dispose") == 0;
@@ -2718,12 +2735,46 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
       if (check_is_real_error(arg)) {
         return arg;
       }
+      if (idx == 0) {
+        first = arg;
+      }
       if (is_dispose && idx == 0) {
         sema_record_node_type(
             sema, builtin_node_get_arg(node, 0), check_value_bind_type(arg));
       }
     }
-    return NULL; /* 内建函数的类型规则 P9+ 按名字接入 */
+    /* §4.17 P1.5：optional 族内建的影子层类型规则（"P9+ 按名字接入"的
+       首批）——#some(T,v)/#none(T) 产 ?T 影子（载荷类型走类型求值通道，
+       arg0 是类型位置实体）；#take(?T)（`.!` 糖同通道）产载荷 T 影子、
+       #is_none 产 bool 影子，二者直接复用引擎 shadow 感知原语，非
+       optional 实参演算为真 error（消息与运行期同构）。RAII 合成体
+       $dispose$T(#take(self.*).&) 过检查通道依赖 #take 的影子产出，
+       缺失会被 DFA 误判 use before assignment。实参不可演算时按既有
+       占位策略降级 NULL，不硬报。 */
+    char *bname = check_name_of(allocator, builtin_node_get_name(node));
+    clux_value_t *result = NULL;
+    size_t argc = builtin_node_get_arg_count(node);
+    if (bname && strcmp(bname, "some") == 0 && argc == 2) {
+      clux_type_t *base =
+          check_type_eval(sema, builtin_node_get_arg(node, 0), 0);
+      if (base) {
+        result = clux_context_create_shadow_value(
+            ctx, clux_context_get_optional_type(ctx, base));
+      }
+    } else if (bname && strcmp(bname, "none") == 0 && argc == 1) {
+      clux_type_t *base =
+          check_type_eval(sema, builtin_node_get_arg(node, 0), 0);
+      if (base) {
+        result = clux_context_create_shadow_value(
+            ctx, clux_context_get_optional_type(ctx, base));
+      }
+    } else if (bname && strcmp(bname, "take") == 0 && argc == 1 && first) {
+      result = clux_context_take(ctx, first, node_get_location(node));
+    } else if (bname && strcmp(bname, "is_none") == 0 && argc == 1 && first) {
+      result = clux_context_is_none(ctx, first, node_get_location(node));
+    }
+    allocator_free(allocator, (void **)&bname);
+    return result;
   }
   case CLUX_NODE_EXPR_CONSTRUCT: {
     clux_type_t *type = check_type_eval(sema, construct_node_get_type(node), 1);

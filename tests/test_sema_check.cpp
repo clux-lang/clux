@@ -1055,6 +1055,101 @@ TEST(SemaCheckTest, GenericBodyErrorOnlyInBadInstance) {
   delete_allocator(&a);
 }
 
+/* ---- 后缀一元（§5.12/§5.13）x.& / x.* / x.! 的影子层推断 ---- */
+
+/* 后缀取址/解引用正测：x.& 推断 *i32、p.* 推断回 i32，全程零诊断
+   （P1 期间 x.& 曾被误报 use before assignment，此为修复固化）。 */
+TEST(SemaCheckTest, PostfixAddressOfDerefRoundTripChecksClean) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  var x: i32 = 1;\n"
+                           "  var p = x.&;\n"
+                           "  var y = p.*;\n"
+                           "  var z: i32 = y;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, "");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：x.& 的推断结果是 *i32——赋给 i32 目标报 safe_cast 不匹配。 */
+TEST(SemaCheckTest, PostfixAddressOfInfersPointerShadow) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  var x: i32 = 1;\n"
+                           "  var p = x.&;\n"
+                           "  var q: i32 = p;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "cannot safely cast '*i32' to 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 后缀 .! 是 #take 的语法糖：#some(i32, 5) 取载荷后推断为 i32。 */
+TEST(SemaCheckTest, PostfixTakeOptionalPayloadInfersBase) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  var o = #some(i32, 5);\n"
+                           "  var v = o.!;\n"
+                           "  var w: i32 = v;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 0u, -1, "");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负测：.! 对非 optional 操作数——引擎 take 通道拒绝并报语义化消息。 */
+TEST(SemaCheckTest, PostfixTakeOnNonOptionalIsReported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func f(): void {\n"
+                           "  var x: i32 = 1;\n"
+                           "  var v = x.!;\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  expect_diag_count(ctx, 1u, 0, "#take requires an optional value, got 'i32'");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 /* 泛型体内 DFA：use-before-assignment 经物化体在 walk 期暴露。 */
 TEST(SemaCheckTest, GenericBodyUseBeforeAssignmentIsReported) {
   allocator_t *a = create_allocator(malloc, free);
