@@ -28,6 +28,7 @@
 #include "parser/node_stmt_for.h"
 #include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_if.h"
+#include "parser/node_stmt_return.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_subscript.h"
 #include <stdio.h>
@@ -58,6 +59,7 @@ static node_t *sema_clone_instant(node_t *node, sema_clone_env_t *env) {
 }
 
 static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env);
+static node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env);
 
 /* ---- §2.3 实例体克隆态 ----
    instantiate 置位期间（emit 尾部克隆实例体）：
@@ -309,6 +311,28 @@ static node_t *sema_resolve_prune_stmt(node_t *stmt, sema_clone_env_t *env) {
 
 static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env);
 
+/* §4.17 P3 临时值捕获 guard：武装上下文（块级语句槽表达式位，
+   lift_active）命中 disposable 临时根（CALL/CONSTRUCT，§8.5 锚点）→
+   先克隆（子树解除武装：嵌套临时不捕获，防 $tmpN 初始化引用后捕获的
+   $tmpM 的 use-before-declare；其所有权本就随外层临时流动），再捕获
+   为 $tmp$N 替身；捕获失败（类型不可名/分配失败）原样保留（pre-P3
+   行为，泄漏但合法）。unarm 上下文与命中失败退化为通用克隆。 */
+static node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env) {
+  if (!env->lift_active || !sema_lift_is_root(node, env)) {
+    return sema_clone_impl(node, env);
+  }
+  clux_type_t *type = sema_get_node_type(env->sema, node);
+  int saved_active = env->lift_active;
+  env->lift_active = 0;
+  node_t *cloned = sema_clone_impl(node, env);
+  env->lift_active = saved_active;
+  if (!cloned) {
+    return NULL;
+  }
+  node_t *subst = sema_lift_capture(env, type, cloned);
+  return subst ? subst : cloned;
+}
+
 /* 退出点调用 __deferN(); / $dispose$T(x.); —— STMT_EXPR(EXPR_CALL)。
    dispose 形态实参为 x.&（左值零拷贝取址，析构函数按地址写目标）。 */
 static node_t *sema_defer_call(const sema_defer_ref_t *ref,
@@ -421,6 +445,11 @@ static void sema_expand_comptime_foreach_into(node_t *src,
 static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
   node_t *clone = create_stmt_block_node(env->out);
   node_set_location(clone, node_get_location(node));
+  /* §4.17 P3：块是槽武装的唯一权威——进入块即解除继承的武装（臂块/
+     闭包体/defer 体等表达式上下文内嵌块不自外层继承捕获权），逐子
+     语句由槽驱动重臂；退出恢复，保持 if 臂等表达式上下文的嵌套对称。 */
+  int saved_lift_active = env->lift_active;
+  env->lift_active = 0;
   vec_t *children = node_get_children(node);
   size_t count = vec_get_size(children);
   vec_t *deferred = create_vec(env->out);
@@ -460,15 +489,45 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
       sema_expand_comptime_foreach_into(child, clone, env);
       continue;
     }
-    /* 直接子级退出点：已登记 defer 逆序先执行（LIFO）。 */
+    /* 直接子级退出点：已登记 defer 逆序先执行（LIFO）。
+       §4.17 P3 return 槽：武装 + skip_top 直通（return 值所有权随值
+       转移，顶层单一临时根不捕获）；捕获非空时 $ret 物化——
+       [vars]→[var $ret$N]→[$tmp 析构]→[defer LIFO]→[return $ret$N]，
+       $ret 不析构（所有权流出）。物化失败（值根锚点缺失）跳过析构
+       （泄漏保守正确，pre-P3 行为，P3c 登记验证）。break/continue 无
+       表达式槽，武装为无害直通。 */
     ends_in_exit = sema_stmt_is_exit_point(child);
     if (ends_in_exit) {
+      size_t lift_base = vec_get_size(env->lift_temps);
+      int saved_active = env->lift_active;
+      int saved_skip = env->lift_skip_top;
+      env->lift_active = 1;
+      env->lift_skip_top =
+          node_get_kind(child) == CLUX_NODE_STMT_RETURN ? 1 : 0;
+      node_t *exit_clone = sema_clone_node_renamed(child, env);
+      env->lift_active = saved_active;
+      env->lift_skip_top = saved_skip;
+      int lifted = vec_get_size(env->lift_temps) > lift_base;
+      if (lifted) {
+        sema_lift_emit_vars(env, clone, lift_base);
+      }
+      int materialized = 0;
+      if (lifted && node_get_kind(child) == CLUX_NODE_STMT_RETURN) {
+        materialized =
+            sema_lift_materialize_return(env, clone, child, exit_clone);
+      }
+      if (lifted && materialized) {
+        sema_lift_emit_disposes(env, clone, lift_base);
+      }
       for (size_t d = vec_get_size(deferred); d > 0; d--) {
         node_add_child(
             clone,
             sema_defer_call((sema_defer_ref_t *)vec_get(deferred, d - 1), env));
       }
-      node_add_child(clone, sema_clone_impl(child, env));
+      node_add_child(clone, exit_clone);
+      if (lifted) {
+        sema_lift_drain(env, lift_base);
+      }
       continue;
     }
     if (node_get_kind(child) == CLUX_NODE_STMT_DEFER) {
@@ -513,6 +572,40 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
         allocator_free(env->out, (void **)&var_name);
       }
     }
+    /* §4.17 P3 循环降维（零 flag 方案）：cond/update（for 另含 init）
+       含临时根的循环统一降为 for(;;) + 段内 gate 块，降维体自持武装
+       （gate 内临时每轮声明每轮析构）。 */
+    if (env->disposes && sema_lift_loop_applies(child, env)) {
+      sema_lift_lower_loop(child, clone, env);
+      continue;
+    }
+    /* §4.17 P3 语句槽驱动：armed 克隆——捕获的临时 var 提升到语句前、
+       $dispose 逆序追加语句后。var/foreach 槽 skip_top 置位（顶层单一
+       根直通：var 直接 bind 免 __init_copy__ 二次拷贝、foreach iterable
+       由脱糖直连 __iter）；return 槽已由 exit 分支接管。 */
+    if (env->disposes && sema_lift_slot_applies(child)) {
+      size_t lift_base = vec_get_size(env->lift_temps);
+      node_kind_t child_kind = node_get_kind(child);
+      int saved_active = env->lift_active;
+      int saved_skip = env->lift_skip_top;
+      env->lift_active = 1;
+      env->lift_skip_top = (child_kind == CLUX_NODE_STMT_VAR ||
+                            child_kind == CLUX_NODE_STMT_FOREACH)
+                               ? 1
+                               : 0;
+      node_t *slot_clone = sema_clone_node_renamed(child, env);
+      env->lift_active = saved_active;
+      env->lift_skip_top = saved_skip;
+      if (vec_get_size(env->lift_temps) > lift_base) {
+        sema_lift_emit_vars(env, clone, lift_base);
+        node_add_child(clone, slot_clone);
+        sema_lift_emit_disposes(env, clone, lift_base);
+        sema_lift_drain(env, lift_base);
+      } else {
+        node_add_child(clone, slot_clone);
+      }
+      continue;
+    }
     node_add_child(clone, sema_clone_impl(child, env));
   }
   /* 块尾正常退出：全部已登记 defer 逆序执行；末语句已是退出点时
@@ -531,6 +624,7 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
     allocator_free(env->out, (void **)&ref);
   }
   delete_vec(&deferred);
+  env->lift_active = saved_lift_active;
   return clone;
 }
 
@@ -575,6 +669,9 @@ static node_t *sema_foreach_binary(const char *op,
 static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(src);
   node_t *iter_src = stmt_foreach_node_get_iterable(src);
+  /* §4.17 P3：iterable 顶层根直通由本脱糖直连 __iter 实现（不经
+     guard）；skip_top 是槽驱动的语句级旗标，不得泄入体内克隆。 */
+  env->lift_skip_top = 0;
   /* var __iter: T? = <iterable>;（求值一次；TYPE 从 iterable 锚点渲染，
      合成 var 无原树锚点，§2.8 字面量回填对符号引用值推不出来）。 */
   node_t *iter_var = create_stmt_var_node(env->out);
@@ -713,6 +810,42 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   node_add_child(block, iter_var);
   node_add_child(block, idx_var);
   node_add_child(block, loop);
+  /* §4.17 P3：iterable 为 disposable（§8.5 锚点）时 loop 出口析构
+     __iter（正常退出/break 均落到该语句；深 return 为退出点链 v1
+     已知限制，元素 var 逐轮析构为 v1 gap）。 */
+  if (env->sema && env->disposes) {
+    clux_type_t *iter_type = sema_get_node_type(env->sema, iter_src);
+    if (sema_type_needs_dispose(env->sema, iter_type)) {
+      const char *iter_type_name = clux_type_get_name(iter_type);
+      const char *callee =
+          iter_type_name
+              ? sema_dispose_callee_name(env->out, env->program, iter_type_name)
+              : NULL;
+      if (callee) {
+        node_t *call = create_call_node(env->out);
+        node_set_location(call, loc);
+        call_node_set_callee(call,
+                             sema_render_text_node(env->out,
+                                                   env->program,
+                                                   CLUX_NODE_LITERAL_IDENTIFIER,
+                                                   callee,
+                                                   loc));
+        node_t *addr = create_binary_node(env->out);
+        node_set_location(addr, loc);
+        binary_node_set_left(addr, sema_foreach_ident("__iter", loc, env));
+        binary_node_set_symbol(
+            addr,
+            sema_render_text_node(
+                env->out, env->program, CLUX_NODE_SYMBOL, ".&", loc));
+        call_node_add_arg(call, addr);
+        node_t *wrap = create_stmt_expr_node(env->out);
+        node_set_location(wrap, loc);
+        stmt_expr_node_set_expr(wrap, call);
+        node_add_child(block, wrap);
+        sema_dispose_register(env, iter_type, node_get_location(iter_src));
+      }
+    }
+  }
   return block;
 }
 
@@ -844,7 +977,9 @@ static node_t *sema_desugar_member_call(node_t *node, sema_clone_env_t *env) {
                                              CLUX_NODE_LITERAL_IDENTIFIER,
                                              hit->mangled,
                                              node_get_location(method_ref)));
-  node_t *self_arg = sema_clone_impl(receiver, env);
+  /* §4.17 P3：receiver/args 经 guard——member call 自身非捕获根（返回
+     类型非 disposable）时，其内嵌临时根仍须按槽协议捕获。 */
+  node_t *self_arg = sema_clone_lift_guard(receiver, env);
   if (hit->self_ptr) {
     /* 指针 self：receiver 包 .&（后缀形态复用 binary，RIGHT 置 NULL）。 */
     node_t *addr = create_binary_node(env->out);
@@ -861,8 +996,8 @@ static node_t *sema_desugar_member_call(node_t *node, sema_clone_env_t *env) {
     call_node_add_arg(call, self_arg);
   }
   for (size_t idx = 1; idx < vec_get_size(children); idx++) {
-    call_node_add_arg(call,
-                      sema_clone_impl((node_t *)vec_get(children, idx), env));
+    call_node_add_arg(
+        call, sema_clone_lift_guard((node_t *)vec_get(children, idx), env));
   }
   return call;
 }
@@ -1109,6 +1244,16 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
       break;
     }
   }
+  /* §4.17 P3 槽位克隆通道（children 级 guard dispatch）：武装上下文下
+     ——惰性父（&&/||/?:）整棵解除武装（提升即提前求值破坏短路）；
+     skip_top 命中 VAR/RETURN 帧 VALUE 槽时顶层直通（bypass guard 后
+     立即复位，嵌套子树照常捕获）；函数定义子树（形参/捕获默认值在
+     调用点求值，非本槽求值位）解除；其余子节点经 lift guard（临时根
+     捕获为 $tmp$N 替身）。 */
+  int saved_lift_active = env->lift_active;
+  if (env->lift_active && sema_lift_is_lazy_parent(node, env)) {
+    env->lift_active = 0;
+  }
   for (size_t idx = 0; idx < count; idx++) {
     node_t *child = (node_t *)vec_get(children, idx);
     /* §2.5：语句位 comptime if 命中剪枝 → 换克隆选中臂（drop 已在
@@ -1117,8 +1262,26 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
     if (child && sema_prune_lookup(child, env, &prune) == 0 && prune->arm) {
       child = prune->arm;
     }
-    node_add_child(clone, sema_clone_impl(child, env));
+    if (child && env->lift_active && env->lift_skip_top &&
+        ((kind == CLUX_NODE_STMT_VAR && idx == (size_t)CLUX_STMT_VAR_VALUE) ||
+         (kind == CLUX_NODE_STMT_RETURN &&
+          idx == (size_t)CLUX_STMT_RETURN_VALUE))) {
+      env->lift_skip_top = 0;
+      node_add_child(clone, sema_clone_impl(child, env));
+      continue;
+    }
+    if (child && env->lift_active &&
+        (node_get_kind(child) == CLUX_NODE_EXPR_FUNC_DECL ||
+         node_get_kind(child) == CLUX_NODE_STMT_FUNC)) {
+      int fn_saved_active = env->lift_active;
+      env->lift_active = 0;
+      node_add_child(clone, sema_clone_impl(child, env));
+      env->lift_active = fn_saved_active;
+      continue;
+    }
+    node_add_child(clone, sema_clone_lift_guard(child, env));
   }
+  env->lift_active = saved_lift_active;
   if (children != node_get_children(node)) {
     delete_vec(&children);
   }
@@ -1176,6 +1339,24 @@ void sema_clone_env_init(sema_clone_env_t *env,
   env->defer_counter = 0;
   env->disposes = NULL;
   env->sema = sema;
+  /* §4.17 P3：lift_temps 无条件创建（物化路径 lift_active 恒 0，
+     guard 天然退化为通用克隆，不设开关）；emit 主路径由块级槽驱动
+     武装。 */
+  env->lift_temps = create_vec(env->out);
+  env->lift_counter = 0;
+  env->lift_skip_top = 0;
+  env->lift_active = 0;
+}
+
+/* lift_temps 是 env 唯一自建所有物（其余成员均借用），通道收尾统一
+   释放。防御性 drain：块级水位线协议下收尾时表应为空（条目已全部
+   drain），残留即协议破坏——此处兜底释放条目结构体防泄漏。 */
+void sema_clone_env_destroy(sema_clone_env_t *env) {
+  if (!env || !env->lift_temps) {
+    return;
+  }
+  sema_lift_drain(env, 0);
+  delete_vec(&env->lift_temps);
 }
 
 node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env) {

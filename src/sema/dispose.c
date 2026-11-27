@@ -370,10 +370,10 @@ static node_t *sema_dispose_wrap_if(allocator_t *out,
 
 /* ---- 类型表达式重建（合成参数类型 *T 的 T 部分） ---- */
 
-static node_t *sema_dispose_render_type(allocator_t *out,
-                                        program_t *program,
-                                        clux_type_t *type,
-                                        const location_t *loc);
+node_t *sema_dispose_render_type(allocator_t *out,
+                                 program_t *program,
+                                 clux_type_t *type,
+                                 const location_t *loc);
 
 /* 前缀类型节点（*T / ?T / []T / const T）：exec 前缀通道经 interning
    还原同一复合类型实例。base 不可名时返回 NULL。 */
@@ -392,10 +392,10 @@ static node_t *sema_dispose_type_prefix(allocator_t *out,
 /* clux_type_t → 类型表达式 AST：按 kind 递归重建（具名叶子 identifier、
    指针/optional/切片/限定前缀、[N]T 数组二元形态、元组节点）。
    失败（无名叶子、零元元组）返回 NULL，调用方放弃该展开。 */
-static node_t *sema_dispose_render_type(allocator_t *out,
-                                        program_t *program,
-                                        clux_type_t *type,
-                                        const location_t *loc) {
+node_t *sema_dispose_render_type(allocator_t *out,
+                                 program_t *program,
+                                 clux_type_t *type,
+                                 const location_t *loc) {
   if (!type) {
     return NULL;
   }

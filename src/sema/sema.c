@@ -991,6 +991,7 @@ static void sema_instance_bodies_materialize(clux_sema_t *sema) {
     env.instantiate = 0;
   }
   sema->inst_defer_counter = env.defer_counter;
+  sema_clone_env_destroy(&env);
 }
 
 int sema_walk(clux_sema_t *sema, node_t *program) {
@@ -1363,6 +1364,7 @@ vec_t *sema_emit(clux_sema_t *sema) {
     allocator_free(out, (void **)&entry);
   }
   delete_vec(&disposes);
+  sema_clone_env_destroy(&env);
   program_set_decls(program, ast);
   vec_push(programs, program);
   return programs;

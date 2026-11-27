@@ -314,22 +314,60 @@ func f[T](x: T): void {
 - `__assign__` 只管赋值语句，不参与析构（旧值怎么释放由实现者负责，
   通常是实现里的 `#dispose(self)` 或字段逐一覆盖）。
 
-### 4.17.5 临时值：v1 直接报错
+### 4.17.5 临时值：提升（lift）
 
-**需要析构的临时值必须绑定具名 `var`**，否则编译错误：
+需要析构的临时值**无需显式绑定具名 `var`**——sema 在归一化 AST 里自动
+把临时捕获提升为隐藏绑定（`$tmp$N`，`$` 名字空间见 §1.3），在其生命
+终点插入真实析构。提升完全发生在 AST 层，执行器/引擎零感知。
+
+**临时根判定**：调用或构造表达式（`make_thing()`、`.Res{v = 1}`）且
+类型结果命中 disposable 谓词（§4.17.1）。**捕获协议**（语句槽边界）：
+临时根提升为 `var $tmp$N: T = <表达式>;` 插到语句前，语句后逆序
+（LIFO，与 §4.17.3 同序）插入 `$dispose$T($tmp$N.&)`：
 
 ```clux
 func work(): void {
-    var t = make_thing();          // 合法：具名绑定，作用域出口析构
-    make_thing();                  // 报错：disposable 临时值未绑定
-    var n = make_thing().count;    // 报错：成员访问不延长临时生命周期
+    make_thing();                  // var $tmp$0: T = make_thing();
+                                   // ... $dispose$T($tmp$0.&);
+    var n = make_thing().count;    // 临时提升，n 从 $tmp 拷贝后即时析构
+    var t = make_thing();          // 直通：t 直接 bind，作用域出口析构
 }
 ```
 
-理由：与引擎"临时值匿名绑定 current scope、块退出回收"的机制同构的
-作用域跟随方案（隐藏 var 具名化）会在 `while` / `do-while` / `for` 的
-控制表达式上每轮求值累积临时值——内存浪费且析构时机不确定。放开时
-（后续版本）循环条件位置的临时值仍会倾向继续报错。
+- **槽直通**：`var` / `return` 的值槽**顶层单一**临时根不提升——`var`
+  直接绑定（避免 `__init_copy__` 二次拷贝），`return` 所有权随值转移；
+  `foreach` 的 iterable 由脱糖（§2.7）直连 `__iter`。嵌套子树照常捕获。
+- **`return` 物化**：捕获非空时 return 表达式引用 `$tmp`，直接
+  [析构][return] 会 use-after-dispose——先物化 `var $ret$N: T = <return
+  表达式>;`（经 `__init_copy__` 置空 `$tmp` 源），析构 `$tmp` 后
+  `return $ret$N`。`$ret` 不析构（所有权流出）。类型锚点缺失时沿用裸
+  形态并跳过析构（保守泄漏，保语义正确）。
+- **惰性上下文不捕获**：`&&` / `||` / `?:` 的子表达式条件求值，提升即
+  提前求值、破坏短路——整个惰性父节点解除捕获，其内临时值按引擎既有
+  匿名值通道存活（v1 已知限制，不做自动析构）。
+- **函数定义子树不捕获**：形参/捕获默认值在**调用点**求值，不在定义处。
+
+**循环降维（零 flag 方案）**：cond/update（for 另含 init）含临时根的
+`while` / `do-while` / `for` 统一降为 `for (;;)` + 段内 gate 块——临时在
+gate 块内每轮声明、每轮析构（块每执行 push 新作用域），临时生命周期
+封闭在轮次内，cond 求值次数与原语义一致：
+
+- `while (C) B` → `for (;;) { gate(C); B' }`
+- `do B while (C)` → `for (;;) { B'; gate(C); }`（`continue` 跳过 gate
+  为 v1 已知偏差：原语义 continue 会再求值一次 cond）
+- `for (I; C; U) B`：I 的临时物化到循环**外**（var 形态直通绑定）；
+  C 有根时 gate 入 body 首（COND 槽空 = 恒真，§4.8）；U 有根时 gate
+  块入 UPDATE 槽（`continue` 先走 update 再走 cond，对齐原语义）。
+
+gate 块结构：`{ [vars]; if (C') {} else { [析构] break; } [析构]; }`。
+早期构想的 `$first` flag 方案（隐藏运行期变量标记首轮）被否决：flag
+把"首轮差异"编码为**运行期状态**，每次条件求值都要读写它；零 flag
+方案把同样的差异编码为 **gate 块的作用域结构**——降维纯 AST 层，无
+运行期代价，也无可忘置的标志位。
+
+**已知限制（v1）**：`do-while` 的 continue 偏差（见上）；`foreach` 元素
+var 不做逐轮析构（元素为 copy，逐轮析构语义待后续版本定夺）；深
+`return` 穿过循环时不触发 iterable 的出口析构。
 
 ### 4.17.6 FFI 边界
 

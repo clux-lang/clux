@@ -813,6 +813,51 @@ TEST(SemaCheckTest, ArrayParamForeachElemTypeIsRecorded) {
   delete_allocator(&a);
 }
 
+/* §4.17 P3a 锚点：CALL 返回类型与 CONSTRUCT 根类型登记进类型结果表
+   ——clone 期临时根判定（sema_type_needs_dispose）按节点取类型的
+   通道（含方法调用糖的 member_call 路径）。 */
+TEST(SemaCheckTest, CallAndConstructRootTypesAreRecorded) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "struct S { a: i32; func get(self: *S): i32 { return "
+                           "self.a; } }\n"
+                           "func make(): S { return .S{ .a = 1 }; }\n"
+                           "func main(): void {\n"
+                           "  var u = make();\n"
+                           "  var v: S = .S{ .a = 2 };\n"
+                           "  var w = v.get();\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  /* CALL 根：make() 与方法调用糖 v.get() 各登记返回类型。 */
+  node_t *calls[2];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_EXPR_CALL, calls, 2), 2u);
+  clux_type_t *make_type = sema_get_node_type(sema, calls[0]);
+  ASSERT_NE(make_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(make_type), "S");
+  clux_type_t *get_type = sema_get_node_type(sema, calls[1]);
+  ASSERT_NE(get_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(get_type), "i32");
+  /* CONSTRUCT 根：make 体内与 main 体内各一个，类型均为 S。 */
+  node_t *ctrs[3];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_EXPR_CONSTRUCT, ctrs, 3), 2u);
+  for (size_t idx = 0; idx < 2; idx++) {
+    clux_type_t *ctr_type = sema_get_node_type(sema, ctrs[idx]);
+    ASSERT_NE(ctr_type, nullptr);
+    EXPECT_STREQ(clux_type_get_name(ctr_type), "S");
+  }
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 /* 模块级 var 不动点（顺序无关）：先声明者引用后定义的 var，依赖解析
    定型后占位升级，引用点取到真实类型——声明顺序不限制推断。 */
 TEST(SemaCheckTest, ModuleVarForwardReferenceTypeIsInferred) {

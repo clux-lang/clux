@@ -248,7 +248,12 @@ sema_render_strip_suffix(const char *text, size_t len, size_t *num_len);
      LIFO 调用；STMT_FOREACH → 索引 for；STMT_COMPTIME_FOREACH（ITERABLE
      为 EXPR_TUPLE）→ 按元素逐份展开并替换迭代变量引用
      （subst_name/subst_src 是展开期的临时替换态，由展开函数进出配对置位）；
-   - defer_counter：__deferN 编号，emit 全程单调递增保证模块内唯一。 */
+   - defer_counter：__deferN 编号，emit 全程单调递增保证模块内唯一；
+   - lift_temps/counter/skip_top（§4.17 P3 临时值析构，lift.c）：
+     克隆体语句槽内的 disposable 临时根（CALL/CONSTRUCT，类型经
+     sema_get_node_type 查 §8.5 结果表）捕获为隐藏 var $tmp$N 提升到
+     语句前，出口逆序追加 $dispose$T($tmp$N.&)；skip_top=1 时槽内顶层
+     单一根直通不捕获（var 初值 bind-to-local / return 所有权转移）。 */
 typedef struct {
   allocator_t *out;
   program_t *program;
@@ -273,6 +278,12 @@ typedef struct {
   vec_t *disposes; /* §4.17 收集表（sema_dispose_type_t*，emit 持有），
                            NULL=RAII 通道关闭（登记/脱糖全部静默） */
   clux_sema_t *sema; /* 借用：walk 主体（§8.5 类型结果表查询），可 NULL */
+  vec_t *lift_temps; /* §4.17 P3 当前语句槽捕获表（sema_lift_temp_t*，
+                        env->out 持有），emit 整程共用，初始为空表 */
+  size_t lift_counter; /* $tmp$N/$ret$N 编号，emit 全程单调递增 */
+  int lift_skip_top;   /* 槽内顶层单一临时根直通不捕获（§4.17 P3） */
+  int lift_active; /* 槽驱动武装位：仅块级语句槽克隆期为 1，惰性
+                      （&&/||/?:）与闭包（defer/展开）上下文抑制 */
 } sema_clone_env_t;
 
 /* env 初始化：out/program 随 emit 创建；renames/skip 由 emit 按 stmt
@@ -285,6 +296,10 @@ void sema_clone_env_init(sema_clone_env_t *env,
                          vec_t *consts,
                          vec_t *prunes,
                          clux_sema_t *sema);
+
+/* env 收尾：lift_temps 是 env 唯一自建所有物，通道结束统一释放
+   （防御性 drain 后 delete_vec）。与 init 成对，emit/物化收尾调用。 */
+void sema_clone_env_destroy(sema_clone_env_t *env);
 
 node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env);
 
@@ -325,5 +340,72 @@ node_t *sema_dispose_synth(sema_clone_env_t *env,
 const char *sema_dispose_callee_name(allocator_t *allocator,
                                      program_t *program,
                                      const char *type_name);
+
+/* clux_type_t → 类型表达式 AST：按 kind 递归重建（具名叶子 identifier、
+   指针/optional/切片/限定前缀、[N]T 二元形态、元组节点）。失败（无名
+   叶子、零元元组）返回 NULL，调用方放弃该展开。lift.c 提升 var 的
+   TYPE 槽数据源。 */
+node_t *sema_dispose_render_type(allocator_t *out,
+                                 program_t *program,
+                                 clux_type_t *type,
+                                 const location_t *loc);
+
+/* ---- §4.17 RAII P3：临时值提升（lift.c） ---- */
+
+/* 当前语句槽捕获的临时条目（env->out 持有）：name 为 $tmp$N interned
+   名；value 为已克隆初始化子树、type_node 为预渲染类型表达式（均于
+   flush 时移入提升 var）；callee 为 $dispose$T 合成 callee 名（interned，
+   析构点公用）；loc 为源位置模板。捕获期渲染/合成即验证——类型不可名
+   或分配失败时 sema_lift_capture 返回 NULL，调用方原样保留克隆子树。 */
+typedef struct {
+  const char *name;
+  node_t *value;
+  node_t *type_node;
+  const char *callee;
+  const location_t *loc;
+} sema_lift_temp_t;
+
+/* 临时根判定：CALL/CONSTRUCT 且类型表命中 disposable 类型（§8.5 结果
+   表查询，锚点由 P3a check 侧登记）。env->sema/disposes 为 NULL 或
+   clone 上下文未武装（lift_active）时由调用方先行短路。 */
+int sema_lift_is_root(node_t *node, sema_clone_env_t *env);
+
+/* 惰性父判定（&&/||/?:）：子表达式条件求值，提升即提前求值破坏短路
+   ——clone.c children 循环在克隆期对整棵解除武装。 */
+int sema_lift_is_lazy_parent(node_t *node, sema_clone_env_t *env);
+
+/* 捕获通道：登记 sema_lift_temp_t（含 sema_dispose_register 递归登记
+   成分类型）并返回 $tmp$N 标识符替身节点。 */
+node_t *
+sema_lift_capture(sema_clone_env_t *env, clux_type_t *type, node_t *cloned);
+
+/* 语句槽判定（§4.17.5 v1 槽表）：STMT_EXPR / STMT_IF / STMT_SWITCH /
+   STMT_ASSERT / STMT_RETURN / STMT_VAR / STMT_FOREACH——其中
+   VAR/RETURN/FOREACH 槽 lift_skip_top 置位（顶层单一临时根直通：var
+   直接 bind、return 所有权随值转移、foreach iterable 绑入 __iter）。 */
+int sema_lift_slot_applies(node_t *stmt);
+
+/* 出口 flush 原语（clone.c 块通道组合）：base 为语句槽基线（嵌套块
+   语句各自回到自身基线，外层 pending 条目不受波及）。 */
+void sema_lift_emit_vars(sema_clone_env_t *env, node_t *block, size_t base);
+void sema_lift_emit_disposes(sema_clone_env_t *env, node_t *block, size_t base);
+void sema_lift_drain(sema_clone_env_t *env, size_t base);
+
+/* return 槽 $ret 物化：捕获表非空时 return 表达式引用 $tmp，直接
+   [析构][return] 会 use-after-dispose——先物化 var $ret$N: T = <return
+   表达式>（类型取 return 值根的 §8.5 锚点），析构后再 return $ret$N。
+   锚点缺失（值根非 CALL/CONSTRUCT）时不物化返回 0（沿用裸形态，
+   惰性根已被捕获抑制，仅嵌套容器根残留该风险，P3c 登记验证）。 */
+int sema_lift_materialize_return(sema_clone_env_t *env,
+                                 node_t *block,
+                                 node_t *src_ret,
+                                 node_t *ret_clone);
+
+/* 循环降 viability 判定与降维（零 flag 方案）：cond/update（for 另含
+   init）含临时根的 while/do-while/for 统一降为 for(;;) + 段内 gate
+   块——临时在 gate 块内每轮声明每轮析构（exec 块每执行 push 新
+   scope），cond 求值次数与原语义一致。 */
+int sema_lift_loop_applies(node_t *stmt, sema_clone_env_t *env);
+void sema_lift_lower_loop(node_t *src, node_t *block, sema_clone_env_t *env);
 
 #endif

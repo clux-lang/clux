@@ -6,8 +6,9 @@
    shadow 演算产出类型结果（data==0 即 shadow，引擎 binary/prefix/
    field/index/slice/invoke 对 shadow 输出 shadow，无副作用）；非法
    调用点报 diag（个数/实参类型，消息与引擎 invoke 一致）；类型结果表
-   记录 STMT_VAR（语句节点）/EXPR_CONSTRUCT_FIELD/foreach 迭代变量三类
-   锚点（§8.5 第一版）。错误全收集不 fast-fail：真 error 值沿表达式
+   记录 STMT_VAR（语句节点）/EXPR_CONSTRUCT_FIELD/foreach 迭代变量等
+   锚点（§8.5 第一版；CALL 返回类型与 CONSTRUCT 根为 §4.17 P3 临时根
+   判定新增）。错误全收集不 fast-fail：真 error 值沿表达式
    上抛、stmt 边界转 diag 后继续；walk 通道已报过的错误静默跳过。值登记
    全部走 create_* 通道（自动挂当前 scope，绝不手工 clux_scope_define）。
    未覆盖形态一律静默放行（P9+ 扩展）。P15：装饰器纳入检查——表达式
@@ -2792,7 +2793,15 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     if (callee_node && node_get_kind(callee_node) == CLUX_NODE_EXPR_BINARY &&
         location_is(node_get_location(binary_node_get_symbol(callee_node)),
                     ".")) {
-      return check_member_call_value(sema, node);
+      clux_value_t *member_result = check_member_call_value(sema, node);
+      /* 类型结果表锚点：方法调用产出类型（§4.17 P3 临时根判定，
+         与下方 call_done 处的普通调用同规则）。 */
+      if (member_result && !check_is_real_error(member_result)) {
+        sema_record_node_type(sema,
+                              node,
+                              check_value_bind_type(member_result));
+      }
+      return member_result;
     }
     clux_value_t *callee = check_expr(sema, callee_node);
     size_t argc = call_node_get_arg_count(node);
@@ -2824,6 +2833,11 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
       result = check_call_value(sema, node, callee, argv, argc);
     }
   call_done:
+    /* 类型结果表锚点：CALL 返回类型（§4.17 P3 clone 期临时根判定按
+       此处登记类型做 sema_type_needs_dispose）。 */
+    if (result && !check_is_real_error(result)) {
+      sema_record_node_type(sema, node, check_value_bind_type(result));
+    }
     allocator_free(allocator, (void **)&argv);
     return result;
   }
@@ -2987,6 +3001,9 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
       }
     }
     if (type && clux_type_is_seal(type)) {
+      /* 类型结果表锚点：构造根节点记录构造类型（§4.17 P3 临时根
+         判定，字段节点锚点见上方）。 */
+      sema_record_node_type(sema, node, type);
       return clux_context_create_shadow_value(ctx, type);
     }
     return NULL; /* 匿名构造（TYPE 槽 NULL）与未定局类型降级 */
