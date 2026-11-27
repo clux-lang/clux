@@ -16623,6 +16623,85 @@ TEST_F(ExecLiteralTest, ConstructUnionAndCunionSingleMember) {
   }
 }
 
+/* 场景: union 值 is 成员名（§5.7 exec 通道）——运行期 tag 判定
+   预期: 当前成员产 bool true、其它成员产 bool false；右侧非成员名
+         （数字）报 membership test requires a member name */
+TEST_F(ExecLiteralTest, BinaryIsMemberOnUnionValue) {
+  node_t *fields = create_fields_node(a);
+  fields_node_add_field(fields, make_union_field_of(a, "circle", "i32"));
+  fields_node_add_field(fields, make_union_field_of(a, "rect", "i32"));
+  node_t *decl = make_union_decl_of(a, NULL, "Shape", NULL, fields);
+  clux_value_t *declared = exec_expr_union(ctx, decl);
+  ASSERT_FALSE(clux_value_is_error(declared));
+
+  node_t *hit = make_binary_of(
+      a,
+      [&]() {
+        node_t *ctor = make_construct_of(
+            a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+        construct_node_add_elem(
+            ctor,
+            make_construct_field_of(
+                a,
+                "circle",
+                make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5")));
+        return ctor;
+      }(),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "is"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "circle"));
+  clux_value_t *hit_value = exec_expr_binary(ctx, hit);
+  ASSERT_NE(hit_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(hit_value)) << error_message_of(hit_value);
+  EXPECT_TRUE(*(bool *)clux_value_get_raw(hit_value, 0));
+
+  node_t *miss = make_binary_of(
+      a,
+      [&]() {
+        node_t *ctor = make_construct_of(
+            a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+        construct_node_add_elem(
+            ctor,
+            make_construct_field_of(
+                a,
+                "circle",
+                make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5")));
+        return ctor;
+      }(),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "is"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "rect"));
+  clux_value_t *miss_value = exec_expr_binary(ctx, miss);
+  ASSERT_NE(miss_value, nullptr);
+  EXPECT_FALSE(clux_value_is_error(miss_value)) << error_message_of(miss_value);
+  EXPECT_FALSE(*(bool *)clux_value_get_raw(miss_value, 0));
+
+  node_t *bad = make_binary_of(
+      a,
+      [&]() {
+        node_t *ctor = make_construct_of(
+            a, make_static_node_of(a, CLUX_NODE_LITERAL_IDENTIFIER, "Shape"));
+        construct_node_add_elem(
+            ctor,
+            make_construct_field_of(
+                a,
+                "circle",
+                make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "5")));
+        return ctor;
+      }(),
+      make_static_node_of(a, CLUX_NODE_SYMBOL, "is"),
+      make_static_node_of(a, CLUX_NODE_LITERAL_NUMERIC, "9"));
+  clux_value_t *bad_value = exec_expr_binary(ctx, bad);
+  ASSERT_NE(bad_value, nullptr);
+  EXPECT_TRUE(clux_value_is_error(bad_value));
+  EXPECT_STREQ(error_message_of(bad_value),
+               "membership test requires a member name");
+
+  /* 独立 AST 根释放：decl 为声明根，构造子树挂在二元根上级联。 */
+  delete_node(&decl);
+  delete_node(&hit);
+  delete_node(&miss);
+  delete_node(&bad);
+}
+
 /* 场景: .[2]i32{ 1, 2 } 数组 / 具名 <i32, i32>{ 4, 5 } / 匿名 .{ 1, 2 }
    预期: 数组与具名/匿名 tuple 逐位写入后下标读回；元素不足/溢出报
          requires N elements, got M；位置构造中出现具名字段报混用、

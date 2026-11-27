@@ -1286,13 +1286,54 @@ static void check_module_register(clux_sema_t *sema, node_t *stmt) {
     }
     return;
   }
-  case CLUX_NODE_STMT_EXTERN_CFUNC:
+  case CLUX_NODE_STMT_EXTERN_CFUNC: {
+    /* §4.17.6 FFI 禁令：cfunc 形参与返回类型拒绝 disposable——
+       C ABI 无法运行 clux 析构协议，disposable 值一经跨界即泄漏。
+       预扫描通道（report=0）：类型可解析才判，照常登记。 */
+    node_t *params = stmt_extern_cfunc_node_get_params(stmt);
+    size_t count = params ? func_params_node_get_param_count(params) : 0;
+    for (size_t pidx = 0; pidx < count; pidx++) {
+      node_t *param = func_params_node_get_param(params, pidx);
+      node_t *ptype = param ? func_param_node_get_type(param) : NULL;
+      clux_type_t *type = ptype ? check_type_eval(sema, ptype, 0) : NULL;
+      if (type && sema_type_needs_dispose(sema, type)) {
+        clux_context_diag(sema->ctx,
+                          CLUX_DIAG_ERROR,
+                          node_get_location(param),
+                          "FFI boundary rejects type '%s': C ABI cannot "
+                          "run clux dispose protocol",
+                          clux_type_get_name(type));
+      }
+    }
+    node_t *rnode = stmt_extern_cfunc_node_get_return(stmt);
+    clux_type_t *rtype = rnode ? check_type_eval(sema, rnode, 0) : NULL;
+    if (rtype && sema_type_needs_dispose(sema, rtype)) {
+      clux_context_diag(sema->ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(rnode),
+                        "FFI boundary rejects type '%s': C ABI cannot "
+                        "run clux dispose protocol",
+                        clux_type_get_name(rtype));
+    }
     check_define_value_name(
         sema, stmt_extern_cfunc_node_get_name(stmt), NULL, 0);
     return;
-  case CLUX_NODE_STMT_EXTERN_VAR:
+  }
+  case CLUX_NODE_STMT_EXTERN_VAR: {
+    /* §4.17.6 FFI 禁令同判：extern 变量类型拒绝 disposable。 */
+    node_t *tnode = stmt_extern_var_node_get_type(stmt);
+    clux_type_t *type = tnode ? check_type_eval(sema, tnode, 0) : NULL;
+    if (type && sema_type_needs_dispose(sema, type)) {
+      clux_context_diag(sema->ctx,
+                        CLUX_DIAG_ERROR,
+                        node_get_location(tnode),
+                        "FFI boundary rejects type '%s': C ABI cannot "
+                        "run clux dispose protocol",
+                        clux_type_get_name(type));
+    }
     check_define_value_name(sema, stmt_extern_var_node_get_name(stmt), NULL, 0);
     return;
+  }
   case CLUX_NODE_STMT_COMPTIME_IF:
     /* 槽布局与 STMT_IF 相同：THEN/ELSE 为块，体内声明照常注册。 */
     check_module_register_list(sema, node_get_child(stmt, 2));
@@ -2465,6 +2506,36 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
     return NULL; /* TDZ：类型由声明标注决定（§4.1） */
   case CLUX_NODE_EXPR_GROUP:
     return check_expr(sema, group_node_get_expr(node));
+  case CLUX_NODE_EXPR_TUPLE: {
+    /* 值位置元组（§8.5）：逐元素影子检查后聚合类型产影子——var 推断
+       bind、dispose 登记与推断显式化均经类型表消费该结果。元素真
+       error 透传；元素不可演算（NULL/opaque）整体降级 NULL 防级联。 */
+    size_t count = tuple_node_get_elem_count(node);
+    clux_type_t **elems =
+        count ? allocator_alloc(allocator, count * sizeof(clux_type_t *))
+              : NULL;
+    clux_value_t *result = NULL;
+    int ok = 1;
+    for (size_t idx = 0; idx < count; idx++) {
+      clux_value_t *elem = check_expr(sema, tuple_node_get_elem(node, idx));
+      if (check_is_real_error(elem)) {
+        result = elem;
+        ok = 0;
+        break;
+      }
+      if (!elem || check_is_opaque_value(elem)) {
+        ok = 0;
+        break;
+      }
+      elems[idx] = clux_value_get_type(elem);
+    }
+    if (ok) {
+      clux_type_t *type = clux_context_get_tuple_type(ctx, elems, count);
+      result = type ? clux_context_create_shadow_value(ctx, type) : NULL;
+    }
+    allocator_free(allocator, (void **)&elems);
+    return result;
+  }
   case CLUX_NODE_EXPR_BINARY: {
     node_t *symbol = binary_node_get_symbol(node);
     char *op = check_name_of(allocator, symbol);
@@ -2507,6 +2578,21 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
         result = value;
       } else {
         result = check_cast_value(sema, value, right, node);
+      }
+    } else if (strcmp(op, "is") == 0) {
+      /* is 成员判定（§5.7）：引擎通道 shadow 感知——union 影子产 bool
+         影子、非 union 产真 error。右侧是成员名叶子，不解析为表达式。 */
+      clux_value_t *value = check_expr(sema, left);
+      if (check_is_real_error(value)) {
+        result = value;
+      } else if (!check_is_name_form(right)) {
+        result = NULL;
+      } else {
+        char *member = check_name_of(allocator, right);
+        result = member ? clux_context_is_member(
+                              ctx, value, member, node_get_location(right))
+                        : NULL;
+        allocator_free(allocator, (void **)&member);
       }
     } else if (right == NULL &&
                (strcmp(op, ".&") == 0 || strcmp(op, ".*") == 0 ||

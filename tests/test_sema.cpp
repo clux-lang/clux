@@ -2108,6 +2108,181 @@ TEST(SemaTest, RaiiRejectsModuleLevelDisposableVarAndCunionField) {
   delete_allocator(&a);
 }
 
+/* §4.17.2 P2：?T 载荷合成——none 无操作（is_none 门控），some 经 #take
+   取载荷后转交 $dispose$B；调用名 = $dispose$ + mangle("?Res")=$x3fRes。 */
+TEST(SemaTest, RaiiOptionalPayloadDisposeSynthAsNormalizedText) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var x: ?Res = #some(Res, .Res{ .v = 1 });\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var x: ?Res = #some(Res, .Res{v = 1});\n"
+                   "  $dispose$$x3fRes(x.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$$x3fRes(self: *?Res): void {\n"
+                   "  if (!#is_none(self.*)) {\n"
+                   "    $dispose$Res(#take(self.*).&);\n"
+                   "  }\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17.2 P2：[N]T 元素合成——N 编译期常量展开为固定 for 逆序循环；
+   调用名 = $dispose$ + mangle("[2]Res")=$x5b2$x5dRes。 */
+TEST(SemaTest, RaiiArrayElementDisposeSynthAsNormalizedText) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var xs: [2]Res = <.Res{ .v = 1 }, .Res{ .v = 2 }>;\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var xs: [2]Res = <.Res{v = 1}, .Res{v = 2}>;\n"
+                   "  $dispose$$x5b2$x5dRes(xs.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$$x5b2$x5dRes(self: *[2]Res): void {\n"
+                   "  for (var i = 2; i > 0; i = i - 1) {\n"
+                   "    $dispose$Res(self.*[i - 1].&);\n"
+                   "  }\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17.2 P2：tag union variant 合成——逐 disposable variant 一条 is
+   判定链（运行期至多一臂命中）。源内 `u is n` 同时压测 check 层 is
+   影子通道（union 影子产 bool 影子，sema 零错误）。 */
+TEST(SemaTest, RaiiUnionVariantDisposeSynthAsNormalizedText) {
+  expect_sema_text("struct Res {\n"
+                   "  v: i32;\n"
+                   "  func __dispose__(self: *Res): void { return; }\n"
+                   "}\n"
+                   "union U {\n"
+                   "  r: Res;\n"
+                   "  n: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var u: U = .U{ .r = .Res{ .v = 1 } };\n"
+                   "  if (u is n) {\n"
+                   "    return;\n"
+                   "  }\n"
+                   "}\n",
+                   "struct Res {\n"
+                   "  v: i32;\n"
+                   "}\n"
+                   "union U {\n"
+                   "  r: Res;\n"
+                   "  n: i32;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  var u: U = .U{r = .Res{v = 1}};\n"
+                   "  if (u is n) {\n"
+                   "    return;\n"
+                   "  }\n"
+                   "  $dispose$U(u.&);\n"
+                   "}\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $dispose$U(self: *U): void {\n"
+                   "  if (self.* is r) {\n"
+                   "    $dispose$Res(self.r.&);\n"
+                   "  }\n"
+                   "}\n"
+                   "func $dispose$Res(self: *Res): void {\n"
+                   "  Res$__dispose__(self);\n"
+                   "}\n",
+                   false);
+}
+
+/* §4.17.2 P2：元组成员合成——逆序逐 disposable 成员下标转交；
+   调用名 = $dispose$ + mangle("<Res, i32>")（$x3c/$x2c/$x20/$x3e）。 */
+TEST(SemaTest, RaiiTupleMemberDisposeSynthAsNormalizedText) {
+  expect_sema_text(
+      "struct Res {\n"
+      "  v: i32;\n"
+      "  func __dispose__(self: *Res): void { return; }\n"
+      "}\n"
+      "func f(): void {\n"
+      "  var t = <.Res{ .v = 1 }, 2>;\n"
+      "}\n",
+      "struct Res {\n"
+      "  v: i32;\n"
+      "}\n"
+      "func f(): void {\n"
+      "  var t: <Res, i32> = <.Res{v = 1}, 2>;\n"
+      "  $dispose$$x3cRes$x2c$x20i32$x3e(t.&);\n"
+      "}\n"
+      "func Res$__dispose__(self: *Res): void {\n"
+      "  return;\n"
+      "}\n"
+      "func $dispose$$x3cRes$x2c$x20i32$x3e(self: *<Res, i32>): void {\n"
+      "  $dispose$Res(self.*[0].&);\n"
+      "}\n"
+      "func $dispose$Res(self: *Res): void {\n"
+      "  Res$__dispose__(self);\n"
+      "}\n",
+      false);
+}
+
+/* §4.17.6 P2：FFI 边界禁令——cfunc 形参与返回类型、extern var 类型
+   拒绝 disposable（C ABI 无法运行 clux 析构协议）；*Res 指针形参放行。 */
+TEST(SemaTest, RaiiFfiBoundaryRejectsDisposableTypes) {
+  const char *src = "struct Res {\n"
+                    "  v: i32;\n"
+                    "  func __dispose__(self: *Res): void { return; }\n"
+                    "}\n"
+                    "extern cfunc m::register_c(g: Res): void;\n"
+                    "extern cfunc m::make_r(): Res;\n"
+                    "extern cfunc m::ok(p: *Res): void;\n"
+                    "extern var m::g: Res;\n";
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, src);
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  EXPECT_EQ(clux_context_diag_count(ctx), 3u);
+  for (size_t idx = 0; idx < 3u; idx++) {
+    const clux_diag_t *diag = clux_context_get_diag(ctx, idx);
+    EXPECT_EQ(clux_diag_get_level(diag), CLUX_DIAG_ERROR);
+    string_t *text = clux_diag_to_string((clux_diag_t *)diag, a);
+    EXPECT_NE(strstr(string_get_data(text),
+                     "FFI boundary rejects type 'Res': C ABI cannot run clux "
+                     "dispose protocol"),
+              nullptr);
+    delete_string(&text);
+  }
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(SemaTest, ForeachDesugarsToIndexedForAsNormalizedText) {
   expect_sema_text("var items: [3]i32 = <0, 0, 0>;\n"
                    "func f(): void {\n"

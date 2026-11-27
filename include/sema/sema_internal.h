@@ -299,22 +299,31 @@ typedef struct {
 } sema_dispose_type_t;
 
 /* disposable 谓词（白皮书 §4.17.1）——struct 实现 __dispose__ 钩子，
-   或传递性包含需要析构的字段；指针/切片/基础类型/容器（?T、[N]T、
-   元组、union 族）不析构（容器展开留 P2）。钩子判定走 sema->methods
-   预扫描表（check 期引擎 struct 类型只有字段表，method 三表在 exec
-   两阶段 install，clux_struct_is_method 不可用）。 */
+   或传递性包含需要析构的成分（struct 字段、?T 载荷、[N]T 元素、
+   tag union variant、元组成员，P2 扩展）；指针/切片/基础类型/cunion
+   不析构。钩子判定走 sema->methods 预扫描表（check 期引擎 struct
+   类型只有字段表，method 三表在 exec 两阶段 install，
+   clux_struct_is_method 不可用）。 */
 int sema_type_needs_dispose(clux_sema_t *sema, clux_type_t *type);
 
 /* 登记需合成 $dispose$T 的类型（按引擎类型指针去重，递归登记
-   disposable 字段类型），env->disposes 为 NULL 时静默。 */
+   disposable 成分类型），env->disposes 为 NULL 时静默。 */
 void sema_dispose_register(sema_clone_env_t *env,
                            clux_type_t *type,
                            const location_t *loc);
 
-/* 合成顶层语句 func $dispose$T(self: *T): void { ... }——钩子（若有）
-   先执行，随后逆声明序递归析构 disposable 字段（$dispose$F(self.f.&)）。
-   合成体不经 check（emit 尾部直接进产物）。 */
+/* 合成顶层语句 func $dispose$T(self: *T): void { ... }——按类型 kind
+   分派 §4.17.2 展开表：struct=钩子+逆声明序字段；?T=is_none 门控
+   #take 载荷；[N]T=固定 for 循环逆序元素；tag union=逐 variant is
+   判定链；元组=逆序下标。合成体不经 check（emit 尾部直接进产物）。 */
 node_t *sema_dispose_synth(sema_clone_env_t *env,
                            const sema_dispose_type_t *entry);
+
+/* 合成析构函数名（$dispose$ + mangled 类型名）——非 [A-Za-z0-9_$]
+   字节转 $xHH 转义（"?i32"→"$x3fi32"）；interning 保证定义点与
+   调用点同一字符串实例，经纯名字通道对齐。失败返回 NULL。 */
+const char *sema_dispose_callee_name(allocator_t *allocator,
+                                     program_t *program,
+                                     const char *type_name);
 
 #endif

@@ -495,13 +495,15 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
             name_node ? location_get(node_get_location(name_node), env->out)
                       : NULL;
         const char *type_name = clux_type_get_name(var_type);
-        if (var_name && type_name) {
-          char buf[strlen("$dispose$") + strlen(type_name) + 1];
-          (void)snprintf(buf, sizeof(buf), "$dispose$%s", type_name);
+        const char *callee =
+            type_name
+                ? sema_dispose_callee_name(env->out, env->program, type_name)
+                : NULL;
+        if (var_name && callee) {
           sema_defer_ref_t *ref =
               allocator_alloc(env->out, sizeof(sema_defer_ref_t));
           ref->dispose = 1;
-          ref->name = program_intern_string(env->program, buf, strlen(buf));
+          ref->name = callee;
           ref->var_name =
               program_intern_string(env->program, var_name, strlen(var_name));
           ref->loc = node_get_location(name_node);
@@ -862,18 +864,17 @@ static node_t *sema_desugar_dispose_builtin(node_t *node,
     return NULL;
   }
   const location_t *loc = node_get_location(node);
-  char buf[strlen("$dispose$") + strlen(type_name) + 1];
-  (void)snprintf(buf, sizeof(buf), "$dispose$%s", type_name);
+  const char *callee =
+      sema_dispose_callee_name(env->out, env->program, type_name);
+  if (!callee) {
+    return NULL;
+  }
   node_t *call = create_call_node(env->out);
   node_set_location(call, loc);
   call_node_set_callee(
       call,
       sema_render_text_node(
-          env->out,
-          env->program,
-          CLUX_NODE_LITERAL_IDENTIFIER,
-          program_intern_string(env->program, buf, strlen(buf)),
-          loc));
+          env->out, env->program, CLUX_NODE_LITERAL_IDENTIFIER, callee, loc));
   node_t *arg_clone = sema_clone_impl(arg, env);
   if (take_addr) {
     node_t *addr = create_binary_node(env->out);

@@ -432,6 +432,23 @@ clux_value_t *exec_expr_binary(clux_context_t *ctx, node_t *node) {
     }
     return clux_context_cast(ctx, left, type, op_loc);
   }
+  /* is 成员判定（白皮书 §5.7）：左操作数为 union 值，右侧为成员名
+     叶子，经 vtable is_member 槽位按运行期 tag 判定，结果为 bool。 */
+  if (location_is(op_loc, "is")) {
+    clux_value_t *left = exec_operand(ctx, left_node);
+    if (clux_value_is_error(left)) {
+      return left;
+    }
+    if (!right_node ||
+        node_get_kind(right_node) != CLUX_NODE_LITERAL_IDENTIFIER) {
+      return clux_context_create_error_message(
+          ctx, op_loc, "membership test requires a member name");
+    }
+    char *member = location_get(node_get_location(right_node), allocator);
+    clux_value_t *result = clux_context_is_member(ctx, left, member, op_loc);
+    allocator_free(allocator, (void **)&member);
+    return result;
+  }
   /* 后缀一元形态（白皮书 §5.12/§5.13）：x.& 取址、x.* 解引用读、
      x.! 断言取 optional 载荷。操作数求值为值（view 与目标内存共享），
      取址经 ref 对任意 view 成立；解引用/取载荷回 view，写路径
