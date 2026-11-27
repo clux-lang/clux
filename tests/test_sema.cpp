@@ -2,6 +2,8 @@
 #include "core/allocator.h"
 #include "core/location.h"
 #include "core/program.h"
+#include "core/string.h"
+#include "core/vec.h"
 #include "engine/context.h"
 #include "engine/diag.h"
 #include "parser/node.h"
@@ -26,6 +28,7 @@
 #include "parser/node_subscript.h"
 #include "parser/parser.h"
 #include "parser/program.h"
+#include "parser/unparse.h"
 #include "sema/sema.h"
 #include <stdlib.h>
 #include <string.h>
@@ -423,6 +426,42 @@ static node_t *decls_nth_of_kind(node_t *decls, node_kind_t kind, size_t nth) {
   size_t seen = 0;
   for (size_t idx = 0; idx < program_node_get_stmt_count(decls); idx++) {
     node_t *stmt = program_node_get_stmt(decls, idx);
+    if (stmt && node_get_kind(stmt) == kind) {
+      if (seen == nth) {
+        return stmt;
+      }
+      seen++;
+    }
+  }
+  return NULL;
+}
+
+/* 顶层按名定位 func：归一化后 struct 方法混入顶层（Type$method），
+   用户函数保持原名，须按名区分。 */
+static node_t *
+decls_func_named(node_t *decls, allocator_t *a, const char *name) {
+  for (size_t idx = 0; idx < program_node_get_stmt_count(decls); idx++) {
+    node_t *stmt = program_node_get_stmt(decls, idx);
+    if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_FUNC) {
+      continue;
+    }
+    char *text = node_text(
+        a, func_decl_node_get_name(stmt_func_node_get_func_decl(stmt)));
+    int match = text && strcmp(text, name) == 0;
+    allocator_free(a, (void **)&text);
+    if (match) {
+      return stmt;
+    }
+  }
+  return NULL;
+}
+
+/* 函数体内定位：全局初始化器必须是编译期常量（C 规范），调用类测试
+   须把 var 移进函数体内，块内同样按 kind 扫描取第 nth 条。 */
+static node_t *block_nth_of_kind(node_t *block, node_kind_t kind, size_t nth) {
+  size_t seen = 0;
+  for (size_t idx = 0; idx < stmt_block_node_get_stmt_count(block); idx++) {
+    node_t *stmt = stmt_block_node_get_stmt(block, idx);
     if (stmt && node_get_kind(stmt) == kind) {
       if (seen == nth) {
         return stmt;
@@ -1643,11 +1682,12 @@ TEST(SemaTest, MemberCallOnNamedConstructReceiverIsDesugared) {
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
   parser_t *p;
+  /* 全局初始化器必须是编译期常量（C 规范），调用移进函数体。 */
   node_t *ast = parse_clux(
       a,
       &p,
       "struct Box { v: i32; func get(self: *Box): i32 { return self.v; } }\n"
-      "var r = .Box{ .v = 7 }.get();\n");
+      "func main(): void { var r = .Box{ .v = 7 }.get(); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_FALSE(sema_has_error(sema));
@@ -1655,7 +1695,12 @@ TEST(SemaTest, MemberCallOnNamedConstructReceiverIsDesugared) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  node_t *r_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  node_t *main_fn = decls_func_named(decls, a, "main");
+  ASSERT_NE(main_fn, nullptr);
+  node_t *r_var = block_nth_of_kind(
+      func_decl_node_get_body(stmt_func_node_get_func_decl(main_fn)),
+      CLUX_NODE_STMT_VAR,
+      0);
   ASSERT_NE(r_var, nullptr);
   node_t *call = stmt_var_node_get_value(r_var);
   ASSERT_NE(call, nullptr);
@@ -1698,12 +1743,14 @@ TEST(SemaTest, MemberCallValueSelfAndUniqueName) {
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
   parser_t *p;
+  /* 全局初始化器必须是编译期常量（C 规范），调用移进函数体；
+     var b 的构造初值是常量，可留全局供 main 引用。 */
   node_t *ast = parse_clux(
       a,
       &p,
       "struct P { v: i32; func id(self: *P): i32 { return self.v; } }\n"
       "var b = .P{ .v = 3 };\n"
-      "var c = b.id();\n");
+      "func main(): void { var c = b.id(); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_FALSE(sema_has_error(sema));
@@ -1711,7 +1758,12 @@ TEST(SemaTest, MemberCallValueSelfAndUniqueName) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  node_t *c_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
+  node_t *main_fn = decls_func_named(decls, a, "main");
+  ASSERT_NE(main_fn, nullptr);
+  node_t *c_var = block_nth_of_kind(
+      func_decl_node_get_body(stmt_func_node_get_func_decl(main_fn)),
+      CLUX_NODE_STMT_VAR,
+      0);
   ASSERT_NE(c_var, nullptr);
   node_t *call = stmt_var_node_get_value(c_var);
   ASSERT_NE(call, nullptr);
@@ -1752,6 +1804,8 @@ TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
   parser_t *p;
+  /* 全局初始化器必须是编译期常量（C 规范），调用移进函数体；
+     var a/var b 的构造初值是常量，可留全局供 main 引用。 */
   node_t *ast =
       parse_clux(a,
                  &p,
@@ -1759,7 +1813,7 @@ TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
                  "struct B { func tag(self: *B): i32 { return 2; } }\n"
                  "var a = .A{};\n"
                  "var b = .B{};\n"
-                 "var t = b.tag();\n");
+                 "func main(): void { var t = b.tag(); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_FALSE(sema_has_error(sema));
@@ -1767,7 +1821,12 @@ TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  node_t *t_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 2);
+  node_t *main_fn = decls_func_named(decls, a, "main");
+  ASSERT_NE(main_fn, nullptr);
+  node_t *t_var = block_nth_of_kind(
+      func_decl_node_get_body(stmt_func_node_get_func_decl(main_fn)),
+      CLUX_NODE_STMT_VAR,
+      0);
   ASSERT_NE(t_var, nullptr);
   node_t *call = stmt_var_node_get_value(t_var);
   ASSERT_NE(call, nullptr);
@@ -1787,4 +1846,216 @@ TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
   delete_parser(&p);
   delete_clux_context(&ctx);
   delete_allocator(&a);
+}
+
+/* ---- 端到端文本→文本：sema 归一化结果 unparse 精确断言 ---- */
+
+/* 端到端文本→文本：src → parse → sema（walk+emit，必须无错误）
+   → unparse → 与手写期望精确比较；附加断言（roundtrip=true 时）：
+   unparse 输出可零错误再解析且再 unparse 幂等。
+   已知缺口（roundtrip=false 佐证用例）：sema 合成混名列（f$Foo、
+   List$i32、nonamed$1、AAA$count 等）含 '$'，lexer 不接受 '$'，
+   unparse 输出无法零错误再解析——记录缺口交由主线定夺，主断言
+   （手写期望文本精确比较）不受影响。输入必须是零解析错误的合法源
+   （无初始化式 var 不是合法语法——初值必须显式给出），helper 强制
+   门禁输入侧 parse 错误。 */
+static void
+expect_sema_text(const char *src, const char *expect, bool roundtrip = true) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, src);
+  ASSERT_NE(ast, nullptr) << "src=" << src;
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << src;
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  ASSERT_FALSE(sema_has_error(sema)) << "src=" << src;
+  vec_t *programs = sema_emit(sema);
+  ASSERT_NE(programs, nullptr);
+  ASSERT_EQ(vec_get_size(programs), 1u) << "src=" << src;
+  program_t *program = (program_t *)vec_get(programs, 0);
+  string_t *text = program_unparse(program, a, nullptr);
+  ASSERT_NE(text, nullptr);
+  EXPECT_STREQ(string_get_data(text), expect) << "src=" << src;
+  /* 附加：unparse 输出可再解析且幂等。 */
+  if (roundtrip) {
+    parser_t *rt_p = create_parser(a, "rt.clux", string_get_data(text));
+    node_t *rt_ast = parser_read_program(a, rt_p);
+    ASSERT_NE(rt_ast, nullptr) << "unparsed output must re-parse";
+    ASSERT_EQ(vec_get_size(parser_get_error(rt_p)), 0u);
+    string_t *rt_text = node_unparse(rt_ast, a, nullptr);
+    ASSERT_NE(rt_text, nullptr);
+    EXPECT_STREQ(string_get_data(rt_text), expect);
+    delete_string(&rt_text);
+    delete_node(&rt_ast);
+    delete_parser(&rt_p);
+  }
+  delete_string(&text);
+  dispose_programs(programs);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(SemaTest, HoistsLocalDeclsToProgramTailAsNormalizedText) {
+  expect_sema_text(
+      "func f(): void {\n"
+      "  struct Foo { a: i32; }\n"
+      "  func g(): void { return; }\n"
+      "  var x: Foo = .Foo{ .a = 1 };\n"
+      "  var y: Foo = .Foo{ .a = 2 };\n"
+      "}\n",
+      "func f(): void {\n"
+      "  var x: f$Foo = .f$Foo{a = 1};\n"
+      "  var y: f$Foo = .f$Foo{a = 2};\n"
+      "}\n"
+      "struct f$Foo {\n"
+      "  a: i32;\n"
+      "}\n"
+      "func f$g(): void {\n"
+      "  return;\n"
+      "}\n",
+      /* 混名列含 '$'（lexer 不收）→ round-trip 不可零错误，跳过。 */
+      false);
+}
+
+TEST(SemaTest, InstantiatesTypeNameAtUseSiteAsNormalizedText) {
+  expect_sema_text("type List[T] = [4]T;\nvar a: List[i32] = <1, 2, 3, 4>;\n",
+                   "var a: List$i32 = <1, 2, 3, 4>;\n"
+                   "type List$i32 = [4]i32;\n",
+                   false);
+}
+
+TEST(SemaTest, ComptimeVarIsFoldedIntoUseSitesAsNormalizedText) {
+  expect_sema_text("comptime var N = 5;\nvar a = N;\n", "var a: i32 = 5i32;\n");
+}
+
+TEST(SemaTest, InferenceExplicitizesUnsuffixedLiteralsAsNormalizedText) {
+  expect_sema_text("var a = 1;\nvar b = true;\nvar f = 1.5f64;\n",
+                   "var a: i32 = 1i32;\n"
+                   "var b: bool = true;\n"
+                   "var f: f64 = 1.5f64;\n");
+}
+
+TEST(SemaTest, ComptimeIfPrunesToSelectedArmAsNormalizedText) {
+  expect_sema_text("func f(): void {\n"
+                   "  comptime if (true) { var a = 1; }\n"
+                   "  comptime if (false) { var b = 2; }\n"
+                   "  comptime if (false) { var c = 3; } else { var d = 4; }\n"
+                   "}\n",
+                   "func f(): void {\n"
+                   "  {\n"
+                   "    var a: i32 = 1i32;\n"
+                   "  }\n"
+                   "  {\n"
+                   "    var d: i32 = 4i32;\n"
+                   "  }\n"
+                   "}\n");
+}
+
+TEST(SemaTest, DeferDesugarsToClosureAndTailCallAsNormalizedText) {
+  expect_sema_text("func f(): void {\n"
+                   "  defer { var t = 1; }\n"
+                   "  var x = 2;\n"
+                   "}\n",
+                   "func f(): void {\n"
+                   "  var __defer0: func () -> void = func (): void {\n"
+                   "    var t: i32 = 1i32;\n"
+                   "  };\n"
+                   "  var x: i32 = 2i32;\n"
+                   "  __defer0();\n"
+                   "}\n");
+}
+
+TEST(SemaTest, ForeachDesugarsToIndexedForAsNormalizedText) {
+  expect_sema_text("var items: [3]i32 = <0, 0, 0>;\n"
+                   "func f(): void {\n"
+                   "  foreach (x of items) { var y = x; }\n"
+                   "}\n",
+                   "var items: [3]i32 = <0, 0, 0>;\n"
+                   "func f(): void {\n"
+                   "  {\n"
+                   "    var __i: i32 = 0i32;\n"
+                   "    for (; __i < #len(items); __i = __i + 1) {\n"
+                   "      var x: i32 = items[__i];\n"
+                   "      {\n"
+                   "        var y: i32 = x;\n"
+                   "      }\n"
+                   "    }\n"
+                   "  }\n"
+                   "}\n");
+}
+
+TEST(SemaTest, ComptimeForeachExpandsTupleWithSubstitutionAsNormalizedText) {
+  expect_sema_text("func f(): void {\n"
+                   "  comptime foreach (x of <1, 2>) { var y = x; }\n"
+                   "}\n",
+                   "func f(): void {\n"
+                   "  {\n"
+                   "    var y: i32 = 1i32;\n"
+                   "  }\n"
+                   "  {\n"
+                   "    var y: i32 = 2i32;\n"
+                   "  }\n"
+                   "}\n");
+}
+
+TEST(SemaTest, GenericDefinitionReplacedByInstanceAsNormalizedText) {
+  expect_sema_text("type List[T] = [4]T;\nvar a: List[i32] = <1, 2, 3, 4>;\n"
+                   "var b: List[i32] = <5, 6, 7, 8>;\n",
+                   "var a: List$i32 = <1, 2, 3, 4>;\n"
+                   "var b: List$i32 = <5, 6, 7, 8>;\n"
+                   "type List$i32 = [4]i32;\n",
+                   false);
+}
+
+TEST(SemaTest, AnonymousConstructIsNamedAsNormalizedText) {
+  expect_sema_text("var x = .{ .a = 1, .b = 2 };\n",
+                   "var x: nonamed$1 = .nonamed$1{a = 1, b = 2};\n"
+                   "struct nonamed$1 {\n"
+                   "  a: i32;\n"
+                   "  b: i32;\n"
+                   "}\n",
+                   false);
+}
+
+TEST(SemaTest, StructMembersAreHoistedToGlobalsAsNormalizedText) {
+  expect_sema_text("struct AAA {\n"
+                   "  x: i32;\n"
+                   "  var count = 0;\n"
+                   "  func get(self: *AAA): i32 { return self.x; }\n"
+                   "  func helper(): i32 { return 1; }\n"
+                   "}\n"
+                   "var a = .AAA{ .x = 1 };\n",
+                   "struct AAA {\n"
+                   "  x: i32;\n"
+                   "}\n"
+                   "var a: AAA = .AAA{x = 1};\n"
+                   "var AAA$count: i32 = 0i32;\n"
+                   "func AAA$get(self: *AAA): i32 {\n"
+                   "  return self.x;\n"
+                   "}\n"
+                   "func AAA$helper(): i32 {\n"
+                   "  return 1;\n"
+                   "}\n",
+                   false);
+}
+
+TEST(SemaTest, MemberCallOnNamedConstructDesugarsAsNormalizedText) {
+  /* 全局初始化器必须是编译期常量（C 规范），调用移进函数体。 */
+  expect_sema_text(
+      "struct Box { v: i32; func get(self: *Box): i32 { return self.v; } }\n"
+      "func main(): void { var r = .Box{ .v = 7 }.get(); }\n",
+      "struct Box {\n"
+      "  v: i32;\n"
+      "}\n"
+      "func main(): void {\n"
+      "  var r: i32 = Box$get(.Box{v = 7}.&);\n"
+      "}\n"
+      "func Box$get(self: *Box): i32 {\n"
+      "  return self.v;\n"
+      "}\n",
+      false);
 }
