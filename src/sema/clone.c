@@ -535,15 +535,20 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
 }
 
 /* ---- §2.7 foreach 脱糖 ----
-   foreach ([var] name [: type]? of iterable) { body }
-   → { var __i = 0;
-       for (; __i < #len(iterable); __i = __i + 1) {
-           var name [: type]? = iterable[__i];
+   foreach (var name [: type]? of iterable) { body }
+   → { var __iter: T? = iterable;
+       var __i = 0;
+       for (; __i < #len(__iter); __i = __i + 1) {
+           var name [: type]? = __iter[__i];
            <body 块>;
        } }
-   #len 与下标是现有语言能力，零新构造；iterable 按设计文本在
-   #len 与下标两处各自求值。无 var 关键字的只读性由使用点检查承担，
-   脱糖形态统一为 var。 */
+   foreach (name of iterable) { body }（裸名，前提 name 已在外层定义）
+   → 同上，但循环体首句改为赋值：name = __iter[__i];
+   #len 与下标是现有语言能力，零新构造；iterable 提升为隐藏 var
+   __iter（类型从 check 侧 iterable 锚点显式渲染）只求值一次——
+   #len 与下标两处若各自求值，call 形态 iterable 会被求值 2N 次，
+   与 exec 直连路径（求值一次）语义漂移。var/裸名是两种语义：
+   var 每轮重新定义迭代变量；裸名每轮给既有绑定赋值。 */
 
 static node_t *sema_foreach_ident(const char *name,
                                   const location_t *loc,
@@ -569,8 +574,35 @@ static node_t *sema_foreach_binary(const char *op,
 
 static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(src);
-  node_t *len_iter = sema_clone_impl(stmt_foreach_node_get_iterable(src), env);
-  node_t *idx_iter = sema_clone_impl(stmt_foreach_node_get_iterable(src), env);
+  node_t *iter_src = stmt_foreach_node_get_iterable(src);
+  /* var __iter: T? = <iterable>;（求值一次；TYPE 从 iterable 锚点渲染，
+     合成 var 无原树锚点，§2.8 字面量回填对符号引用值推不出来）。 */
+  node_t *iter_var = create_stmt_var_node(env->out);
+  node_set_location(iter_var, loc);
+  node_set_child(iter_var,
+                 CLUX_STMT_VAR_KEYWORD,
+                 sema_render_text_node(
+                     env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
+  node_set_child(
+      iter_var, CLUX_STMT_VAR_NAME, sema_foreach_ident("__iter", loc, env));
+  node_t *iter_type = NULL;
+  if (env->sema) {
+    const char *iter_type_name =
+        sema_type_render_name(sema_get_node_type(env->sema, iter_src));
+    if (iter_type_name) {
+      iter_type = sema_render_text_node(env->out,
+                                        env->program,
+                                        CLUX_NODE_LITERAL_IDENTIFIER,
+                                        iter_type_name,
+                                        loc);
+    }
+  }
+  node_set_child(iter_var, CLUX_STMT_VAR_TYPE, iter_type);
+  node_set_child(iter_var, CLUX_STMT_VAR_VALUE, sema_clone_impl(iter_src, env));
+  node_set_child(iter_var, CLUX_STMT_VAR_EXPORT, NULL);
+  node_set_child(iter_var, CLUX_STMT_VAR_COMPTIME, NULL);
+  node_t *len_iter = sema_foreach_ident("__iter", loc, env);
+  node_t *idx_iter = sema_foreach_ident("__iter", loc, env);
   /* var __i = 0;（§2.8 回填 i32） */
   node_t *idx_var = create_stmt_var_node(env->out);
   node_set_location(idx_var, loc);
@@ -615,40 +647,57 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
               env->out, env->program, CLUX_NODE_LITERAL_NUMERIC, "1", loc),
           loc,
           env));
-  /* 循环体：var name = iterable[__i]; <body 块>; */
+  /* 循环体首句：var 形态为 var name[:T]? = __iter[__i];
+     裸名形态为赋值 name = __iter[__i]（每轮给既有绑定赋值）。 */
   node_t *body_block = create_stmt_block_node(env->out);
   node_set_location(body_block, loc);
-  node_t *item_var = create_stmt_var_node(env->out);
-  node_set_location(item_var,
-                    node_get_location(stmt_foreach_node_get_name(src)));
-  node_set_child(item_var,
-                 CLUX_STMT_VAR_KEYWORD,
-                 sema_render_text_node(
-                     env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
-  node_set_child(item_var,
-                 CLUX_STMT_VAR_NAME,
-                 sema_clone_impl(stmt_foreach_node_get_name(src), env));
-  node_t *item_type = sema_clone_impl(stmt_foreach_node_get_type(src), env);
-  if (!item_type && env->sema) {
-    const char *item_type_name = sema_type_render_name(
-        sema_get_node_type(env->sema, stmt_foreach_node_get_name(src)));
-    if (item_type_name) {
-      item_type = sema_render_text_node(env->out,
-                                        env->program,
-                                        CLUX_NODE_LITERAL_IDENTIFIER,
-                                        item_type_name,
-                                        loc);
-    }
-  }
-  node_set_child(item_var, CLUX_STMT_VAR_TYPE, item_type);
   node_t *index = create_subscript_node(env->out);
   node_set_location(index, loc);
   subscript_node_set_base(index, idx_iter);
   subscript_node_add_arg(index, sema_foreach_ident("__i", loc, env));
-  node_set_child(item_var, CLUX_STMT_VAR_VALUE, index);
-  node_set_child(item_var, CLUX_STMT_VAR_EXPORT, NULL);
-  node_set_child(item_var, CLUX_STMT_VAR_COMPTIME, NULL);
-  node_add_child(body_block, item_var);
+  node_t *name_src = stmt_foreach_node_get_name(src);
+  if (stmt_foreach_node_get_keyword(src)) {
+    node_t *item_var = create_stmt_var_node(env->out);
+    node_set_location(item_var, node_get_location(name_src));
+    node_set_child(item_var,
+                   CLUX_STMT_VAR_KEYWORD,
+                   sema_render_text_node(
+                       env->out, env->program, CLUX_NODE_SYMBOL, "var", loc));
+    node_set_child(
+        item_var, CLUX_STMT_VAR_NAME, sema_clone_impl(name_src, env));
+    node_t *item_type = sema_clone_impl(stmt_foreach_node_get_type(src), env);
+    if (!item_type && env->sema) {
+      const char *item_type_name =
+          sema_type_render_name(sema_get_node_type(env->sema, name_src));
+      if (item_type_name) {
+        item_type = sema_render_text_node(env->out,
+                                          env->program,
+                                          CLUX_NODE_LITERAL_IDENTIFIER,
+                                          item_type_name,
+                                          loc);
+      }
+    }
+    node_set_child(item_var, CLUX_STMT_VAR_TYPE, item_type);
+    node_set_child(item_var, CLUX_STMT_VAR_VALUE, index);
+    node_set_child(item_var, CLUX_STMT_VAR_EXPORT, NULL);
+    node_set_child(item_var, CLUX_STMT_VAR_COMPTIME, NULL);
+    node_add_child(body_block, item_var);
+  } else {
+    /* 裸名：name = __iter[__i];（name 已在外层定义，每轮赋值）。 */
+    node_t *item_assign = create_assign_node(env->out);
+    node_set_location(item_assign, node_get_location(name_src));
+    assign_node_set_left(item_assign, sema_clone_impl(name_src, env));
+    assign_node_set_symbol(
+        item_assign,
+        sema_render_text_node(
+            env->out, env->program, CLUX_NODE_SYMBOL, "=", loc));
+    assign_node_set_value(item_assign, index);
+    /* 语句位须包 STMT_EXPR（unparse/分派按语句 kind 走）。 */
+    node_t *item_stmt = create_stmt_expr_node(env->out);
+    node_set_location(item_stmt, node_get_location(name_src));
+    stmt_expr_node_set_expr(item_stmt, item_assign);
+    node_add_child(body_block, item_stmt);
+  }
   node_add_child(body_block,
                  sema_clone_impl(stmt_foreach_node_get_body(src), env));
   /* for 槽序 INIT/CONDITION/UPDATE/BODY。 */
@@ -658,9 +707,10 @@ static node_t *sema_desugar_foreach(node_t *src, sema_clone_env_t *env) {
   node_set_child(loop, CLUX_STMT_FOR_CONDITION, cond);
   node_set_child(loop, CLUX_STMT_FOR_UPDATE, step);
   node_set_child(loop, CLUX_STMT_FOR_BODY, body_block);
-  /* 外层块：{ var __i = 0; for (...); } */
+  /* 外层块：{ var __iter: T? = ...; var __i = 0; for (...); } */
   node_t *block = create_stmt_block_node(env->out);
   node_set_location(block, loc);
+  node_add_child(block, iter_var);
   node_add_child(block, idx_var);
   node_add_child(block, loop);
   return block;

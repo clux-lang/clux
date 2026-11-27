@@ -114,14 +114,17 @@ else-if 链递归处理。条件不可求值是硬错误。
 
 ### 2.7 foreach 脱糖（普通形态）
 
-普通 foreach 脱糖为索引 for 循环，让 compiler 不必实现 foreach：
+普通 foreach 脱糖为索引 for 循环，让 compiler 不必实现 foreach；iterable
+提升为隐藏 var `__iter`（类型从 check 侧 iterable 节点锚点显式渲染），
+`#len` 与下标引用 `__iter`，全循环只求值一次：
 
 ```
 foreach (var item of items) { ... }
 →  {
+      var __iter: [3]i32 = items;
       var __i = 0;
-      for (; __i < #len(items); __i = __i + 1) {
-          var item = items[__i];
+      for (; __i < #len(__iter); __i = __i + 1) {
+          var item = __iter[__i];
           ...
       }
   }
@@ -129,7 +132,10 @@ foreach (var item of items) { ... }
 
 - 迭代对象限定数组/切片/元组/可索引序列（白皮书 §4.9），
   `#len` 与下标是现有语言能力，零新构造。
-- `var` 省略时迭代变量按只读语义处理（只读性由使用点检查承担）。
+- `var` 与裸名是两种语义（白皮书 §4.9）：`var` 每轮重新定义迭代变量；
+  裸名前提是名字已在外层定义，循环体首句脱糖为赋值
+  `item = __iter[__i];`（check 侧解析既有绑定并走 safe_cast 判定，
+  exec 侧 assign 既有绑定），每轮给既有绑定赋值。
 
 ### 2.8 推断显式化归一
 

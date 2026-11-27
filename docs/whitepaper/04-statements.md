@@ -126,12 +126,19 @@ foreach (var item of items) {
 }
 ```
 
-- 迭代对象必须是数组、切片、元组或可索引序列。
-- `var` 可省略；省略时只读。
+- 迭代对象必须是数组、切片、元组或可索引序列，求值一次。
+- `var` 与裸名是两种语义：`var` 形态每轮循环重新定义迭代变量（独立
+  轮作用域）；裸名形态的前提是名字已在外层定义，每轮给既有绑定赋值。
 - 迭代变量可以带显式类型标注。
 
 ```clux
 foreach (var item: Item of items) { ... }
+```
+
+```clux
+var sum: i32 = 0;
+var item: i32 = 0;
+foreach (item of <1, 2, 3>) { sum = sum + item; }  /* 每轮赋值既有 item */
 ```
 
 ## 4.10 break / continue

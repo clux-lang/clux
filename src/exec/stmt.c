@@ -842,10 +842,12 @@ clux_value_t *exec_stmt_for(clux_context_t *ctx, node_t *node) {
 /* foreach 语句 foreach ([var] name [: type]? of iterable) { body }
    （白皮书 §4.9）：逐元素迭代——iterable 求值一次后按长度（array 取
    类型长度 / slice 读胖指针 len / tuple 取元素个数）逐索引经 index vtable
-   取元素 view；迭代变量每轮独立 scope 内 declare（借用即拷贝落地，
-   与 clux 值语义一致），显式类型标注走 safe_cast；body 值分流同 for。
-   var 关键字有无是静态可写性约束，exec 层不区分；comptime foreach 是
-   编译期展开语义，不经此通道。循环语句无值（NULL）。 */
+   取元素 view；显式类型标注走 safe_cast；body 值分流同 for。
+   var/裸名两形态（与脱糖路径一致）：var 每轮独立 scope 内 declare
+   （借用即拷贝落地，与 clux 值语义一致）；裸名前提是 name 已在外层
+   定义，每轮 safe_cast 到目标类型后 assign 既有绑定（纯 "=" 首赋值
+   通道）。comptime foreach 是编译期展开语义，不经此通道。循环语句
+   无值（NULL）。 */
 clux_value_t *exec_stmt_foreach(clux_context_t *ctx, node_t *node) {
   node_t *iterable_node = stmt_foreach_node_get_iterable(node);
   if (!iterable_node) {
@@ -896,6 +898,24 @@ clux_value_t *exec_stmt_foreach(clux_context_t *ctx, node_t *node) {
   }
   node_t *type_node = stmt_foreach_node_get_type(node);
   clux_scope_t *outer = clux_context_get_scope(ctx);
+  /* 裸名形态：name 前提已在外层定义，每轮赋值既有绑定（绑定在轮间
+     稳定——轮作用域每轮排干，体内声明不外泄），循环外解析一次。 */
+  clux_value_t *target = NULL;
+  if (!stmt_foreach_node_get_keyword(node)) {
+    target = clux_context_lookup(ctx, name, node_get_location(name_node));
+    if (clux_value_is_error(target)) {
+      allocator_free(allocator, (void **)&name);
+      return target;
+    }
+    if (clux_value_is_shadow(target)) {
+      clux_value_t *err = clux_context_create_error_message(
+          ctx,
+          node_get_location(name_node),
+          "shadow value is not allowed in execution");
+      allocator_free(allocator, (void **)&name);
+      return err;
+    }
+  }
   clux_value_t *out = NULL;
   bool done = false;
   for (size_t idx = 0; idx < count && !done; idx++) {
@@ -922,11 +942,31 @@ clux_value_t *exec_stmt_foreach(clux_context_t *ctx, node_t *node) {
       }
     }
     if (!round_out) {
-      clux_value_t *declared = clux_context_declare_value(
-          ctx, element, name, node_get_location(name_node));
-      if (!declared || clux_value_is_error(declared)) {
-        round_out = declared;
-        done = true;
+      if (target) {
+        /* 裸名：safe_cast 到目标类型后 assign 既有绑定（纯 "=" 是
+           首赋值通道，TDZ 亦合法）。 */
+        clux_value_t *casted =
+            clux_context_safe_cast(ctx,
+                                   element,
+                                   clux_value_get_type(target),
+                                   node_get_location(name_node));
+        if (clux_value_is_error(casted)) {
+          round_out = casted;
+        } else {
+          clux_value_t *assigned = clux_context_assign(
+              ctx, target, casted, node_get_location(name_node));
+          if (!assigned || clux_value_is_error(assigned)) {
+            round_out = assigned;
+            done = true;
+          }
+        }
+      } else {
+        clux_value_t *declared = clux_context_declare_value(
+            ctx, element, name, node_get_location(name_node));
+        if (!declared || clux_value_is_error(declared)) {
+          round_out = declared;
+          done = true;
+        }
       }
     }
     if (!round_out) {

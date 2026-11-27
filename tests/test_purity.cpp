@@ -72,8 +72,8 @@ static const char *kRichSource =
     "func f(items: [2]i32): void {\n"
     "  defer { var t = 1; }\n"
     "  comptime if (true) { var a = 1; }\n"
-    "  comptime foreach (x of <1, 2>) { var y = x; }\n"
-    "  foreach (q of items) { var z = q; }\n"
+    "  comptime foreach (var x of <1, 2>) { var y = x; }\n"
+    "  foreach (var q of items) { var z = q; }\n"
     "  var use = LIMIT;\n"
     "}\n";
 

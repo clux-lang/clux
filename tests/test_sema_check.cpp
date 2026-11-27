@@ -187,7 +187,7 @@ TEST(SemaCheckTest, CleanRichProgramHasNoDiag) {
                            "  var e = E.A;\n"
                            "  var t: Alias = 2;\n"
                            "  defer { var d: i32 = limit; }\n"
-                           "  foreach (v of limit) { var w: i32 = v; }\n"
+                           "  foreach (var v of limit) { var w: i32 = v; }\n"
                            "}\n"
                            "func forward(): void {\n"
                            "  return;\n"
@@ -785,8 +785,8 @@ TEST(SemaCheckTest, MemberCallUnknownMethodIsReported) {
   delete_allocator(&a);
 }
 
-/* [N]T 数组形参（SYMBOL location 结构判别通道）+ foreach 迭代变量退化
-   元素类型回填 z 锚点。 */
+/* [N]T 数组形参（SYMBOL location 结构判别通道）+ foreach 裸名每轮赋值
+   既有绑定、体内 z 退化元素类型回填锚点。 */
 TEST(SemaCheckTest, ArrayParamForeachElemTypeIsRecorded) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -795,14 +795,15 @@ TEST(SemaCheckTest, ArrayParamForeachElemTypeIsRecorded) {
   node_t *ast = parse_clux(a,
                            &p,
                            "func f(items: [2]i32): void {\n"
+                           "  var q: i32 = 0i32;\n"
                            "  foreach (q of items) { var z = q; }\n"
                            "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
-  node_t *vars[1];
-  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 1), 1u);
-  clux_type_t *z_type = sema_get_node_type(sema, vars[0]);
+  node_t *vars[2];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 2), 2u);
+  clux_type_t *z_type = sema_get_node_type(sema, vars[1]);
   ASSERT_NE(z_type, nullptr);
   EXPECT_STREQ(clux_type_get_name(z_type), "i32");
   sema_destroy(&sema);

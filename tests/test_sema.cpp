@@ -1073,8 +1073,9 @@ TEST(SemaTest, DeferLifoOrderAndReturnPreCalls) {
   delete_allocator(&a);
 }
 
-/* foreach 脱糖（§2.7）：{ var __i: i32 = 0i32;
-   for (; __i < #len(items); __i = __i + 1) { var x = items[__i]; <body>; } } */
+/* foreach 脱糖（§2.7）：{ var __iter = items; var __i: i32 = 0i32;
+   for (; __i < #len(__iter); __i = __i + 1) { var x = __iter[__i]; <body>; } }
+   iterable 提升为 __iter 只求值一次；var 形态每轮重新定义迭代变量。 */
 TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -1084,7 +1085,7 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
                            &p,
                            "var items: [3]i32;\n"
                            "func f(): void {\n"
-                           "  foreach (x of items) { var y = x; }\n"
+                           "  foreach (var x of items) { var y = x; }\n"
                            "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
@@ -1100,11 +1101,20 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   ASSERT_EQ(body_stmt_count(body), 1u);
   node_t *wrap = body_nth_stmt(body, 0);
   ASSERT_EQ(node_get_kind(wrap), CLUX_NODE_STMT_BLOCK);
-  ASSERT_EQ(body_stmt_count(wrap), 2u);
+  ASSERT_EQ(body_stmt_count(wrap), 3u);
+  /* var __iter = items;（iterable 求值一次；类型从 iterable 锚点渲染）。 */
+  node_t *iter_var = body_nth_stmt(wrap, 0);
+  ASSERT_EQ(node_get_kind(iter_var), CLUX_NODE_STMT_VAR);
+  char *text = node_text(a, stmt_var_node_get_name(iter_var));
+  EXPECT_STREQ(text, "__iter");
+  allocator_free(a, (void **)&text);
+  text = node_text(a, stmt_var_node_get_value(iter_var));
+  EXPECT_STREQ(text, "items");
+  allocator_free(a, (void **)&text);
   /* var __i = 0（§2.8 联动回填 i32）。 */
-  node_t *idx_var = body_nth_stmt(wrap, 0);
+  node_t *idx_var = body_nth_stmt(wrap, 1);
   ASSERT_EQ(node_get_kind(idx_var), CLUX_NODE_STMT_VAR);
-  char *text = node_text(a, stmt_var_node_get_name(idx_var));
+  text = node_text(a, stmt_var_node_get_name(idx_var));
   EXPECT_STREQ(text, "__i");
   allocator_free(a, (void **)&text);
   text = node_text(a, stmt_var_node_get_value(idx_var));
@@ -1113,9 +1123,9 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   text = node_text(a, stmt_var_node_get_type(idx_var));
   EXPECT_STREQ(text, "i32");
   allocator_free(a, (void **)&text);
-  /* for：INIT NULL、COND 为 __i < #len(items)、UPDATE 为
-     __i = __i + 1、BODY 含 item var（items[__i]）。 */
-  node_t *loop = body_nth_stmt(wrap, 1);
+  /* for：INIT NULL、COND 为 __i < #len(__iter)、UPDATE 为
+     __i = __i + 1、BODY 含 item var（__iter[__i]）。 */
+  node_t *loop = body_nth_stmt(wrap, 2);
   ASSERT_EQ(node_get_kind(loop), CLUX_NODE_STMT_FOR);
   EXPECT_EQ(stmt_for_node_get_init(loop), nullptr);
   node_t *cond = stmt_for_node_get_condition(loop);
@@ -1135,7 +1145,7 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   allocator_free(a, (void **)&text);
   ASSERT_EQ(builtin_node_get_arg_count(len), 1u);
   text = node_text(a, builtin_node_get_arg(len, 0));
-  EXPECT_STREQ(text, "items");
+  EXPECT_STREQ(text, "__iter");
   allocator_free(a, (void **)&text);
   node_t *update = stmt_for_node_get_update(loop);
   ASSERT_NE(update, nullptr);
@@ -1152,7 +1162,7 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   text = node_text(a, node_get_child(step, 2));
   EXPECT_STREQ(text, "1");
   allocator_free(a, (void **)&text);
-  /* 循环体：var x = items[__i]; + 原 body 块。 */
+  /* 循环体：var x = __iter[__i]; + 原 body 块。 */
   node_t *loop_body = stmt_for_node_get_body(loop);
   ASSERT_NE(loop_body, nullptr);
   EXPECT_EQ(node_get_kind(loop_body), CLUX_NODE_STMT_BLOCK);
@@ -1166,7 +1176,7 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   ASSERT_NE(index, nullptr);
   EXPECT_EQ(node_get_kind(index), CLUX_NODE_EXPR_SUBSCRIPT);
   text = node_text(a, subscript_node_get_base(index));
-  EXPECT_STREQ(text, "items");
+  EXPECT_STREQ(text, "__iter");
   allocator_free(a, (void **)&text);
   text = node_text(a, subscript_node_get_arg(index, 0));
   EXPECT_STREQ(text, "__i");
@@ -1187,6 +1197,34 @@ TEST(SemaTest, ForeachDesugarsToIndexedFor) {
   delete_allocator(&a);
 }
 
+/* foreach 裸名未在外层定义 = 硬错误：名字解析 diag（裸名前提是已有绑定）。 */
+TEST(SemaTest, ForeachBareNameRequiresExistingBinding) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var items: [3]i32 = <0, 0, 0>;\n"
+                           "func f(): void {\n"
+                           "  foreach (x of items) { var y = x; }\n"
+                           "}\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_TRUE(sema_has_error(sema));
+  ASSERT_GE(clux_context_diag_count(ctx), 1u);
+  string_t *text =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+  EXPECT_NE(strstr(string_get_data(text), "undefined"), nullptr);
+  delete_string(&text);
+  EXPECT_EQ(sema_emit(sema), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 /* comptime foreach 展开（§2.6）：元组字面按元素逐份拷贝 body，
    迭代变量引用替换为元素克隆（§2.8 联动回填类型）。 */
 TEST(SemaTest, ComptimeForeachExpandsTupleWithSubstitution) {
@@ -1197,7 +1235,7 @@ TEST(SemaTest, ComptimeForeachExpandsTupleWithSubstitution) {
   node_t *ast = parse_clux(a,
                            &p,
                            "func f(): void {\n"
-                           "  comptime foreach (x of <1, 2>) { var y = x; }\n"
+                           "  comptime foreach (var x of <1, 2>) { var y = x; }\n"
                            "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
@@ -1246,7 +1284,7 @@ TEST(SemaTest, ComptimeForeachNonTupleIterableIsDiagnosed) {
   node_t *ast = parse_clux(a,
                            &p,
                            "func f(): void {\n"
-                           "  comptime foreach (x of items) { var y = x; }\n"
+                           "  comptime foreach (var x of items) { var y = x; }\n"
                            "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
@@ -2286,14 +2324,15 @@ TEST(SemaTest, RaiiFfiBoundaryRejectsDisposableTypes) {
 TEST(SemaTest, ForeachDesugarsToIndexedForAsNormalizedText) {
   expect_sema_text("var items: [3]i32 = <0, 0, 0>;\n"
                    "func f(): void {\n"
-                   "  foreach (x of items) { var y = x; }\n"
+                   "  foreach (var x of items) { var y = x; }\n"
                    "}\n",
                    "var items: [3]i32 = <0, 0, 0>;\n"
                    "func f(): void {\n"
                    "  {\n"
+                   "    var __iter: [3]i32 = items;\n"
                    "    var __i: i32 = 0i32;\n"
-                   "    for (; __i < #len(items); __i = __i + 1) {\n"
-                   "      var x: i32 = items[__i];\n"
+                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
+                   "      var x: i32 = __iter[__i];\n"
                    "      {\n"
                    "        var y: i32 = x;\n"
                    "      }\n"
@@ -2302,9 +2341,56 @@ TEST(SemaTest, ForeachDesugarsToIndexedForAsNormalizedText) {
                    "}\n");
 }
 
+/* foreach 裸名形态（§4.9/§2.7）：前提 x 已在外层定义，脱糖为每轮
+   赋值既有绑定（x = __iter[__i]），而非重新定义。 */
+TEST(SemaTest, ForeachBareNameAssignsToExistingBindingAsNormalizedText) {
+  expect_sema_text("var items: [3]i32 = <0, 0, 0>;\n"
+                   "func f(): void {\n"
+                   "  var x: i32 = 0i32;\n"
+                   "  foreach (x of items) { var y = x; }\n"
+                   "}\n",
+                   "var items: [3]i32 = <0, 0, 0>;\n"
+                   "func f(): void {\n"
+                   "  var x: i32 = 0i32;\n"
+                   "  {\n"
+                   "    var __iter: [3]i32 = items;\n"
+                   "    var __i: i32 = 0i32;\n"
+                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
+                   "      x = __iter[__i];\n"
+                   "      {\n"
+                   "        var y: i32 = x;\n"
+                   "      }\n"
+                   "    }\n"
+                   "  }\n"
+                   "}\n");
+}
+
+/* call 形态 iterable 单次求值：脱糖后 #len 与下标的 base 都是 __iter，
+   不再出现两份 call 求值（2N 次调用回归）。 */
+TEST(SemaTest, ForeachCallIterableEvaluatesOnceAsNormalizedText) {
+  expect_sema_text("func make(): [2]i32 { return <1, 2>; }\n"
+                   "func f(): void {\n"
+                   "  foreach (var x of make()) { }\n"
+                   "}\n",
+                   "func make(): [2]i32 {\n"
+                   "  return <1, 2>;\n"
+                   "}\n"
+                   "func f(): void {\n"
+                   "  {\n"
+                   "    var __iter: [2]i32 = make();\n"
+                   "    var __i: i32 = 0i32;\n"
+                   "    for (; __i < #len(__iter); __i = __i + 1) {\n"
+                   "      var x: i32 = __iter[__i];\n"
+                   "      {\n"
+                   "      }\n"
+                   "    }\n"
+                   "  }\n"
+                   "}\n");
+}
+
 TEST(SemaTest, ComptimeForeachExpandsTupleWithSubstitutionAsNormalizedText) {
   expect_sema_text("func f(): void {\n"
-                   "  comptime foreach (x of <1, 2>) { var y = x; }\n"
+                   "  comptime foreach (var x of <1, 2>) { var y = x; }\n"
                    "}\n",
                    "func f(): void {\n"
                    "  {\n"

@@ -1883,9 +1883,16 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
   case CLUX_NODE_STMT_FOREACH: {
     /* iterable 在外层作用域求值（迭代变量对 iterable 不可见）。迭代
        变量绑定：标注优先、iterable 元素类型兜底（ARRAY/SLICE 取 base）；
-       类型结果表锚点是迭代变量 NAME 节点。 */
+       类型结果表锚点是迭代变量 NAME 节点。var/裸名两形态（§4.9）：
+       var 每轮在轮作用域内重新定义；裸名前提是 name 已在外层定义，
+       每轮给既有绑定赋值——解析既有绑定（未定义自动 diag），元素
+       类型兼容性走 safe_cast 判定（与赋值同通道）。 */
     clux_value_t *iterable =
         check_expr_checked(sema, stmt_foreach_node_get_iterable(stmt));
+    /* 类型结果表锚点：iterable 节点（脱糖 __iter 提升的类型回填）。 */
+    sema_record_node_type(sema,
+                          stmt_foreach_node_get_iterable(stmt),
+                          iterable ? clux_value_get_type(iterable) : NULL);
     clux_context_push_scope(ctx);
     check_dfa_mark_push(sema);
     clux_type_t *type =
@@ -1901,8 +1908,22 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
       }
     }
     node_t *name_node = stmt_foreach_node_get_name(stmt);
-    check_define_value_name(sema, name_node, bind, 1);
-    sema_record_node_type(sema, name_node, bind);
+    if (stmt_foreach_node_get_keyword(stmt)) {
+      check_define_value_name(sema, name_node, bind, 1);
+      sema_record_node_type(sema, name_node, bind);
+    } else {
+      /* 裸名不是消费点（循环可能零次，赋值也不提升 DFA）。 */
+      check_dfa_assign_target(sema, name_node);
+      clux_value_t *target = check_expr_checked(sema, name_node);
+      if (target && bind) {
+        clux_value_t *element = clux_context_create_shadow_value(ctx, bind);
+        clux_value_t *gap =
+            check_safe_cast_gap(sema, element, clux_value_get_type(target));
+        if (gap) {
+          check_error_diag(sema, name_node, gap);
+        }
+      }
+    }
     /* P10：循环保守——体内赋值不提升到出口（可能零次执行）。 */
     size_t snap_size = 0;
     int *snap = sema->dfa_frames ? check_dfa_snapshot(sema, &snap_size) : NULL;
