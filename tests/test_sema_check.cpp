@@ -736,17 +736,19 @@ TEST(SemaCheckTest, ModuleVarTypeIsRecorded) {
 }
 
 /* member_call 静态推断（exec_member_call 同构）：register 装 struct 方法
-   名单，值接收者前置 *Box 首参，返回类型回填 r 锚点。 */
+   名单，值接收者前置 *Box 首参，返回类型回填 r 锚点。C 常量初始化器
+   规则：调用移进函数体（collect_of_kind 全树扫描，r 仍唯一）。 */
 TEST(SemaCheckTest, MemberCallTypeIsInferred) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
   parser_t *p;
-  node_t *ast = parse_clux(a,
-                           &p,
-                           "struct Box { v: i32; func get(self: *Box): i32 "
-                           "{ return self.v; } }\n"
-                           "var r = .Box{ .v = 7 }.get();\n");
+  node_t *ast =
+      parse_clux(a,
+                 &p,
+                 "struct Box { v: i32; func get(self: *Box): i32 "
+                 "{ return self.v; } }\n"
+                 "func main(): void { var r = .Box{ .v = 7 }.get(); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
@@ -821,16 +823,17 @@ TEST(SemaCheckTest, CallAndConstructRootTypesAreRecorded) {
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
   parser_t *p;
-  node_t *ast = parse_clux(a,
-                           &p,
-                           "struct S { a: i32; func get(self: *S): i32 { return "
-                           "self.a; } }\n"
-                           "func make(): S { return .S{ .a = 1 }; }\n"
-                           "func main(): void {\n"
-                           "  var u = make();\n"
-                           "  var v: S = .S{ .a = 2 };\n"
-                           "  var w = v.get();\n"
-                           "}\n");
+  node_t *ast =
+      parse_clux(a,
+                 &p,
+                 "struct S { a: i32; func get(self: *S): i32 { return "
+                 "self.a; } }\n"
+                 "func make(): S { return .S{ .a = 1 }; }\n"
+                 "func main(): void {\n"
+                 "  var u = make();\n"
+                 "  var v: S = .S{ .a = 2 };\n"
+                 "  var w = v.get();\n"
+                 "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
@@ -858,30 +861,24 @@ TEST(SemaCheckTest, CallAndConstructRootTypesAreRecorded) {
   delete_allocator(&a);
 }
 
-/* 模块级 var 不动点（顺序无关）：先声明者引用后定义的 var，依赖解析
-   定型后占位升级，引用点取到真实类型——声明顺序不限制推断。 */
-TEST(SemaCheckTest, ModuleVarForwardReferenceTypeIsInferred) {
+/* 模块级 var 初值引用 comptime 常量：合法路径定型回填（C 常量初始化器
+   规则下，comptime 常量是初值位置唯一可引用的非函数名字）。 */
+TEST(SemaCheckTest, ModuleVarComptimeReferenceTypeIsInferred) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
   parser_t *p;
   node_t *ast = parse_clux(a,
                            &p,
-                           "var c = b;\n"
-                           "var b = a;\n"
-                           "var a = 1;\n");
+                           "comptime var base = 1;\n"
+                           "var c = base;\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
-  node_t *vars[3];
-  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 3), 3u);
-  clux_type_t *a_type = sema_get_node_type(sema, vars[2]);
-  ASSERT_NE(a_type, nullptr);
-  EXPECT_STREQ(clux_type_get_name(a_type), "i32");
-  clux_type_t *b_type = sema_get_node_type(sema, vars[1]);
-  ASSERT_NE(b_type, nullptr);
-  EXPECT_STREQ(clux_type_get_name(b_type), "i32");
-  clux_type_t *c_type = sema_get_node_type(sema, vars[0]);
+  node_t *vars[2];
+  /* collect_of_kind 全树扫描：comptime var 也是 STMT_VAR，源码序先收。 */
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 2), 2u);
+  clux_type_t *c_type = sema_get_node_type(sema, vars[1]);
   ASSERT_NE(c_type, nullptr);
   EXPECT_STREQ(clux_type_get_name(c_type), "i32");
   sema_destroy(&sema);
@@ -891,9 +888,10 @@ TEST(SemaCheckTest, ModuleVarForwardReferenceTypeIsInferred) {
   delete_allocator(&a);
 }
 
-/* 循环依赖负测（互引用）：一轮无进展仍有未定型——唯一不可推断场景，
-   每个未定型 var 各报一条语法错误（不重复演算防连锁假诊断）。 */
-TEST(SemaCheckTest, ModuleVarMutualCircularReferenceIsReported) {
+/* 负测（互引用普通 var）：C 静态存储期初始化规则下不区分循环与否——
+   初值引用普通模块 var 一律拒绝（原"循环依赖"场景被规则前置拦截，
+   两个 var 各报一条，互引用不再构成特殊场景）。 */
+TEST(SemaCheckTest, ModuleVarMutualReferenceIsRejected) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
@@ -904,8 +902,16 @@ TEST(SemaCheckTest, ModuleVarMutualCircularReferenceIsReported) {
                            "var b = a;\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
-  expect_diag_count(ctx, 2u, 0, "circular reference in module-level var 'a'");
-  expect_diag_count(ctx, 2u, 1, "circular reference in module-level var 'b'");
+  expect_diag_count(ctx,
+                    2u,
+                    0,
+                    "initializer of module-level var 'a' is not a "
+                    "compile-time constant");
+  expect_diag_count(ctx,
+                    2u,
+                    1,
+                    "initializer of module-level var 'b' is not a "
+                    "compile-time constant");
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);
@@ -913,9 +919,9 @@ TEST(SemaCheckTest, ModuleVarMutualCircularReferenceIsReported) {
   delete_allocator(&a);
 }
 
-/* 循环依赖负测（自引用）：var a = a 直接引用自身（遮蔽外层同名），
-   同样按循环依赖报错。 */
-TEST(SemaCheckTest, ModuleVarSelfReferenceIsReported) {
+/* 负测（自引用）：var a = a 直接引用自身，同样按非常量初始化器拒绝
+   （普通 var 名不在合法名字集合，无"遮蔽外层同名"的演算参与）。 */
+TEST(SemaCheckTest, ModuleVarSelfReferenceIsRejected) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
@@ -923,7 +929,11 @@ TEST(SemaCheckTest, ModuleVarSelfReferenceIsReported) {
   node_t *ast = parse_clux(a, &p, "var a = a;\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
-  expect_diag_count(ctx, 1u, 0, "circular reference in module-level var 'a'");
+  expect_diag_count(ctx,
+                    1u,
+                    0,
+                    "initializer of module-level var 'a' is not a "
+                    "compile-time constant");
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);
@@ -931,9 +941,9 @@ TEST(SemaCheckTest, ModuleVarSelfReferenceIsReported) {
   delete_allocator(&a);
 }
 
-/* 类型标注不解除门控：var a: i32 = b 的值仍依赖未定型 b，须等 b 定型
-   后演算（标注只是占位类型，不等于依赖满足）。 */
-TEST(SemaCheckTest, ModuleVarAnnotatedForwardReferenceIsInferred) {
+/* 类型标注不解除规则：var a: i32 = b 初值引用普通 var 仍拒绝（标注只是
+   占位类型，不等于值编译期可知）；b 自身初值合法照常定型回填。 */
+TEST(SemaCheckTest, ModuleVarAnnotatedOrdinaryReferenceIsRejected) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
   clux_sema_t *sema = sema_create(ctx, a);
@@ -944,15 +954,184 @@ TEST(SemaCheckTest, ModuleVarAnnotatedForwardReferenceIsInferred) {
                            "var b = 1;\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
-  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  expect_diag_count(ctx,
+                    1u,
+                    0,
+                    "initializer of module-level var 'a' is not a "
+                    "compile-time constant");
   node_t *vars[2];
   ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 2), 2u);
-  clux_type_t *a_type = sema_get_node_type(sema, vars[0]);
-  ASSERT_NE(a_type, nullptr);
-  EXPECT_STREQ(clux_type_get_name(a_type), "i32");
   clux_type_t *b_type = sema_get_node_type(sema, vars[1]);
   ASSERT_NE(b_type, nullptr);
   EXPECT_STREQ(clux_type_get_name(b_type), "i32");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 指针模式前向引用（§8.15）：b.& 是地址常量——不读 b 的值、只取符号
+   地址（C 的 int *a = &b; int b = 1; 对应物），var a = b.&; var b = 1;
+   合法。两遍定型：b 第一遍定型 i32，a 第二遍演算回填指针类型。 */
+TEST(SemaCheckTest, ModuleVarAddrOfForwardReferenceIsAccepted) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, "var pa = b.&;\nvar b = 1;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  node_t *vars[2];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 2), 2u);
+  clux_type_t *pa_type = sema_get_node_type(sema, vars[0]);
+  ASSERT_NE(pa_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(pa_type), CLUX_TYPE_PTR);
+  clux_type_t *b_type = sema_get_node_type(sema, vars[1]);
+  ASSERT_NE(b_type, nullptr);
+  EXPECT_STREQ(clux_type_get_name(b_type), "i32");
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 地址常量合法形态（§8.15）：顺序取址（已定型再引用）/ 函数取址（C 的
+   &g 地址常量）/ comptime 常量取址 / 元组内嵌取址——全部含 ".&" 走
+   两遍通道，0 diag。 */
+TEST(SemaCheckTest, ModuleVarAddrOfFormsAreAccepted) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func g(): void {}\n"
+                           "comptime var K = 3;\n"
+                           "var b = 1;\n"
+                           "var pb = b.&;\n"
+                           "var pf = g.&;\n"
+                           "var pk = K.&;\n"
+                           "var pair = <b.&, 2>;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 现状固化（§8.15）：指针模式的自引用（var a = a.&）与互引用
+   （var c = d.&; var d = c.&）类型无穷回归不可解——类型 *typeof(对方)
+   互相依赖，C 靠显式类型标注兜底。当前行为：0 diag、不定型（占位留
+   error），待白皮书定夺（仿 const-receiver 语义缺口先例）。 */
+TEST(SemaCheckTest, ModuleVarAddrOfCyclesStayUntyped) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "var sa = sa.&;\n"
+                           "var c = d.&;\n"
+                           "var d = c.&;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  node_t *vars[3];
+  ASSERT_EQ(collect_of_kind(ast, CLUX_NODE_STMT_VAR, vars, 3), 3u);
+  EXPECT_EQ(sema_get_node_type(sema, vars[0]), nullptr);
+  EXPECT_EQ(sema_get_node_type(sema, vars[1]), nullptr);
+  EXPECT_EQ(sema_get_node_type(sema, vars[2]), nullptr);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 正向：C 常量初始化器白名单全覆盖——数字/字符串/字符/布尔字面量、
+   一元负号、二元算术（comptime 常量参与运算）、元组聚合、匿名构造、
+   comptime 引用、函数名地址常量（C 的 int (*f)(void) = g 对应物）。
+   全部 0 diag。 */
+TEST(SemaCheckTest, ModuleVarConstInitializerFormsAreAccepted) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "comptime var K = 3;\n"
+                           "func g(): void {}\n"
+                           "var num = 42;\n"
+                           "var strv = \"text\";\n"
+                           "var ch = 'x';\n"
+                           "var flag = true;\n"
+                           "var neg = -1;\n"
+                           "var sum = K + 1;\n"
+                           "var pair = <1, 2>;\n"
+                           "var anon = .{ .a = 1 };\n"
+                           "var fp = g;\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 0u);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* 负向：运行期求值形态各报一条——函数调用、ternary、member 访问、
+   下标（member/下标同为 EXPR_BINARY 形态，按符号拒收防白名单漏过）、
+   内置函数。 */
+TEST(SemaCheckTest, ModuleVarRuntimeInitializerFormsAreRejected) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a,
+                           &p,
+                           "func h(): i32 { return 1; }\n"
+                           "struct S { v: i32; }\n"
+                           "var arr = <1, 2>;\n"
+                           "var call = h();\n"
+                           "var cond = true ? 1 : 2;\n"
+                           "var mem = .S{ .v = 1 }.v;\n"
+                           "var sub = arr[0];\n"
+                           "var bi = #sizeof(i32);\n");
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(sema_walk(sema, ast), 0);
+  EXPECT_EQ(clux_context_diag_count(ctx), 5u);
+  expect_diag_count(ctx,
+                    5u,
+                    0,
+                    "initializer of module-level var 'call' is not a "
+                    "compile-time constant");
+  expect_diag_count(ctx,
+                    5u,
+                    1,
+                    "initializer of module-level var 'cond' is not a "
+                    "compile-time constant");
+  expect_diag_count(ctx,
+                    5u,
+                    2,
+                    "initializer of module-level var 'mem' is not a "
+                    "compile-time constant");
+  expect_diag_count(ctx,
+                    5u,
+                    3,
+                    "initializer of module-level var 'sub' is not a "
+                    "compile-time constant");
+  expect_diag_count(ctx,
+                    5u,
+                    4,
+                    "initializer of module-level var 'bi' is not a "
+                    "compile-time constant");
   sema_destroy(&sema);
   delete_node(&ast);
   delete_parser(&p);
@@ -1062,7 +1241,7 @@ TEST(SemaCheckTest, GenericFuncBodyErrorIsReportedAndEmitBlocked) {
   node_t *ast = parse_clux(a,
                            &p,
                            "func id[T](x: T): T { return missing; }\n"
-                           "var v: i32 = id[i32](1);\n");
+                           "func main(): void { var v: i32 = id[i32](1); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx, 1u, 0, "undefined name 'missing'");
@@ -1089,8 +1268,10 @@ TEST(SemaCheckTest, GenericBodyErrorOnlyInBadInstance) {
                            "func f[T](x: T): void { var y: *i32 = x; }\n"
                            "var a: i32 = 0;\n"
                            "var p: *i32;\n"
-                           "var use1 = f[i32](a);\n"
-                           "var use2 = f[P](p);\n");
+                           "func main(): void {\n"
+                           "  var use1 = f[i32](a);\n"
+                           "  var use2 = f[P](p);\n"
+                           "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx, 1u, 0, "cannot safely cast 'i32' to '*i32'");
@@ -1209,7 +1390,7 @@ TEST(SemaCheckTest, GenericBodyUseBeforeAssignmentIsReported) {
                            "  var w = v;\n"
                            "}\n"
                            "var a: i32 = 0;\n"
-                           "var use = f[i32](a);\n");
+                           "func main(): void { var use = f[i32](a); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx, 1u, 0, "use before assignment 'v'");
@@ -1256,7 +1437,7 @@ TEST(SemaCheckTest, GenericInstancesCleanHaveNoDiag) {
                            "func id[T](x: T): T { return x; }\n"
                            "struct Box[T] { v: T; }\n"
                            "var a: i32 = 0;\n"
-                           "var use = id[i32](a);\n"
+                           "func main(): void { var use = id[i32](a); }\n"
                            "var b: Box[i32];\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
@@ -1293,7 +1474,7 @@ TEST(SemaCheckTest, GenericInterfaceConstraintSatisfiedHasNoDiag) {
                            "}\n"
                            "func g[W extends IW](w: *W): void { }\n"
                            "var pf: *File;\n"
-                           "var use = g[File](pf);\n");
+                           "func main(): void { var use = g[File](pf); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
@@ -1320,7 +1501,7 @@ TEST(SemaCheckTest, GenericConstraintMissingMemberReportedOnce) {
                            "  var z: str = w;\n"
                            "}\n"
                            "var pi: *i32;\n"
-                           "var use = g[i32](pi);\n");
+                           "func main(): void { var use = g[i32](pi); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx,
@@ -1356,7 +1537,7 @@ TEST(SemaCheckTest, FBoundConstraintSatisfiedHasNoDiag) {
                            "}\n"
                            "func g[T extends IW[T]](t: *T): void { }\n"
                            "var pb: *Buf;\n"
-                           "var use = g[Buf](pb);\n");
+                           "func main(): void { var use = g[Buf](pb); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
@@ -1384,7 +1565,7 @@ TEST(SemaCheckTest, FBoundConstraintMissingMemberReportedOnce) {
                            "  var z: str = t;\n"
                            "}\n"
                            "var pb: *Blank;\n"
-                           "var use = g[Blank](pb);\n");
+                           "func main(): void { var use = g[Blank](pb); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx,
@@ -1415,7 +1596,7 @@ TEST(SemaCheckTest, GenericConstraintSignatureMismatchReported) {
                            "}\n"
                            "func g[W extends IW](w: *W): void { }\n"
                            "var ps: *S;\n"
-                           "var use = g[S](ps);\n");
+                           "func main(): void { var use = g[S](ps); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx,
@@ -1448,8 +1629,10 @@ TEST(SemaCheckTest, GenericPatternConstraintExtendsJudged) {
                            "}\n"
                            "var b: B;\n"
                            "var i: i32 = 0;\n"
-                           "var use1 = g[B](b);\n"
-                           "var use2 = g[i32](i);\n");
+                           "func main(): void {\n"
+                           "  var use1 = g[B](b);\n"
+                           "  var use2 = g[i32](i);\n"
+                           "}\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx, 1u, 0, "type 'i32' does not satisfy constraint 'A'");
@@ -1476,7 +1659,7 @@ TEST(SemaCheckTest, GenericDefaultOmittedIsFilledAndSubstituted) {
                            "  return 0;\n"
                            "}\n"
                            "var s: str = \"a\";\n"
-                           "var u = f[str](s);\n");
+                           "func main(): void { var u = f[str](s); }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   EXPECT_EQ(clux_context_diag_count(ctx), 0u);
@@ -1631,7 +1814,7 @@ TEST(SemaCheckTest, DecoratorUndefinedNameIsReported) {
   node_t *ast = parse_clux(a,
                            &p,
                            "[[missing_dec]] var x: i32 = 1;\n"
-                           "var y: i32 = x;\n");
+                           "func main(): void { var y: i32 = x; }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx, 1u, 0, "undefined name 'missing_dec'");
@@ -1654,7 +1837,7 @@ TEST(SemaCheckTest, DecoratorArgTypeMismatchIsReportedAndFallbackKeepsType) {
                            &p,
                            "func wants_str(s: str): str { return s; }\n"
                            "[[wants_str]] var x: i32 = 1;\n"
-                           "var y: i32 = x;\n");
+                           "func main(): void { var y: i32 = x; }\n");
   ASSERT_NE(ast, nullptr);
   EXPECT_EQ(sema_walk(sema, ast), 0);
   expect_diag_count(ctx, 1u, 0, "function argument 0 requires type 'str'");

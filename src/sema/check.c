@@ -2145,6 +2145,27 @@ static clux_value_t *check_lookup_value(clux_sema_t *sema, node_t *node) {
   char *name = check_name_of(allocator, node);
   clux_value_t *found =
       name ? clux_scope_get(clux_context_get_scope(ctx), name) : NULL;
+  /* comptime 常量的真值在 const_defs 表（walk 期 CTFE 求值）——scope
+     里 P7 预扫描登记的是 error 占位 shadow。占位命中常量表时按 kind
+     物化对应类型的 shadow 参与演算，引用点类型可演算（普通 var 占位
+     不在表，不受影响）。 */
+  if (name && found && clux_value_is_shadow(found) &&
+      clux_type_get_kind(clux_value_get_type(found)) == CLUX_TYPE_ERROR) {
+    for (size_t idx = 0; idx < vec_get_size(sema->const_defs); idx++) {
+      sema_const_def_t *def =
+          (sema_const_def_t *)vec_get(sema->const_defs, idx);
+      if (def->name && strcmp(def->name, name) == 0) {
+        clux_type_t *type =
+            def->value.kind == SEMA_CONST_BOOL
+                ? clux_context_builtin_type(ctx, CLUX_TYPE_BOOL)
+                : (def->value.type_name
+                       ? check_type_find(sema, def->value.type_name)
+                       : NULL);
+        found = type ? clux_context_create_shadow_value(ctx, type) : NULL;
+        break;
+      }
+    }
+  }
   /* P10：DFA 消费点——名字引用命中未赋条目即报（§8.6）。 */
   check_dfa_consume(sema, node, name);
   if (name && !found) {
@@ -3071,33 +3092,250 @@ static clux_value_t *check_expr(clux_sema_t *sema, node_t *node) {
   return NULL;
 }
 
-/* ---- 模块级 var 不动点（前向引用） ---- */
+/* ---- 模块级 var 初始化器（C 常量初始化器规则） ---- */
 
-/* 值表达式引用名收集：子树内全部无孩子 LITERAL_IDENTIFIER（保守近似——
-   闭包形参/捕获等同名标识符一并计入，误判只会让该 var 多等一轮，无真
-   循环仍会定型；名字拷贝归 ctx allocator，随条目释放）。 */
-static void
-check_collect_idents(allocator_t *allocator, node_t *node, vec_t *names) {
-  if (!node) {
-    return;
+/* 名字判别：comptime 常量表命中（walk 期已按源码序入表）或模块级函数
+   名（C 地址常量对应物）——二者是初值位置仅有的合法名字引用；普通
+   模块 var（含已定型者）一律按运行期值拒绝（C 静态存储期规则：
+   initializer element is not constant）。 */
+static int check_modvar_name_is_const(clux_sema_t *sema, const char *name) {
+  for (size_t idx = 0; idx < vec_get_size(sema->const_defs); idx++) {
+    sema_const_def_t *def = (sema_const_def_t *)vec_get(sema->const_defs, idx);
+    if (def->name && strcmp(def->name, name) == 0) {
+      return 1;
+    }
   }
-  if (node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER &&
-      vec_get_size(node_get_children(node)) == 0) {
-    vec_push(names, check_name_of(allocator, node));
+  clux_value_t *found = clux_scope_get(clux_context_get_scope(sema->ctx), name);
+  return found &&
+         clux_type_get_kind(clux_value_get_type(found)) == CLUX_TYPE_FUNC;
+}
+
+/* 名字已定型判定（§8.15 地址型第二遍用）：scope 中该名字解析到非
+   error 类型（普通 var 已由第一遍 check_modvar_resolve 回填 / 函数注册
+   期即定）。 */
+static int check_modvar_name_typed(clux_sema_t *sema, const char *name) {
+  clux_value_t *found = clux_scope_get(clux_context_get_scope(sema->ctx), name);
+  return found &&
+         clux_type_get_kind(clux_value_get_type(found)) != CLUX_TYPE_ERROR;
+}
+
+/* 地址常量形态（§8.15）：初始化器任意深度出现后缀 ".&"。地址不读操作
+   数的值、只取符号地址，C 常量表达式规则（&b 是地址常量）下放行且支持
+   前向引用（指针模式）；其定型依赖操作数先行定型，主循环分两遍处理
+   （值型先、地址型后）。 */
+static int check_modvar_contains_addr(clux_sema_t *sema, node_t *expr) {
+  if (!expr) {
+    return 0;
   }
-  vec_t *children = node_get_children(node);
-  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
-    check_collect_idents(allocator, vec_get(children, idx), names);
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_BINARY) {
+    if (!binary_node_get_right(expr)) {
+      allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+      char *op = check_name_of(allocator, binary_node_get_symbol(expr));
+      int is_addr = op && strcmp(op, ".&") == 0;
+      allocator_free(allocator, (void **)&op);
+      if (is_addr) {
+        return 1;
+      }
+    }
+    return check_modvar_contains_addr(sema, binary_node_get_left(expr)) ||
+           check_modvar_contains_addr(sema, binary_node_get_right(expr));
+  }
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_TUPLE) {
+    vec_t *children = node_get_children(expr);
+    for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+      if (check_modvar_contains_addr(sema, (node_t *)vec_get(children, idx))) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_CONSTRUCT) {
+    size_t elem_count = construct_node_get_elem_count(expr);
+    for (size_t idx = 0; idx < elem_count; idx++) {
+      if (check_modvar_contains_addr(sema,
+                                     construct_node_get_elem(expr, idx))) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+    return check_modvar_contains_addr(sema,
+                                      construct_field_node_get_value(expr));
+  }
+  return 0;
+}
+
+/* 地址型操作数就绪判定（§8.15 第二遍前置条件）：".&" 的名字操作数已
+   解析到非 error 类型（普通 var 已由第一遍定型回填 / 函数注册即定）或
+   命中 comptime 常量表（check 演算物化 shadow）。互引用/自引用的指针
+   模式类型无穷回归不可解（C 靠显式类型标注兜底）——未就绪者本轮跳过
+   定型（0 diag，不定型，现状固化待白皮书定夺）。 */
+static int check_modvar_addr_is_ready(clux_sema_t *sema, node_t *expr) {
+  if (!expr) {
+    return 1;
+  }
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_BINARY) {
+    if (!binary_node_get_right(expr)) {
+      allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+      char *op = check_name_of(allocator, binary_node_get_symbol(expr));
+      int is_addr = op && strcmp(op, ".&") == 0;
+      allocator_free(allocator, (void **)&op);
+      if (is_addr) {
+        /* 白名单只放行纯名字操作数（check_modvar_init_is_const），
+           其他形态不会出现在合法地址型初始化器中。 */
+        node_t *operand = binary_node_get_left(expr);
+        if (node_get_kind(operand) != CLUX_NODE_LITERAL_IDENTIFIER ||
+            vec_get_size(node_get_children(operand)) != 0) {
+          return 0;
+        }
+        char *name = check_name_of(allocator, operand);
+        int ready = name && (check_modvar_name_is_const(sema, name) ||
+                             check_modvar_name_typed(sema, name));
+        allocator_free(allocator, (void **)&name);
+        return ready;
+      }
+    }
+    return check_modvar_addr_is_ready(sema, binary_node_get_left(expr)) &&
+           check_modvar_addr_is_ready(sema, binary_node_get_right(expr));
+  }
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_TUPLE) {
+    vec_t *children = node_get_children(expr);
+    for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+      if (!check_modvar_addr_is_ready(sema, (node_t *)vec_get(children, idx))) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_CONSTRUCT) {
+    size_t elem_count = construct_node_get_elem_count(expr);
+    for (size_t idx = 0; idx < elem_count; idx++) {
+      if (!check_modvar_addr_is_ready(sema,
+                                      construct_node_get_elem(expr, idx))) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  if (node_get_kind(expr) == CLUX_NODE_EXPR_CONSTRUCT_FIELD) {
+    return check_modvar_addr_is_ready(sema,
+                                      construct_field_node_get_value(expr));
+  }
+  return 1;
+}
+
+/* 形态白名单（递归）：字面量 / 合法名字 / 二元运算（运算符限定算术/
+   位/比较——下标 "[]"、member "."、赋值 "=" 等同为 EXPR_BINARY 形态，
+   按符号拒收；一元 prefix 形态 LEFT 为 NULL 时同表限定）/ 元组聚合 /
+   构造（类型槽与具名字段名槽跳过，字段值递归）。函数调用、ternary、
+   闭包、内置函数等运行期求值形态一律拒绝。 */
+static int check_modvar_init_is_const(clux_sema_t *sema, node_t *expr) {
+  if (!expr) {
+    return 1;
+  }
+  switch (node_get_kind(expr)) {
+  case CLUX_NODE_LITERAL_UNDEFINED:
+  case CLUX_NODE_LITERAL_STRING:
+  case CLUX_NODE_LITERAL_CHARACTER:
+  case CLUX_NODE_LITERAL_NUMERIC:
+  case CLUX_NODE_LITERAL_BOOLEAN:
+    return 1;
+  case CLUX_NODE_LITERAL_IDENTIFIER: {
+    if (vec_get_size(node_get_children(expr)) != 0) {
+      return 0;
+    }
+    allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+    char *name = check_name_of(allocator, expr);
+    int ok = name && check_modvar_name_is_const(sema, name);
+    allocator_free(allocator, (void **)&name);
+    return ok;
+  }
+  case CLUX_NODE_EXPR_BINARY: {
+    allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+    char *op = check_name_of(allocator, binary_node_get_symbol(expr));
+    if (op && !binary_node_get_right(expr) && strcmp(op, ".&") == 0) {
+      /* 地址常量（§8.15）：&b 不读 b 的值、只取符号地址——C 常量表达
+         式。操作数放宽为任意模块级已声明名字（普通 var 占位亦含——前
+         向引用以指针模式回归：var a = b.&; var b = 1; 合法）；非纯名
+         字操作数（字面量/成员取址等）拒收（C 中字面量非对象）。 */
+      node_t *operand = binary_node_get_left(expr);
+      int ok = operand &&
+               node_get_kind(operand) == CLUX_NODE_LITERAL_IDENTIFIER &&
+               vec_get_size(node_get_children(operand)) == 0;
+      if (ok) {
+        char *name = check_name_of(allocator, operand);
+        ok = name &&
+             (check_modvar_name_is_const(sema, name) ||
+              clux_scope_get(clux_context_get_scope(sema->ctx), name) != NULL);
+        allocator_free(allocator, (void **)&name);
+      }
+      allocator_free(allocator, (void **)&op);
+      return ok;
+    }
+    clux_binary_op_t binary;
+    int ok = 0;
+    if (op && check_binary_op_text(op, &binary)) {
+      ok = 1; /* 算术/位/比较二元 */
+    } else {
+      clux_prefix_op_t prefix;
+      ok = !binary_node_get_left(expr) && op &&
+           check_prefix_op_text(op, &prefix); /* 一元 prefix 形态 */
+    }
+    allocator_free(allocator, (void **)&op);
+    return ok && check_modvar_init_is_const(sema, binary_node_get_left(expr)) &&
+           check_modvar_init_is_const(sema, binary_node_get_right(expr));
+  }
+  case CLUX_NODE_EXPR_TUPLE: {
+    vec_t *children = node_get_children(expr);
+    for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+      if (!check_modvar_init_is_const(sema, (node_t *)vec_get(children, idx))) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  case CLUX_NODE_EXPR_CONSTRUCT: {
+    size_t elem_count = construct_node_get_elem_count(expr);
+    for (size_t idx = 0; idx < elem_count; idx++) {
+      if (!check_modvar_init_is_const(sema,
+                                      construct_node_get_elem(expr, idx))) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  case CLUX_NODE_EXPR_CONSTRUCT_FIELD:
+    return check_modvar_init_is_const(sema,
+                                      construct_field_node_get_value(expr));
+  default:
+    return 0;
   }
 }
 
-/* 模块级 var 工作条目：不动点演算的最小载体。 */
-typedef struct {
-  node_t *stmt; /* STMT_VAR 锚点（定位 + 类型表回填） */
-  char *name;   /* var 名（ctx allocator），占位值查找键 */
-  vec_t *deps;  /* char*（ctx allocator），值表达式引用名 */
-  int resolved; /* 已定型（含"已尝试失败"——防重复演算重复 diag） */
-} check_modvar_t;
+/* 模块级 var 定型：check_expr_checked 演算 + 回填类型结果表（§8.5—
+   clone 渲染器按 STMT_VAR 锚点取推断类型）+ clux_value_retype 升级
+   error 占位。DFA 天然 no-op（模块级不建帧）。 */
+static void check_modvar_resolve(clux_sema_t *sema, node_t *stmt) {
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  char *name = check_name_of(allocator, stmt_var_node_get_name(stmt));
+  if (!name) {
+    return;
+  }
+  clux_value_t *value = check_expr_checked(sema, stmt_var_node_get_value(stmt));
+  clux_type_t *bind = check_value_bind_type(value);
+  if (bind && clux_type_get_kind(bind) != CLUX_TYPE_ERROR) {
+    sema_record_node_type(sema, stmt, bind);
+    clux_value_t *placeholder =
+        clux_scope_get(clux_context_get_scope(sema->ctx), name);
+    if (placeholder && clux_value_is_shadow(placeholder) &&
+        clux_type_get_kind(clux_value_get_type(placeholder)) ==
+            CLUX_TYPE_ERROR) {
+      clux_value_retype(placeholder, bind);
+    }
+  }
+  allocator_free(allocator, (void **)&name);
+}
 
 /* ---- 入口 ---- */
 
@@ -3352,94 +3590,50 @@ int sema_check_pass(clux_sema_t *sema) {
       }
     }
   }
-  /* 模块级 var 值检查（不动点，前向引用顺序无关）：名字已由 register
-     循环登记（无标注 var 为 error 类型 shadow 占位），全部模块 var 视为
-     互递归绑定组——每轮演算"值表达式引用的模块 var 均已定型"者，非
-     error 绑定类型即定型：经 clux_value_retype 升级占位值 + 回填类型
-     结果表（§8.5——clone 渲染器按 STMT_VAR 锚点取推断类型）。DFA 天然
-     no-op（模块级不建帧）。演算失败（NULL/error 绑定）也算完成（diag
-     已由 checked 通道上报，标记 resolved 防后续轮次重复报）。一轮无
-     进展仍有未定型，即循环依赖/相互引用——唯一不可推断场景，按语法
-     错误上报（含自引用：名字在本组内未定型同样阻塞）。 */
-  vec_t *vars = create_vec(allocator);
-  for (size_t idx = 0; idx < count; idx++) {
-    node_t *stmt = vec_get(tops, idx);
-    if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_VAR) {
-      continue;
-    }
-    node_t *value_node = stmt_var_node_get_value(stmt);
-    if (!value_node) {
-      continue;
-    }
-    check_modvar_t *entry = allocator_alloc(allocator, sizeof(*entry));
-    entry->stmt = stmt;
-    entry->name = check_name_of(allocator, stmt_var_node_get_name(stmt));
-    entry->deps = create_vec(allocator);
-    check_collect_idents(allocator, value_node, entry->deps);
-    entry->resolved = 0;
-    vec_push(vars, entry);
-  }
-  for (int progress = 1; progress;) {
-    progress = 0;
-    for (size_t idx = 0; idx < vec_get_size(vars); idx++) {
-      check_modvar_t *entry = vec_get(vars, idx);
-      if (entry->resolved) {
+  /* 模块级 var 值检查（C 常量初始化器规则）：初值必须是编译期可知
+     表达式（字面量 / comptime 常量 / 函数名地址常量 / 聚合构造的递归
+     组合），引用普通模块 var（值形态）与函数调用等运行期求值形态一律
+     拒绝——§8.5 的"前向引用顺序无关"特性随严格 C 规则收窄为"值引用
+     不可、指针模式可"：".&" 取址是地址常量，不读操作数的值，普通 var
+     名可作操作数（var a = b.&; var b = 1; 合法，§8.15）。名字已由
+     register 循环登记占位；comptime var 跳过（初值合法性由 walk 期
+     CTFE 通道独占校验，防双报）。两遍处理：第一遍合法性判定 + 值型
+     定型（含 ".&" 的地址型暂跳）；第二遍地址型定型（此时被引用 var
+     已定型回填，".&" 影子演算产 *T；操作数未就绪——互引用/自引用
+     指针模式的类型无穷回归——跳过不定型，0 diag）。违规者报 ERROR
+     后跳过定型（占位留 error，防下游连锁假诊断）。 */
+  for (size_t pass = 0; pass < 2; pass++) {
+    for (size_t idx = 0; idx < count; idx++) {
+      node_t *stmt = vec_get(tops, idx);
+      if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_VAR ||
+          stmt_var_node_get_comptime(stmt)) {
         continue;
       }
-      int blocked = 0;
-      for (size_t dep = 0; dep < vec_get_size(entry->deps) && !blocked; dep++) {
-        char *dep_name = vec_get(entry->deps, dep);
-        for (size_t other_idx = 0; other_idx < vec_get_size(vars);
-             other_idx++) {
-          check_modvar_t *other = vec_get(vars, other_idx);
-          if (other->name && other->resolved == 0 &&
-              strcmp(other->name, dep_name) == 0) {
-            blocked = 1; /* 含自身（自引用）：本组内未定型同名即阻塞 */
-            break;
-          }
-        }
-      }
-      if (blocked) {
+      node_t *value_node = stmt_var_node_get_value(stmt);
+      if (!value_node) {
         continue;
       }
-      clux_value_t *value =
-          check_expr_checked(sema, stmt_var_node_get_value(entry->stmt));
-      clux_type_t *bind = check_value_bind_type(value);
-      if (bind && clux_type_get_kind(bind) != CLUX_TYPE_ERROR) {
-        sema_record_node_type(sema, entry->stmt, bind);
-        clux_value_t *placeholder =
-            clux_scope_get(clux_context_get_scope(sema->ctx), entry->name);
-        if (placeholder && clux_value_is_shadow(placeholder) &&
-            clux_type_get_kind(clux_value_get_type(placeholder)) ==
-                CLUX_TYPE_ERROR) {
-          clux_value_retype(placeholder, bind);
+      int is_addr = check_modvar_contains_addr(sema, value_node);
+      if (pass == 0) {
+        if (!check_modvar_init_is_const(sema, value_node)) {
+          char *name = check_name_of(allocator, stmt_var_node_get_name(stmt));
+          clux_context_diag(sema->ctx,
+                            CLUX_DIAG_ERROR,
+                            node_get_location(value_node),
+                            "initializer of module-level var '%s' is not a "
+                            "compile-time constant",
+                            name ? name : "<unknown>");
+          allocator_free(allocator, (void **)&name);
+          continue;
         }
+        if (!is_addr) {
+          check_modvar_resolve(sema, stmt);
+        }
+      } else if (is_addr && check_modvar_addr_is_ready(sema, value_node)) {
+        check_modvar_resolve(sema, stmt);
       }
-      entry->resolved = 1;
-      progress = 1;
     }
   }
-  for (size_t idx = 0; idx < vec_get_size(vars); idx++) {
-    check_modvar_t *entry = vec_get(vars, idx);
-    if (!entry->resolved) {
-      clux_context_diag(sema->ctx,
-                        CLUX_DIAG_ERROR,
-                        node_get_location(entry->stmt),
-                        "circular reference in module-level var '%s'",
-                        entry->name ? entry->name : "<unknown>");
-    }
-  }
-  for (size_t idx = 0; idx < vec_get_size(vars); idx++) {
-    check_modvar_t *entry = vec_get(vars, idx);
-    for (size_t dep = 0; dep < vec_get_size(entry->deps); dep++) {
-      char *dep_name = vec_get(entry->deps, dep);
-      allocator_free(allocator, (void **)&dep_name);
-    }
-    delete_vec(&entry->deps);
-    allocator_free(allocator, (void **)&entry->name);
-    allocator_free(allocator, (void **)&entry);
-  }
-  delete_vec(&vars);
   delete_vec(&tops); /* 只借原树/物化体指针，释放外壳 */
   return 0;
 }

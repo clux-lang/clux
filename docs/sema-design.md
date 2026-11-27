@@ -445,6 +445,7 @@ sema_create(ctx, out_allocator)
 | if / while / 三元条件须 bool | 条件演算结果 kind 判定 | P9 |
 | return 类型匹配 | 与签名返回类型 `type_equal` | P9 |
 | use before assignment（DFA） | §8.6 状态演算 | P10 |
+| 模块级 var 初值编译期可知（C 规范） | §8.15 形态白名单（字面量/合法名字/限定二元/`.&` 地址常量/聚合/构造） | §8.15 |
 
 ### 8.5 类型结果表（→ §2.8 渲染器）
 
@@ -742,3 +743,53 @@ check 两侧均为明确暂缓项（expr.c 拒绝 + 约束限定非泛型），P
 恒等）；check 端 `FBoundConstraintSatisfiedHasNoDiag` /
 `FBoundConstraintMissingMemberReportedOnce`（好组合零诊断；坏组合
 单一约束诊断且失败实例体剔除）。
+
+### 8.15 模块级 var 初始化器编译期可知性（C 常量初始化器规则，已落地）
+
+跟随 C 静态存储期初始化规则：**模块级普通 var 的初值必须是编译期可知
+表达式**，运行期求值形态一律拒绝（check.c `check_modvar_init_is_const`）。
+消息：`"initializer of module-level var '%s' is not a compile-time
+constant"`（对齐 C "initializer element is not constant" 风格）。
+
+- **形态白名单（递归）**：
+  - 全部字面量 kind（undefined/string/character/numeric/boolean）；
+  - **合法名字**：命 中 const_defs 表（comptime 常量）或 scope 值
+    kind == FUNC（函数名**地址常量**——C `int (*f)(void) = g;` 的
+    对应物）；普通 var 占位（ERROR kind）与类型名（TYPE kind）不放行；
+  - **二元运算**：运算符限定算术/位/比较表 + LEFT 为 NULL 的一元
+    prefix 形态——member `"."`、下标 `"[]"`、赋值 `"="` 等同为
+    EXPR_BINARY 形态，**按符号拒收**（防只看 kind 的白名单漏过）；
+  - **地址常量 `".&"`**：后缀取址是 C 地址常量（`&b` 不读 b 的值、
+    只取符号地址），操作数放宽为**任意模块级已声明名字**（普通 var
+    占位亦含——前向引用以指针模式回归）；非纯名字操作数（字面量/
+    成员取址等）拒收（C 中字面量非对象）；
+  - 元组聚合 / 构造（TYPE 槽与具名字段名槽跳过，只递归字段值）。
+- **comptime var 独占通道**：初值合法性由 walk 期 `sema_ctfe_eval`
+  校验（"not a comptime value" 等），check 循环跳过 comptime var
+  防双报。
+- **语义收窄与指针模式**：原 #248「模块级 var 前向引用顺序无关」
+  特性随严格 C 规则收窄为**值引用不可、指针模式可**——`var a = b;
+  var b = 1;`（值形态）仍违规；`var a = b.&; var b = 1;`（地址
+  常量）合法（C `int *a = &b; int b = 1;` 对应物）。循环依赖的值
+  形态在前置拦截下不可能出现，原不动点解析循环移除。
+- **两遍定型**：check 循环分两遍——第一遍合法性判定 + **值型**定型
+  （含 `".&"` 的地址型暂跳，`check_modvar_contains_addr`）；第二遍
+  **地址型**定型（此时被引用 var 已由第一遍回填，`".&"` 影子演算
+  产 \*T，`check_modvar_addr_is_ready` 前置判定操作数就绪）。指针
+  模式的**自引用**（`var a = a.&`）与**互引用**（`var a = b.&;
+  var b = a.&`）类型无穷回归不可解（C 靠显式类型标注兜底）——未
+  就绪者跳过定型（0 diag、占位留 error，现状固化待白皮书定夺）。
+- **check 期 comptime 名字解析**：comptime 常量真值在 const_defs 表
+  （walk 期 CTFE 结果 `sema_const_t`），scope 里 P7 预扫描登记的是
+  error 占位 shadow——`check_lookup_value` 命中占位时查 const_defs
+  按 kind 物化对应类型 shadow 参与演算（bool 内建 / INT·FLOAT 按
+  type_name 查类型），普通 var 占位不在表不受影响。
+**测试锚**：`ModuleVarConstInitializerFormsAreAccepted`（白名单全覆盖
++ 函数名地址常量）/ `ModuleVarRuntimeInitializerFormsAreRejected`
+（call/ternary/member/subscript/builtin 各一条）/ `ModuleVar
+ComptimeReferenceTypeIsInferred`（comptime 引用定型回填）/ 三个
+`*ReferenceIsRejected`（普通 var 引用/互引用/自引用——值形态）/
+`ModuleVarAddrOfForwardReferenceIsAccepted`（指针模式前向引用定型
+\*i32）/ `ModuleVarAddrOfFormsAreAccepted`（顺序/函数/comptime/元组
+内嵌取址）/ `ModuleVarAddrOfCyclesStayUntyped`（自引/互引用指针
+模式不定型现状固化）。
