@@ -256,14 +256,19 @@ TEST(SemaTest, HoistsLocalDeclsToProgramTailAndRenamesRefs) {
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
   ASSERT_NE(decls, nullptr);
-  /* 顶层 f + 两个提升项（收集序：Foo 先于 g）。 */
-  ASSERT_EQ(program_node_get_stmt_count(decls), 3u);
+  /* 顶层 f 退化为闭包 var 占位 + 两个提升项（收集序：Foo 先于 g）
+     + 尾部合成的 $closure$f struct 与 $callee$f 纯函数。 */
+  ASSERT_EQ(program_node_get_stmt_count(decls), 5u);
   node_t *f_clone = program_node_get_stmt(decls, 0);
   node_t *foo_clone = program_node_get_stmt(decls, 1);
   node_t *g_clone = program_node_get_stmt(decls, 2);
-  EXPECT_EQ(node_get_kind(f_clone), CLUX_NODE_STMT_FUNC);
+  node_t *closure_struct = program_node_get_stmt(decls, 3);
+  node_t *callee_clone = program_node_get_stmt(decls, 4);
+  EXPECT_EQ(node_get_kind(f_clone), CLUX_NODE_STMT_VAR);
   EXPECT_EQ(node_get_kind(foo_clone), CLUX_NODE_STMT_STRUCT);
   EXPECT_EQ(node_get_kind(g_clone), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(node_get_kind(closure_struct), CLUX_NODE_STMT_STRUCT);
+  EXPECT_EQ(node_get_kind(callee_clone), CLUX_NODE_STMT_FUNC);
   /* 提升项的名字是 mangled 名。 */
   node_t *foo_name =
       struct_decl_node_get_name(stmt_struct_node_get_struct_decl(foo_clone));
@@ -275,9 +280,9 @@ TEST(SemaTest, HoistsLocalDeclsToProgramTailAndRenamesRefs) {
   text = node_text(a, g_name);
   EXPECT_STREQ(text, "f$g");
   allocator_free(a, (void **)&text);
-  /* f 克隆体：声明语句摘除，两条 var 保留且类型引用已改写
+  /* f 克隆体（$callee$f）：声明语句摘除，两条 var 保留且类型引用已改写
      （var 尾分号是独立空语句，计数与取位均跳过）。 */
-  node_t *body = func_body_of(f_clone);
+  node_t *body = func_body_of(callee_clone);
   ASSERT_EQ(body_stmt_count(body), 2u);
   node_t *x_clone = body_nth_stmt(body, 0);
   ASSERT_EQ(node_get_kind(x_clone), CLUX_NODE_STMT_VAR);
@@ -321,15 +326,17 @@ TEST(SemaTest, NestedHoistChainUsesEnclosingFunctionNames) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  /* f + g + T 两个提升项。 */
-  ASSERT_EQ(program_node_get_stmt_count(decls), 3u);
+  /* f 退化为闭包 var 占位 + 块级 g（零捕获走旧通道提升为 f$g）
+     + T 提升项 + 尾部合成的 $closure$f 与 $callee$f。 */
+  ASSERT_EQ(program_node_get_stmt_count(decls), 5u);
   node_t *t_clone = program_node_get_stmt(decls, 2);
   ASSERT_EQ(node_get_kind(t_clone), CLUX_NODE_STMT_TYPE);
   char *text = node_text(a, stmt_type_node_get_name(t_clone));
   EXPECT_STREQ(text, "f$g$T");
   allocator_free(a, (void **)&text);
-  /* f 体内 g 调用保留（g 定义摘除后非空 stmt 只剩调用）。 */
-  node_t *f_body = func_body_of(program_node_get_stmt(decls, 0));
+  /* f 体内 g 调用保留（f 退化为 $callee$f，g 定义摘除后非空 stmt
+     只剩调用，且调用点已改写为提升名 f$g）。 */
+  node_t *f_body = func_body_of(program_node_get_stmt(decls, 4));
   ASSERT_EQ(body_stmt_count(f_body), 1u);
   /* g 克隆体内 type 声明摘除、var t 类型改写。 */
   node_t *g_clone = program_node_get_stmt(decls, 1);
@@ -395,8 +402,9 @@ TEST(SemaTest, SameLocalNameInDifferentFunctionsDoesNotConflict) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  /* f、g + 两个提升项，名字互异。 */
-  ASSERT_EQ(program_node_get_stmt_count(decls), 4u);
+  /* f、g 均退化为闭包 var 占位 + 两个提升项 + 尾部合成的两组
+     struct/callee，名字互异。 */
+  ASSERT_EQ(program_node_get_stmt_count(decls), 8u);
   char *text =
       node_text(a, stmt_type_node_get_name(program_node_get_stmt(decls, 2)));
   EXPECT_STREQ(text, "f$Foo");
@@ -404,8 +412,8 @@ TEST(SemaTest, SameLocalNameInDifferentFunctionsDoesNotConflict) {
   text = node_text(a, stmt_type_node_get_name(program_node_get_stmt(decls, 3)));
   EXPECT_STREQ(text, "g$Foo");
   allocator_free(a, (void **)&text);
-  /* f 内 x 类型指向 f$Foo（不被 g 的表误改）。 */
-  node_t *f_body = func_body_of(program_node_get_stmt(decls, 0));
+  /* f 内 x 类型指向 f$Foo（不被 g 的表误改）；f 已退化为 $callee$f。 */
+  node_t *f_body = func_body_of(program_node_get_stmt(decls, 6));
   node_t *x_var = body_nth_stmt(f_body, 0);
   text = node_text(a, stmt_var_node_get_type(x_var));
   EXPECT_STREQ(text, "f$Foo");
@@ -641,10 +649,11 @@ TEST(SemaTest, ComptimeReferenceChainAndFuncBodyUse) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  /* 两个 comptime var 均摘除，业务 var 只剩 c。 */
-  node_t *c_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 0);
+  /* 两个 comptime var 均摘除；func f 退化为闭包 var 占位（VAR #0），
+     业务 var c 是 VAR #1。 */
+  node_t *c_var = decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1);
   ASSERT_NE(c_var, nullptr);
-  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 1), nullptr);
+  EXPECT_EQ(decls_nth_of_kind(decls, CLUX_NODE_STMT_VAR, 2), nullptr);
   char *text = node_text(a, stmt_var_node_get_value(c_var));
   EXPECT_STREQ(text, "3i32");
   allocator_free(a, (void **)&text);
@@ -1735,7 +1744,7 @@ TEST(SemaTest, MemberCallOnNamedConstructReceiverIsDesugared) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  node_t *main_fn = decls_func_named(decls, a, "main");
+  node_t *main_fn = decls_func_named(decls, a, "$callee$main");
   ASSERT_NE(main_fn, nullptr);
   node_t *r_var = block_nth_of_kind(
       func_decl_node_get_body(stmt_func_node_get_func_decl(main_fn)),
@@ -1798,7 +1807,7 @@ TEST(SemaTest, MemberCallValueSelfAndUniqueName) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  node_t *main_fn = decls_func_named(decls, a, "main");
+  node_t *main_fn = decls_func_named(decls, a, "$callee$main");
   ASSERT_NE(main_fn, nullptr);
   node_t *c_var = block_nth_of_kind(
       func_decl_node_get_body(stmt_func_node_get_func_decl(main_fn)),
@@ -1861,7 +1870,7 @@ TEST(SemaTest, MethodNameAmbiguityLeavesCallUnchanged) {
   ASSERT_NE(programs, nullptr);
   program_t *program = (program_t *)vec_get(programs, 0);
   node_t *decls = program_get_decls(program);
-  node_t *main_fn = decls_func_named(decls, a, "main");
+  node_t *main_fn = decls_func_named(decls, a, "$callee$main");
   ASSERT_NE(main_fn, nullptr);
   node_t *t_var = block_nth_of_kind(
       func_decl_node_get_body(stmt_func_node_get_func_decl(main_fn)),
@@ -1947,15 +1956,19 @@ TEST(SemaTest, HoistsLocalDeclsToProgramTailAsNormalizedText) {
       "  var x: Foo = .Foo{ .a = 1 };\n"
       "  var y: Foo = .Foo{ .a = 2 };\n"
       "}\n",
-      "func f(): void {\n"
-      "  var x: f$Foo = .f$Foo{a = 1};\n"
-      "  var y: f$Foo = .f$Foo{a = 2};\n"
-      "}\n"
+      "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
       "struct f$Foo {\n"
       "  a: i32;\n"
       "}\n"
       "func f$g(): void {\n"
       "  return;\n"
+      "}\n"
+      "struct $closure$f {\n"
+      "  callee: func (*$closure$f) -> void;\n"
+      "}\n"
+      "func $callee$f(env: *$closure$f): void {\n"
+      "  var x: f$Foo = .f$Foo{a = 1};\n"
+      "  var y: f$Foo = .f$Foo{a = 2};\n"
       "}\n",
       /* 混名列含 '$'（lexer 不收）→ round-trip 不可零错误，跳过。 */
       false);
@@ -1980,19 +1993,26 @@ TEST(SemaTest, InferenceExplicitizesUnsuffixedLiteralsAsNormalizedText) {
 }
 
 TEST(SemaTest, ComptimeIfPrunesToSelectedArmAsNormalizedText) {
-  expect_sema_text("func f(): void {\n"
-                   "  comptime if (true) { var a = 1; }\n"
-                   "  comptime if (false) { var b = 2; }\n"
-                   "  comptime if (false) { var c = 3; } else { var d = 4; }\n"
-                   "}\n",
-                   "func f(): void {\n"
-                   "  {\n"
-                   "    var a: i32 = 1i32;\n"
-                   "  }\n"
-                   "  {\n"
-                   "    var d: i32 = 4i32;\n"
-                   "  }\n"
-                   "}\n");
+  expect_sema_text(
+      "func f(): void {\n"
+      "  comptime if (true) { var a = 1; }\n"
+      "  comptime if (false) { var b = 2; }\n"
+      "  comptime if (false) { var c = 3; } else { var d = 4; }\n"
+      "}\n",
+      "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+      "struct $closure$f {\n"
+      "  callee: func (*$closure$f) -> void;\n"
+      "}\n"
+      "func $callee$f(env: *$closure$f): void {\n"
+      "  {\n"
+      "    var a: i32 = 1i32;\n"
+      "  }\n"
+      "  {\n"
+      "    var d: i32 = 4i32;\n"
+      "  }\n"
+      "}\n",
+      /* 块级 g 零捕获走旧通道；f 退化引入 '$' → 跳过 round-trip。 */
+      false);
 }
 
 TEST(SemaTest, DeferDesugarsToClosureAndTailCallAsNormalizedText) {
@@ -2000,7 +2020,11 @@ TEST(SemaTest, DeferDesugarsToClosureAndTailCallAsNormalizedText) {
                    "  defer { var t = 1; }\n"
                    "  var x = 2;\n"
                    "}\n",
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  var $defer$0: func () -> void = func (): void {\n"
                    "    var t: i32 = 1i32;\n"
                    "  };\n"
@@ -2024,12 +2048,16 @@ TEST(SemaTest, RaiiLocalDisposableVarInsertsDisposeAtExitAsNormalizedText) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
-                   "  var x: Res = .Res{v = 1};\n"
-                   "  $dispose$Res(x.&);\n"
-                   "}\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
+                   "  var x: Res = .Res{v = 1};\n"
+                   "  $dispose$Res(x.&);\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2050,16 +2078,20 @@ TEST(SemaTest, RaiiDeferDisposeLifoInterleaveAsNormalizedText) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  var $defer$0: func () -> void = func (): void {\n"
                    "    var t: i32 = 1i32;\n"
                    "  };\n"
                    "  var x: Res = .Res{v = 1};\n"
                    "  $dispose$Res(x.&);\n"
                    "  $defer$0();\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2086,18 +2118,26 @@ TEST(SemaTest, RaiiDisposeBuiltinDesugarsAsNormalizedText) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(p: *Res): void {\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g, *Res) -> void;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g, p: *Res): void {\n"
                    "  $dispose$Res(p);\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  var x: Res = .Res{v = 1};\n"
                    "  var n: i32 = 2i32;\n"
                    "  $dispose$Res(x.&);\n"
                    "  n;\n"
                    "  $dispose$Res(x.&);\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2196,16 +2236,20 @@ TEST(SemaTest, RaiiOptionalPayloadDisposeSynthAsNormalizedText) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    /* P3：VALUE 内嵌套 CONSTRUCT 根提升为 $tmp$0，语句后
                       析构（#some 参数为 copy 语义，临时源析构安全）。 */
                    "  var $tmp$0: Res = .Res{v = 1};\n"
                    "  var x: ?Res = #some(Res, $tmp$0);\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  $dispose$$x3fRes(x.&);\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$$x3fRes(self: *?Res): void {\n"
                    "  if (!#is_none(self.*)) {\n"
@@ -2231,7 +2275,14 @@ TEST(SemaTest, RaiiArrayElementDisposeSynthAsNormalizedText) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    /* P3：两嵌套根捕获序 LIFO 逆序析构。 */
                    "  var $tmp$0: Res = .Res{v = 1};\n"
                    "  var $tmp$1: Res = .Res{v = 2};\n"
@@ -2239,9 +2290,6 @@ TEST(SemaTest, RaiiArrayElementDisposeSynthAsNormalizedText) {
                    "  $dispose$Res($tmp$1.&);\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  $dispose$$x5b2$x5dRes(xs.&);\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$$x5b2$x5dRes(self: *[2]Res): void {\n"
                    "  for (var i = 2; i > 0; i = i - 1) {\n"
@@ -2279,7 +2327,14 @@ TEST(SemaTest, RaiiUnionVariantDisposeSynthAsNormalizedText) {
                    "  r: Res;\n"
                    "  n: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    /* P3：.U{...} 构造内嵌套 .Res{...} 根提升，var 槽后
                       先于 if 语句析构。 */
                    "  var $tmp$0: Res = .Res{v = 1};\n"
@@ -2292,9 +2347,6 @@ TEST(SemaTest, RaiiUnionVariantDisposeSynthAsNormalizedText) {
                    "    return;\n"
                    "  }\n"
                    "  $dispose$U(u.&);\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$U(self: *U): void {\n"
                    "  if (self.* is r) {\n"
@@ -2321,14 +2373,18 @@ TEST(SemaTest, RaiiTupleMemberDisposeSynthAsNormalizedText) {
       "struct Res {\n"
       "  v: i32;\n"
       "}\n"
-      "func f(): void {\n"
+      "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+      "func Res$__dispose__(self: *Res): void {\n"
+      "  return;\n"
+      "}\n"
+      "struct $closure$f {\n"
+      "  callee: func (*$closure$f) -> void;\n"
+      "}\n"
+      "func $callee$f(env: *$closure$f): void {\n"
       "  var $tmp$0: Res = .Res{v = 1};\n"
       "  var t: <Res, i32> = <$tmp$0, 2>;\n"
       "  $dispose$Res($tmp$0.&);\n"
       "  $dispose$$x3cRes$x2c$x20i32$x3e(t.&);\n"
-      "}\n"
-      "func Res$__dispose__(self: *Res): void {\n"
-      "  return;\n"
       "}\n"
       "func $dispose$$x3cRes$x2c$x20i32$x3e(self: *<Res, i32>): void {\n"
       "  $dispose$Res(self.*[0].&);\n"
@@ -2361,19 +2417,32 @@ TEST(SemaTest, RaiiTempCallLiftedInExprStmt) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
-                   "  return .Res{v = 1};\n"
-                   "}\n"
-                   "func use(r: Res): void {\n"
-                   "  return;\n"
-                   "}\n"
-                   "func f(): void {\n"
-                   "  var $tmp$0: Res = g();\n"
-                   "  use($tmp$0);\n"
-                   "  $dispose$Res($tmp$0.&);\n"
-                   "}\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var use: $closure$use = .$closure$use{callee = "
+                   "$callee$use};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$use {\n"
+                   "  callee: func (*$closure$use, Res) -> void;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
+                   "  return .Res{v = 1};\n"
+                   "}\n"
+                   "func $callee$use(env: *$closure$use, r: Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
+                   "  var $tmp$0: Res = g.callee(g.&);\n"
+                   "  use.callee(use.&, $tmp$0);\n"
+                   "  $dispose$Res($tmp$0.&);\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2397,15 +2466,23 @@ TEST(SemaTest, RaiiTempVarSlotTopLevelPassthrough) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
-                   "  return .Res{v = 1};\n"
-                   "}\n"
-                   "func f(): void {\n"
-                   "  var x: Res = g();\n"
-                   "  $dispose$Res(x.&);\n"
-                   "}\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
+                   "  return .Res{v = 1};\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
+                   "  var x: Res = g.callee(g.&);\n"
+                   "  $dispose$Res(x.&);\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2435,20 +2512,34 @@ TEST(SemaTest, RaiiReturnRetMaterialization) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
-                   "  return .Res{v = 1};\n"
-                   "}\n"
-                   "func consume(r: Res): i32 {\n"
-                   "  return 1;\n"
-                   "}\n"
-                   "func f(): i32 {\n"
-                   "  var $tmp$0: Res = g();\n"
-                   "  var $ret$1: i32 = consume($tmp$0);\n"
-                   "  $dispose$Res($tmp$0.&);\n"
-                   "  return $ret$1;\n"
-                   "}\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var consume: $closure$consume = .$closure$consume{callee "
+                   "= $callee$consume};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$consume {\n"
+                   "  callee: func (*$closure$consume, Res) -> i32;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> i32;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
+                   "  return .Res{v = 1};\n"
+                   "}\n"
+                   "func $callee$consume(env: *$closure$consume, r: Res): "
+                   "i32 {\n"
+                   "  return 1;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): i32 {\n"
+                   "  var $tmp$0: Res = g.callee(g.&);\n"
+                   "  var $ret$1: i32 = consume.callee(consume.&, $tmp$0);\n"
+                   "  $dispose$Res($tmp$0.&);\n"
+                   "  return $ret$1;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2474,16 +2565,20 @@ TEST(SemaTest, RaiiReturnTupleRootAnchor) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func gs(): [2]Res {\n"
+                   "var gs: $closure$gs = .$closure$gs{callee = $callee$gs};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$gs {\n"
+                   "  callee: func (*$closure$gs) -> [2]Res;\n"
+                   "}\n"
+                   "func $callee$gs(env: *$closure$gs): [2]Res {\n"
                    "  var $tmp$0: Res = .Res{v = 1};\n"
                    "  var $tmp$1: Res = .Res{v = 2};\n"
                    "  var $ret$2: <Res, Res> = <$tmp$0, $tmp$1>;\n"
                    "  $dispose$Res($tmp$1.&);\n"
                    "  $dispose$Res($tmp$0.&);\n"
                    "  return $ret$2;\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2512,17 +2607,25 @@ TEST(SemaTest, RaiiReturnRefDisposeBindingMaterialized) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> Res;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
                    "  return .Res{v = 1};\n"
                    "}\n"
-                   "func f(): Res {\n"
-                   "  var x: Res = g();\n"
+                   "func $callee$f(env: *$closure$f): Res {\n"
+                   "  var x: Res = g.callee(g.&);\n"
                    "  var $ret$0: Res = x;\n"
                    "  $dispose$Res(x.&);\n"
                    "  return $ret$0;\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2551,11 +2654,22 @@ TEST(SemaTest, RaiiDeepReturnRefOuterBindingMaterialized) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f, bool) -> Res;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
                    "  return .Res{v = 1};\n"
                    "}\n"
-                   "func f(c: bool): Res {\n"
-                   "  var x: Res = g();\n"
+                   "func $callee$f(env: *$closure$f, c: bool): Res {\n"
+                   "  var x: Res = g.callee(g.&);\n"
                    "  if (c) {\n"
                    "    var $ret$0: Res = x;\n"
                    "    $dispose$Res(x.&);\n"
@@ -2563,9 +2677,6 @@ TEST(SemaTest, RaiiDeepReturnRefOuterBindingMaterialized) {
                    "  }\n"
                    "  $dispose$Res(x.&);\n"
                    "  return .Res{v = 2};\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2592,17 +2703,32 @@ TEST(SemaTest, RaiiLazyContextNoCapture) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
-                   "  return .Res{v = 1};\n"
-                   "}\n"
-                   "func check(r: Res): bool {\n"
-                   "  return true;\n"
-                   "}\n"
-                   "func f(): void {\n"
-                   "  var b: bool = check(g()) || true;\n"
-                   "}\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var check: $closure$check = .$closure$check{callee = "
+                   "$callee$check};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$check {\n"
+                   "  callee: func (*$closure$check, Res) -> bool;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
+                   "  return .Res{v = 1};\n"
+                   "}\n"
+                   "func $callee$check(env: *$closure$check, r: Res): bool "
+                   "{\n"
+                   "  return true;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
+                   "  var b: bool = check.callee(check.&, g.callee(g.&)) || "
+                   "true;\n"
                    "}\n",
                    false);
 }
@@ -2629,17 +2755,34 @@ TEST(SemaTest, RaiiLoopLowerWhileCond) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var check: $closure$check = .$closure$check{callee = "
+                   "$callee$check};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$check {\n"
+                   "  callee: func (*$closure$check, Res) -> bool;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
                    "  return .Res{v = 1};\n"
                    "}\n"
-                   "func check(r: Res): bool {\n"
+                   "func $callee$check(env: *$closure$check, r: Res): bool "
+                   "{\n"
                    "  return true;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  for (; ; ) {\n"
                    "    {\n"
-                   "      var $tmp$0: Res = g();\n"
-                   "      if (check($tmp$0)) {\n"
+                   "      var $tmp$0: Res = g.callee(g.&);\n"
+                   "      if (check.callee(check.&, $tmp$0)) {\n"
                    "      } else {\n"
                    "        $dispose$Res($tmp$0.&);\n"
                    "        break;\n"
@@ -2650,9 +2793,6 @@ TEST(SemaTest, RaiiLoopLowerWhileCond) {
                    "      break;\n"
                    "    }\n"
                    "  }\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2682,18 +2822,35 @@ TEST(SemaTest, RaiiLoopLowerDoWhileContinue) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func g(): Res {\n"
+                   "var g: $closure$g = .$closure$g{callee = $callee$g};\n"
+                   "var check: $closure$check = .$closure$check{callee = "
+                   "$callee$check};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$g {\n"
+                   "  callee: func (*$closure$g) -> Res;\n"
+                   "}\n"
+                   "struct $closure$check {\n"
+                   "  callee: func (*$closure$check, Res) -> bool;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$g(env: *$closure$g): Res {\n"
                    "  return .Res{v = 1};\n"
                    "}\n"
-                   "func check(r: Res): bool {\n"
+                   "func $callee$check(env: *$closure$check, r: Res): bool "
+                   "{\n"
                    "  return true;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  for (; ; ) {\n"
                    "    {\n"
                    "      {\n"
-                   "        var $tmp$1: Res = g();\n"
-                   "        if (check($tmp$1)) {\n"
+                   "        var $tmp$1: Res = g.callee(g.&);\n"
+                   "        if (check.callee(check.&, $tmp$1)) {\n"
                    "        } else {\n"
                    "          $dispose$Res($tmp$1.&);\n"
                    "          break;\n"
@@ -2703,8 +2860,8 @@ TEST(SemaTest, RaiiLoopLowerDoWhileContinue) {
                    "      continue;\n"
                    "    }\n"
                    "    {\n"
-                   "      var $tmp$0: Res = g();\n"
-                   "      if (check($tmp$0)) {\n"
+                   "      var $tmp$0: Res = g.callee(g.&);\n"
+                   "      if (check.callee(check.&, $tmp$0)) {\n"
                    "      } else {\n"
                    "        $dispose$Res($tmp$0.&);\n"
                    "        break;\n"
@@ -2712,9 +2869,6 @@ TEST(SemaTest, RaiiLoopLowerDoWhileContinue) {
                    "      $dispose$Res($tmp$0.&);\n"
                    "    }\n"
                    "  }\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -2740,7 +2894,14 @@ TEST(SemaTest, RaiiForeachIterDispose) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  var $tmp$0: Res = .Res{v = 1};\n"
                    "  var $tmp$1: Res = .Res{v = 2};\n"
                    "  var it: [2]Res = <$tmp$0, $tmp$1>;\n"
@@ -2758,9 +2919,6 @@ TEST(SemaTest, RaiiForeachIterDispose) {
                    "    $dispose$$x5b2$x5dRes($iter.&);\n"
                    "  }\n"
                    "  $dispose$$x5b2$x5dRes(it.&);\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$$x5b2$x5dRes(self: *[2]Res): void {\n"
                    "  for (var i = 2; i > 0; i = i - 1) {\n"
@@ -2796,7 +2954,14 @@ TEST(SemaTest, RaiiForeachItemDisposeAtExits) {
       "struct Res {\n"
       "  v: i32;\n"
       "}\n"
-      "func f(): void {\n"
+      "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+      "func Res$__dispose__(self: *Res): void {\n"
+      "  return;\n"
+      "}\n"
+      "struct $closure$f {\n"
+      "  callee: func (*$closure$f) -> void;\n"
+      "}\n"
+      "func $callee$f(env: *$closure$f): void {\n"
       "  var $tmp$0: Res = .Res{v = 1};\n"
       "  var $tmp$1: Res = .Res{v = 2};\n"
       "  var $tmp$2: Res = .Res{v = 3};\n"
@@ -2824,9 +2989,6 @@ TEST(SemaTest, RaiiForeachItemDisposeAtExits) {
       "    $dispose$$x5b3$x5dRes($iter.&);\n"
       "  }\n"
       "  $dispose$$x5b3$x5dRes(it.&);\n"
-      "}\n"
-      "func Res$__dispose__(self: *Res): void {\n"
-      "  return;\n"
       "}\n"
       "func $dispose$$x5b3$x5dRes(self: *[3]Res): void {\n"
       "  for (var i = 3; i > 0; i = i - 1) {\n"
@@ -2858,7 +3020,14 @@ TEST(SemaTest, RaiiForeachDeepReturnUnwindsFullChain) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  var $tmp$0: Res = .Res{v = 1};\n"
                    "  var $tmp$1: Res = .Res{v = 2};\n"
                    "  var it: [2]Res = <$tmp$0, $tmp$1>;\n"
@@ -2882,9 +3051,6 @@ TEST(SemaTest, RaiiForeachDeepReturnUnwindsFullChain) {
                    "    $dispose$$x5b2$x5dRes($iter.&);\n"
                    "  }\n"
                    "  $dispose$$x5b2$x5dRes(it.&);\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$$x5b2$x5dRes(self: *[2]Res): void {\n"
                    "  for (var i = 2; i > 0; i = i - 1) {\n"
@@ -2915,7 +3081,14 @@ TEST(SemaTest, RaiiLoopBodyVarDisposeAtBreak) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "func Res$__dispose__(self: *Res): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  var $tmp$0: Res = .Res{v = 1};\n"
                    "  var $tmp$1: Res = .Res{v = 2};\n"
                    "  var it: [2]Res = <$tmp$0, $tmp$1>;\n"
@@ -2937,9 +3110,6 @@ TEST(SemaTest, RaiiLoopBodyVarDisposeAtBreak) {
                    "    $dispose$$x5b2$x5dRes($iter.&);\n"
                    "  }\n"
                    "  $dispose$$x5b2$x5dRes(it.&);\n"
-                   "}\n"
-                   "func Res$__dispose__(self: *Res): void {\n"
-                   "  return;\n"
                    "}\n"
                    "func $dispose$$x5b2$x5dRes(self: *[2]Res): void {\n"
                    "  for (var i = 2; i > 0; i = i - 1) {\n"
@@ -2968,16 +3138,20 @@ TEST(SemaTest, RaiiNestedFuncReturnDoesNotUnwindOuter) {
                    "struct Res {\n"
                    "  v: i32;\n"
                    "}\n"
-                   "func f(): void {\n"
-                   "  var a: Res = .Res{v = 1};\n"
-                   "  $dispose$Res(a.&);\n"
-                   "}\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
                    "func Res$__dispose__(self: *Res): void {\n"
                    "  return;\n"
                    "}\n"
-                   /* 提升函数排在 emit 尾部（dispose 合成之后）。 */
+                   /* gg 零捕获走旧通道提升为 f$gg，排在 dispose 合成之后。 */
                    "func f$gg(): void {\n"
                    "  return;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
+                   "  var a: Res = .Res{v = 1};\n"
+                   "  $dispose$Res(a.&);\n"
                    "}\n"
                    "func $dispose$Res(self: *Res): void {\n"
                    "  Res$__dispose__(self);\n"
@@ -3026,7 +3200,11 @@ TEST(SemaTest, ForeachDesugarsToIndexedForAsNormalizedText) {
                    "  foreach (var x of items) { var y = x; }\n"
                    "}\n",
                    "var items: [3]i32 = <0, 0, 0>;\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  {\n"
                    "    var $iter: [3]i32 = items;\n"
                    "    var $i: i32 = 0i32;\n"
@@ -3051,7 +3229,11 @@ TEST(SemaTest, ForeachBareNameAssignsToExistingBindingAsNormalizedText) {
                    "  foreach (x of items) { var y = x; }\n"
                    "}\n",
                    "var items: [3]i32 = <0, 0, 0>;\n"
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  var x: i32 = 0i32;\n"
                    "  {\n"
                    "    var $iter: [3]i32 = items;\n"
@@ -3075,12 +3257,21 @@ TEST(SemaTest, ForeachCallIterableEvaluatesOnceAsNormalizedText) {
                    "func f(): void {\n"
                    "  foreach (var x of make()) { }\n"
                    "}\n",
-                   "func make(): [2]i32 {\n"
+                   "var make: $closure$make = .$closure$make{callee "
+                   "= $callee$make};\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "struct $closure$make {\n"
+                   "  callee: func (*$closure$make) -> [2]i32;\n"
+                   "}\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$make(env: *$closure$make): [2]i32 {\n"
                    "  return <1, 2>;\n"
                    "}\n"
-                   "func f(): void {\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  {\n"
-                   "    var $iter: [2]i32 = make();\n"
+                   "    var $iter: [2]i32 = make.callee(make.&);\n"
                    "    var $i: i32 = 0i32;\n"
                    "    for (; $i < #len($iter); $i = $i + 1) {\n"
                    "      var x: i32 = $iter[$i];\n"
@@ -3097,14 +3288,20 @@ TEST(SemaTest, ComptimeForeachExpandsTupleWithSubstitutionAsNormalizedText) {
   expect_sema_text("func f(): void {\n"
                    "  comptime foreach (var x of <1, 2>) { var y = x; }\n"
                    "}\n",
-                   "func f(): void {\n"
+                   "var f: $closure$f = .$closure$f{callee = $callee$f};\n"
+                   "struct $closure$f {\n"
+                   "  callee: func (*$closure$f) -> void;\n"
+                   "}\n"
+                   "func $callee$f(env: *$closure$f): void {\n"
                    "  {\n"
                    "    var y: i32 = 1i32;\n"
                    "  }\n"
                    "  {\n"
                    "    var y: i32 = 2i32;\n"
                    "  }\n"
-                   "}\n");
+                   "}\n",
+                   /* f 退化引入 '$' → 跳过 round-trip。 */
+                   false);
 }
 
 TEST(SemaTest, GenericDefinitionReplacedByInstanceAsNormalizedText) {
@@ -3156,11 +3353,46 @@ TEST(SemaTest, MemberCallOnNamedConstructDesugarsAsNormalizedText) {
       "struct Box {\n"
       "  v: i32;\n"
       "}\n"
-      "func main(): void {\n"
-      "  var r: i32 = Box$get(.Box{v = 7}.&);\n"
-      "}\n"
+      "var main: $closure$main = .$closure$main{callee "
+      "= $callee$main};\n"
       "func Box$get(self: *Box): i32 {\n"
       "  return self.v;\n"
+      "}\n"
+      "struct $closure$main {\n"
+      "  callee: func (*$closure$main) -> void;\n"
+      "}\n"
+      "func $callee$main(env: *$closure$main): void {\n"
+      "  var r: i32 = Box$get(.Box{v = 7}.&);\n"
       "}\n",
       false);
+}
+
+/* §4.18 闭包退化 P1：块级带捕获闭包完整退化四件套——$closure 结构
+   （callee 打头 + 捕获字段）+ $callee 纯函数（env 首参）+ 定义点 var
+   TDZ 占位、块尾构造赋值 + 调用点 add.callee(add.&, ...) 改写。 */
+TEST(SemaTest, ClosureDegradeBlockCaptureFullKitAsNormalizedText) {
+  expect_sema_text(
+      "func main(): void {\n"
+      "  func |c| add(a: i32, b: i32): i32 { return a + b + c; }\n"
+      "  var c = 1;\n"
+      "  var d = add(1, 2);\n"
+      "}\n",
+      "var main: $closure$main = .$closure$main{callee = $callee$main};\n"
+      "struct $closure$main {\n"
+      "  callee: func (*$closure$main) -> void;\n"
+      "}\n"
+      "struct $closure$main$add {\n"
+      "  callee: func (*$closure$main$add, i32, i32) -> i32;\n"
+      "  c: i32;\n"
+      "}\n"
+      "func $callee$main(env: *$closure$main): void {\n"
+      "  var add: $closure$main$add = undefined;\n"
+      "  var c: i32 = 1i32;\n"
+      "  var d: i32 = add.callee(add.&, 1, 2);\n"
+      "  add = .$closure$main$add{callee = $callee$main$add, c = c};\n"
+      "}\n"
+      "func $callee$main$add(env: *$closure$main$add, a: i32, b: i32): i32 {\n"
+      "  return a + b + env.c;\n"
+      "}\n",
+      /* 退化产物含 '$' → 跳过 round-trip。 */ false);
 }

@@ -292,7 +292,97 @@ typedef struct {
   size_t unwind_loop_mark; /* 最近循环体边界水位：break/continue unwind
                               的底（循环体克隆期由循环通道设置，foreach
                               元素绑定登记在水位之上、$iter 之下）。 */
+  vec_t *closures; /* 借用：闭包退化条目表（closure.c emit 期收集），
+                      可 NULL（通道关闭） */
+  node_t *closure_owner; /* 借用：当前克隆语境的归属 owner（块级条目
+                            资格过滤键：顶层 owner stmt 或模块级条目
+                            自身），emit 各克隆点配对设置 */
+  vec_t *closure_caps; /* 借用：$callee 体克隆期激活的捕获表，可 NULL */
+  const char *closure_self; /* $callee 体克隆期的自身原名（自递归
+                               env.callee(env, ...) 改写键），可 NULL */
 } sema_clone_env_t;
+
+/* ---- 闭包退化 P1（closure.c，§2.11） ----
+   具名非 cfunc 函数退化为「$closure$M struct + $callee$M 纯函数」双产物：
+   捕获字段平铺进 struct、体内捕获引用改写 env.<name>、调用点
+   N(args) → N.callee(N.&, args)。块级条目（块尾延迟绑定）定义点换
+   TDZ var 占位、块尾（unwind 之前）追加构造赋值；模块级条目定义语句
+   原位换 var N = .$closure$N{...}。全部机制落 emit 期：收集在 walk
+   完成后（§8.5 类型表可查）、合成体直进产物不经 check。 */
+
+/* 捕获条目（entry->captures 元素，closure.c 收集期定型）：
+   - 标注捕获（|(c: T = e)|）：type_src 借用原树 TYPE 节点（合成时
+     克隆），default_src 借用默认值表达式（可 NULL），type NULL；
+   - 裸捕获（|c|）：type 为 §8.5 锚点类型（借用引擎类型表，合成时
+     render_type 重建），type_src/default_src NULL。
+   ok=0 表示定型失败（整条目不退化）。 */
+typedef struct {
+  const char *name;     /* 捕获名（out 分配） */
+  node_t *type_src;     /* 借用：标注捕获的 TYPE 节点，可 NULL */
+  node_t *default_src;  /* 借用：标注捕获默认值表达式，可 NULL */
+  clux_type_t *type;    /* 借用：裸捕获锚点类型，可 NULL */
+  int ok;               /* 定型成功 */
+} sema_closure_cap_t;
+
+/* 退化条目（emit 期收集，out allocator 持有，随产物释放）。 */
+typedef struct {
+  node_t *stmt;         /* 借用：原树 STMT_FUNC 语句（skip/占位匹配键） */
+  node_t *owner;        /* 借用：块级=所属顶层函数 stmt；模块级 NULL */
+  node_t *block;        /* 借用：块级=原树中直接包含 stmt 的块；模块级
+                           NULL（块尾构造赋值的落点匹配键） */
+  const char *name;     /* 原名（out 分配） */
+  const char *closure_name; /* $closure$M（out 分配） */
+  const char *callee_name;  /* $callee$M（out 分配） */
+  vec_t *captures;      /* sema_closure_cap_t*（out 持有） */
+} sema_closure_t;
+
+/* 收集（emit 开头调用一次）：模块级 STMT_FUNC + 块级提升项中满足
+   资格谓词全集的具名 func（cfunc/泛型/export/comptime/装饰器/匿名
+   不退化；块级另需 ≥1 捕获 + 敏感名字域检查）。返回条目表（out
+   持有），无合格条目返回空表。 */
+vec_t *sema_closure_collect(clux_sema_t *sema,
+                            allocator_t *out,
+                            program_t *program);
+
+/* 按原树 stmt 查退化条目（skip 命中/提升尾部剔除/rename 排除共用），
+   未命中返回 NULL。 */
+sema_closure_t *sema_closure_find_by_stmt(vec_t *closures, node_t *stmt);
+
+/* 条目表收尾释放（emit 结束调用）；合成名 intern 进产物 program，
+   不随本表释放失效。 */
+void sema_closure_entries_free(allocator_t *out, vec_t **closures);
+
+/* 模块级条目定义语句的原位替换：var N: $closure$N = .$closure$N{...}。 */
+node_t *sema_closure_module_var(sema_closure_t *entry, sema_clone_env_t *env);
+
+/* 块级条目定义点 TDZ 占位：var N: $closure$M = undefined; */
+node_t *sema_closure_placeholder(sema_closure_t *entry, sema_clone_env_t *env);
+
+/* 块级条目块尾构造赋值：N = .$closure$M{.callee=$callee$M, ...};
+   STMT_EXPR(EXPR_ASSIGN) 包装。捕获字段值：标注捕获带默认值时克隆
+   默认值表达式，否则为捕获名 identifier（块尾现值快照）。 */
+node_t *sema_closure_construct_assign(sema_closure_t *entry,
+                                      sema_clone_env_t *env);
+
+/* 合成 struct $closure$M { callee: func(*$closure$M, 参数类型...)->ret;
+   捕获字段... }——callee 字段打头，捕获字段按捕获序平铺。 */
+node_t *sema_closure_struct_synth(sema_closure_t *entry,
+                                  sema_clone_env_t *env);
+
+/* 合成 func $callee$M (env: *$closure$M, 原形参...) -> ret { 原体 }——
+   体克隆期置 closure_caps/closure_self（env.<cap> 改写 + 自递归
+   env.callee(env, ...)），调用 clone.c 者负责配对恢复。 */
+node_t *sema_closure_callee_synth(sema_closure_t *entry,
+                                  sema_clone_env_t *env);
+
+/* 调用点退化（clone.c EXPR_CALL 分派）：callee 名字叶命中退化条目
+   → N.callee(N.&, args)；closure_self 命中 → env.callee(env, args)。
+   未命中返回 NULL 走通用克隆。 */
+node_t *sema_desugar_closure_call(node_t *node, sema_clone_env_t *env);
+
+/* 捕获引用改写（clone.c 标识符叶早期通道）：closure_caps 激活期
+   命中捕获名 → env.<name> 成员访问。未命中返回 NULL。 */
+node_t *sema_closure_cap_rewrite(node_t *node, sema_clone_env_t *env);
 
 /* §4.17.3 unwind 登记项（如上）。type 为析构形态登记的绑定类型（借用
    引擎类型表，defer 形态 NULL）——return 值引用链上待析构绑定时 $ret
@@ -321,6 +411,11 @@ void sema_clone_env_init(sema_clone_env_t *env,
 void sema_clone_env_destroy(sema_clone_env_t *env);
 
 node_t *sema_clone_node_renamed(node_t *node, sema_clone_env_t *env);
+
+/* §4.17 P3 临时值捕获 guard（clone.c）：武装上下文命中 disposable
+   临时根先克隆后捕获为 $tmp$N 替身，未武装/未命中退化为通用克隆。
+   closure.c 的调用点改写实参克隆复用此通道（与成员调用同模式）。 */
+node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env);
 
 /* ---- §4.17 RAII P1：自动析构（dispose.c） ---- */
 

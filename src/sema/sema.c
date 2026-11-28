@@ -1110,9 +1110,13 @@ int sema_walk(clux_sema_t *sema, node_t *program) {
   return 0;
 }
 
-/* emit 侧：owner 函数的提升项 → rename 表（from=原名，to=提升名）。 */
+/* emit 侧：owner 函数的提升项 → rename 表（from=原名，to=提升名）。
+   §2.11 闭包退化条目排除：其调用点改写（callee 名字叶）先于通用叶
+   改名消费，rename 条目对退化名是多余且有害的（会把 N 叶改成 N$owner
+   后再被 call 改写拼错名字）。 */
 static size_t sema_emit_renames_for(clux_sema_t *sema,
                                     node_t *owner,
+                                    vec_t *closures,
                                     sema_rename_t *out,
                                     size_t capacity) {
   size_t count = 0;
@@ -1120,6 +1124,9 @@ static size_t sema_emit_renames_for(clux_sema_t *sema,
     sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
     if (hoist->owner != owner || count >= capacity) {
       continue;
+    }
+    if (sema_closure_find_by_stmt(closures, hoist->stmt)) {
+      continue; /* 退化条目走 §2.11 通道 */
     }
     out[count].from = hoist->name;
     out[count].to = hoist->mangled;
@@ -1186,6 +1193,11 @@ vec_t *sema_emit(clux_sema_t *sema) {
       &env, out, program, sema->instants, sema->const_uses, sema->prunes, sema);
   env.anons = sema->anons;
   env.methods = sema->methods;
+  /* §2.11 闭包退化：emit 开头收集（check 后 §8.5 类型表可查），全
+     emit 期注入。条目借用原树 stmt，captures 借用类型表/TYPE 槽，均随
+     sema 存活；合成名 intern 进产物 program 永久借用。 */
+  vec_t *closures = sema_closure_collect(sema, out, program);
+  env.closures = closures;
   /* §2.3 P11：物化期已消耗若干 $defer$N 编号（物化体闭包 var 固化名），
      emit 主循环从物化已消耗值之后起计数，防模块内撞名。 */
   env.defer_counter = sema->inst_defer_counter;
@@ -1225,16 +1237,28 @@ vec_t *sema_emit(clux_sema_t *sema) {
     if (sema_emit_generic_replaced(sema, stmt)) {
       continue;
     }
+    /* §2.11 闭包退化：模块级条目定义语句原位换
+       var N: $closure$N = .$closure$N{...}（无 renames/skip 语境——模块
+       级名字不经提升重编排）。 */
+    if (stmt && sema_closure_find_by_stmt(closures, stmt)) {
+      sema_closure_t *entry = sema_closure_find_by_stmt(closures, stmt);
+      program_node_add_stmt(ast, sema_closure_module_var(entry, &env));
+      continue;
+    }
     /* 提升 owner（§2.2 顶层函数 / §2.10 struct 成员）：rename + skip
        双通道重编排——体内引用点改提升名、原声明语句摘除。 */
     if (hoist_total > 0 && stmt && sema_emit_has_hoists_for(sema, stmt)) {
       renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
       env.renames = renames;
       env.rename_count =
-          sema_emit_renames_for(sema, stmt, renames, hoist_total);
+          sema_emit_renames_for(sema, stmt, closures, renames, hoist_total);
       skip = sema_emit_skip_for(sema, stmt, out);
       env.skip = skip;
+      /* §2.11：owner 语境标记——体内块级条目 skip 命中时换 TDZ 占位、
+         定义块块尾追加构造赋值、调用点改写按 owner 过滤条目。 */
+      env.closure_owner = stmt;
       program_node_add_stmt(ast, sema_clone_node_renamed(stmt, &env));
+      env.closure_owner = NULL;
       allocator_free(out, (void **)&renames);
       delete_vec(&skip);
       env.renames = NULL;
@@ -1248,13 +1272,21 @@ vec_t *sema_emit(clux_sema_t *sema) {
      声明改名、更深层提升项摘除），name SYMBOL 由 rename 表改写。 */
   for (size_t idx = 0; idx < hoist_total; idx++) {
     sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
+    /* §2.11 退化条目走双轮合成（结构体 + $callee），不进旧通道排放。 */
+    if (sema_closure_find_by_stmt(closures, hoist->stmt)) {
+      continue;
+    }
     renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
     env.renames = renames;
     env.rename_count =
-        sema_emit_renames_for(sema, hoist->owner, renames, hoist_total);
+        sema_emit_renames_for(sema, hoist->owner, closures, renames,
+                              hoist_total);
     skip = sema_emit_skip_for(sema, hoist->owner, out);
     env.skip = skip;
+    /* §2.11：提升体克隆语境归属其 owner（体内更深条目按 owner 过滤）。 */
+    env.closure_owner = hoist->owner;
     program_node_add_stmt(ast, sema_clone_node_renamed(hoist->stmt, &env));
+    env.closure_owner = NULL;
     allocator_free(out, (void **)&renames);
     delete_vec(&skip);
     env.renames = NULL;
@@ -1351,6 +1383,45 @@ vec_t *sema_emit(clux_sema_t *sema) {
     stmt_struct_node_set_export(stmt, NULL);
     program_node_add_stmt(ast, stmt);
   }
+  /* §2.11 闭包退化双轮合成（先全 struct 后全 callee——$callee 的 callee
+     字段类型/构造赋值引用 $closure$M，struct 须先在产物中可见）：
+     - struct 轮：$closure$M 声明，纯数据合成无克隆语境；
+     - callee 轮：$callee$M 纯函数，按条目构建克隆语境——scope_owner
+       （块级=owner / 模块级=条目自身，体内更深 hoist 的 rename/skip 与
+       调用点退化按它对齐）+ closure_caps/closure_self（env.<cap> 改写 +
+       自递归 env.callee(env,...)），配对恢复。合成体直进产物不经
+       check（形态由收集期谓词保证）。 */
+  for (size_t idx = 0; idx < vec_get_size(closures); idx++) {
+    sema_closure_t *entry = (sema_closure_t *)vec_get(closures, idx);
+    program_node_add_stmt(ast, sema_closure_struct_synth(entry, &env));
+  }
+  for (size_t idx = 0; idx < vec_get_size(closures); idx++) {
+    sema_closure_t *entry = (sema_closure_t *)vec_get(closures, idx);
+    node_t *scope_owner = entry->owner ? entry->owner : entry->stmt;
+    if (hoist_total > 0) {
+      renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
+      env.renames = renames;
+      env.rename_count =
+          sema_emit_renames_for(sema, scope_owner, closures, renames,
+                                hoist_total);
+    }
+    skip = sema_emit_skip_for(sema, scope_owner, out);
+    env.skip = skip;
+    env.closure_owner = scope_owner;
+    env.closure_caps = entry->captures;
+    env.closure_self = entry->name;
+    program_node_add_stmt(ast, sema_closure_callee_synth(entry, &env));
+    env.closure_caps = NULL;
+    env.closure_self = NULL;
+    env.closure_owner = NULL;
+    if (renames) {
+      allocator_free(out, (void **)&renames);
+      env.renames = NULL;
+      env.rename_count = 0;
+    }
+    delete_vec(&skip);
+    env.skip = NULL;
+  }
   /* §4.17 合成析构函数：按收集序产出 func $dispose$T（登记时已递归
      收集 disposable 字段类型，被引用的 $dispose$F 必然同批存在）。
      合成体直接进产物、不经 check（内容全部由谓词保证可解析）；
@@ -1364,6 +1435,7 @@ vec_t *sema_emit(clux_sema_t *sema) {
     allocator_free(out, (void **)&entry);
   }
   delete_vec(&disposes);
+  sema_closure_entries_free(out, &closures);
   sema_clone_env_destroy(&env);
   program_set_decls(program, ast);
   vec_push(programs, program);

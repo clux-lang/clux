@@ -59,7 +59,7 @@ static node_t *sema_clone_instant(node_t *node, sema_clone_env_t *env) {
 }
 
 static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env);
-static node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env);
+node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env);
 
 /* ---- §2.3 实例体克隆态 ----
    instantiate 置位期间（emit 尾部克隆实例体）：
@@ -384,7 +384,7 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env);
    $tmpM 的 use-before-declare；其所有权本就随外层临时流动），再捕获
    为 $tmp$N 替身；捕获失败（类型不可名/分配失败）原样保留（pre-P3
    行为，泄漏但合法）。unarm 上下文与命中失败退化为通用克隆。 */
-static node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env) {
+node_t *sema_clone_lift_guard(node_t *node, sema_clone_env_t *env) {
   if (!env->lift_active || !sema_lift_is_root(node, env)) {
     return sema_clone_impl(node, env);
   }
@@ -550,6 +550,20 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
         }
       }
       if (dropped) {
+        /* §2.11 闭包退化：块级条目定义语句被 skip 摘除时，当前克隆
+           语境归属其 owner → 换 TDZ var 占位（块尾延迟绑定）；模块级
+           条目与非本 owner 语境保持摘除（模块级 var 由 emit 主循环原位
+           替换，其它 owner 语境本就不可见该名字）。 */
+        if (env->closures) {
+          for (size_t c = 0; c < vec_get_size(env->closures); c++) {
+            sema_closure_t *entry = (sema_closure_t *)vec_get(env->closures, c);
+            if (entry->stmt == child && entry->owner &&
+                entry->owner == env->closure_owner) {
+              node_add_child(clone, sema_closure_placeholder(entry, env));
+              break;
+            }
+          }
+        }
         continue;
       }
     }
@@ -701,6 +715,18 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
       continue;
     }
     node_add_child(clone, sema_clone_impl(child, env));
+  }
+  /* §2.11 闭包退化：本块是块级条目的定义块 → 按收集序块尾追加构造
+     赋值（延迟绑定：捕获字段取块尾现值快照）。须先于 unwind 展开
+     （构造赋值是普通语句，不受 LIFO 析构链影响；捕获名在快照点语义
+     上仍存活——unwind 调用在赋值之后才执行）。 */
+  if (env->closures) {
+    for (size_t c = 0; c < vec_get_size(env->closures); c++) {
+      sema_closure_t *entry = (sema_closure_t *)vec_get(env->closures, c);
+      if (entry->block == node && entry->owner == env->closure_owner) {
+        node_add_child(clone, sema_closure_construct_assign(entry, env));
+      }
+    }
   }
   /* 块尾正常退出：本块水位以上登记项逆序展开；末语句已是退出点时
      块尾不可达，不再补调用（ unwind 调用已在退出点前插入）。 */
@@ -1241,6 +1267,16 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
       }
     }
   }
+  /* §2.11 闭包退化：$callee 体克隆期（closure_caps 激活）命中捕获名 →
+     env.<name> 成员访问。须先于 renames 通用叶改名消费（捕获名不该被
+     提升重编排改名）。 */
+  if (env->closure_caps &&
+      node_get_kind(node) == CLUX_NODE_LITERAL_IDENTIFIER) {
+    node_t *rewritten = sema_closure_cap_rewrite(node, env);
+    if (rewritten) {
+      return rewritten;
+    }
+  }
   /* §2.3 实例体克隆态：代换/自引用折叠/泛型表摘除（须先于使用点
      instants 折叠——体内自引用使用点带形参文本，直接折叠会拼错名）。 */
   if (env->instantiate) {
@@ -1286,6 +1322,16 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
       /* 未选臂不存在：空臂。块级语句位的摘除由 sema_clone_block 预判，
          此处兜底返回 NULL（固定槽位场景 NULL 槽合法）。 */
       return prune->arm ? sema_clone_impl(prune->arm, env) : NULL;
+    }
+  }
+  /* §2.11 闭包退化：调用点 N(args) → N.callee(N.&, args)；$callee 体内
+     自递归 → env.callee(env, args)。须先于成员调用改写与通用克隆（callee
+     名字叶由此通道消费，不再落 renames）。 */
+  if (kind == CLUX_NODE_EXPR_CALL &&
+      (env->closures || env->closure_self)) {
+    node_t *call = sema_desugar_closure_call(node, env);
+    if (call) {
+      return call;
     }
   }
   if (kind == CLUX_NODE_EXPR_CALL && env->methods) {
@@ -1508,6 +1554,12 @@ void sema_clone_env_init(sema_clone_env_t *env,
   env->unwind = create_vec(env->out);
   env->unwind_func_mark = 0;
   env->unwind_loop_mark = 0;
+  /* §2.11 闭包退化通道：初始关闭（closures/closure_caps/closure_self
+     全部借用，emit 各克隆点配对设置）。 */
+  env->closures = NULL;
+  env->closure_owner = NULL;
+  env->closure_caps = NULL;
+  env->closure_self = NULL;
 }
 
 /* lift_temps 是 env 唯一自建所有物（其余成员均借用），通道收尾统一
