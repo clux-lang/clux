@@ -3591,6 +3591,187 @@ TEST(SemaTest, ClosureCaptureNamedEnvCoexistsWithProtocolKey) {
       /* 退化产物含 '$' → 跳过 round-trip。 */ false);
 }
 
+/* ---- §2.12 P3 批次 1：嵌套条目递归退化 + 跨层捕获 ---- */
+
+/* 闭包退化 emit 期 bail 断言：walk 零错误，emit 触发 diag（收集期
+   报错短路 emit 返回 NULL），首条 diag 含 needle 子串。 */
+static void expect_closure_bail(const char *src, const char *needle) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_sema_t *sema = sema_create(ctx, a);
+  parser_t *p;
+  node_t *ast = parse_clux(a, &p, src);
+  ASSERT_NE(ast, nullptr) << "src=" << src;
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << src;
+  EXPECT_EQ(sema_walk(sema, ast), 0) << "src=" << src;
+  EXPECT_FALSE(sema_has_error(sema)) << "walk must be clean, src=" << src;
+  vec_t *programs = sema_emit(sema);
+  EXPECT_EQ(programs, nullptr) << "src=" << src;
+  EXPECT_TRUE(sema_has_error(sema)) << "src=" << src;
+  ASSERT_GE(clux_context_diag_count(ctx), 1u) << "src=" << src;
+  string_t *diag =
+      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+  EXPECT_NE(strstr(string_get_data(diag), needle), (const char *)nullptr)
+      << "diag=" << string_get_data(diag) << " src=" << src;
+  delete_string(&diag);
+  sema_destroy(&sema);
+  delete_node(&ast);
+  delete_parser(&p);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+/* §2.12 P3 缺口 A：模块级 f 内零捕获 g 引用 f 形参——发现式跨层捕获。
+   g 体内自由名 a 收敛为捕获（env 字段 a: i32），构造点 .a = a 取 f
+   形参现值，体内改写 $env.a。 */
+TEST(SemaTest, NestedClosureDiscoversOwnerParamAsNormalizedText) {
+  expect_sema_text(
+      "func f(a: i32): i32 {\n"
+      "  func g(b: i32): i32 { return a + b; }\n"
+      "  return g(1);\n"
+      "}\n",
+      "var f: $closure$f$2 = .$closure$f$2{$callee = $callee$f$2};\n"
+      "struct $closure$f$2 {\n"
+      "  $callee: func (*$closure$f$2, i32) -> i32;\n"
+      "}\n"
+      "struct $closure$f$g$1 {\n"
+      "  $callee: func (*$closure$f$g$1, i32) -> i32;\n"
+      "  a: i32;\n"
+      "}\n"
+      "func $callee$f$2($env: *$closure$f$2, a: i32): i32 {\n"
+      "  var g: $closure$f$g$1 = undefined;\n"
+      "  return g.$callee(g.&, 1);\n"
+      "  g = .$closure$f$g$1{$callee = $callee$f$g$1, a = a};\n"
+      "}\n"
+      "func $callee$f$g$1($env: *$closure$f$g$1, b: i32): i32 {\n"
+      "  return $env.a + b;\n"
+      "}\n",
+      /* 退化产物含 '$' → 跳过 round-trip。 */ false);
+}
+
+/* §2.12 P3 缺口 B：模块级 f 内显式裸捕获 g 捕获 f 形参（旧通道
+   emit=NULL 硬误报）——显式捕获与发现式同链路锚定 owner 形参。 */
+TEST(SemaTest, NestedClosureExplicitBareCaptureOfOwnerParamAsNormalizedText) {
+  expect_sema_text(
+      "func f(a: i32): i32 {\n"
+      "  func |a| g(): i32 { return a; }\n"
+      "  return g();\n"
+      "}\n",
+      "var f: $closure$f$2 = .$closure$f$2{$callee = $callee$f$2};\n"
+      "struct $closure$f$2 {\n"
+      "  $callee: func (*$closure$f$2, i32) -> i32;\n"
+      "}\n"
+      "struct $closure$f$g$1 {\n"
+      "  $callee: func (*$closure$f$g$1) -> i32;\n"
+      "  a: i32;\n"
+      "}\n"
+      "func $callee$f$2($env: *$closure$f$2, a: i32): i32 {\n"
+      "  var g: $closure$f$g$1 = undefined;\n"
+      "  return g.$callee(g.&);\n"
+      "  g = .$closure$f$g$1{$callee = $callee$f$g$1, a = a};\n"
+      "}\n"
+      "func $callee$f$g$1($env: *$closure$f$g$1): i32 {\n"
+      "  return $env.a;\n"
+      "}\n",
+      /* 退化产物含 '$' → 跳过 round-trip。 */ false);
+}
+
+/* §2.12 P3 缺口 C：块级 outer 内 inner——嵌套条目递归退化。合成名
+   链式拼接 $closure$main$outer$1$inner$2，inner 在 outer 体克隆中原位
+   构造 + 调用改写，inner 自递归经 $env.$callee($env)。 */
+TEST(SemaTest, NestedBlockClosureDegradesRecursivelyAsNormalizedText) {
+  expect_sema_text(
+      "func main(): void {\n"
+      "  {\n"
+      "    func outer(): void {\n"
+      "      func inner(): void { inner(); }\n"
+      "      inner();\n"
+      "    }\n"
+      "    outer();\n"
+      "  }\n"
+      "}\n",
+      "var main: $closure$main$3 = .$closure$main$3{$callee = "
+      "$callee$main$3};\n"
+      "struct $closure$main$3 {\n"
+      "  $callee: func (*$closure$main$3) -> void;\n"
+      "}\n"
+      "struct $closure$main$outer$1 {\n"
+      "  $callee: func (*$closure$main$outer$1) -> void;\n"
+      "}\n"
+      "struct $closure$main$outer$1$inner$2 {\n"
+      "  $callee: func (*$closure$main$outer$1$inner$2) -> void;\n"
+      "}\n"
+      "func $callee$main$3($env: *$closure$main$3): void {\n"
+      "  {\n"
+      "    var outer: $closure$main$outer$1 = "
+      ".$closure$main$outer$1{$callee = $callee$main$outer$1};\n"
+      "    outer.$callee(outer.&);\n"
+      "  }\n"
+      "}\n"
+      "func $callee$main$outer$1($env: *$closure$main$outer$1): void {\n"
+      "  var inner: $closure$main$outer$1$inner$2 = "
+      ".$closure$main$outer$1$inner$2{$callee = "
+      "$callee$main$outer$1$inner$2};\n"
+      "  inner.$callee(inner.&);\n"
+      "}\n"
+      "func $callee$main$outer$1$inner$2("
+      "$env: *$closure$main$outer$1$inner$2): void {\n"
+      "  $env.$callee($env);\n"
+      "}\n",
+      /* 退化产物含 '$' → 跳过 round-trip。 */ false);
+}
+
+/* §2.12 P3：defer 体内引用外层名 → -2 bail（env 在 defer 边界内
+   不可直达）。 */
+TEST(SemaTest, NestedClosureBailsOnDeferBodyReference) {
+  expect_closure_bail(
+      "func main(): void {\n"
+      "  var x: i32 = 1;\n"
+      "  func g(): void {\n"
+      "    defer { x = 2; }\n"
+      "  }\n"
+      "  g();\n"
+      "}\n",
+      "closure 'g' cannot be desugared: it references an outer-scope name "
+      "from inside a nested function or defer body");
+}
+
+/* §2.12 P3：经中间闭包的跨层捕获（inner 引用 outer 所在块的 x，但
+   outer 未捕获 x——inner 的 env 与 x 之间隔了 outer 的帧）→ -3 bail。 */
+TEST(SemaTest, NestedClosureBailsOnCrossLayerCapture) {
+  expect_closure_bail(
+      "func main(): void {\n"
+      "  {\n"
+      "    var x: i32 = 1;\n"
+      "    func outer(): void {\n"
+      "      func inner(): void { x = 2; }\n"
+      "      inner();\n"
+      "    }\n"
+      "    outer();\n"
+      "  }\n"
+      "}\n",
+      "closure 'inner' cannot be desugared: it captures an outer-scope "
+      "name through an intermediate closure");
+}
+
+/* §2.12 P3：嵌套条目按名引用容器闭包（inner 体内调用 outer——按名
+   无通道可达：outer 在 outer 定义块克隆中是块局部 var）→ Scan-C
+   兄弟敏感 bail（首条 diag）。 */
+TEST(SemaTest, NestedClosureBailsOnContainerNameReference) {
+  expect_closure_bail(
+      "func main(): void {\n"
+      "  {\n"
+      "    func outer(): void {\n"
+      "      func inner(): void { outer(); }\n"
+      "      inner();\n"
+      "    }\n"
+      "    outer();\n"
+      "  }\n"
+      "}\n",
+      "closure 'outer' cannot be desugared: it is referenced from within "
+      "a sibling hoisted declaration");
+}
+
 /* §2.12：条目形参名 env 放行——合成首参 $env 与用户形参 env 并存，
    参数序不混淆（$env 打头、用户形参原序随其后）。 */
 TEST(SemaTest, ClosureParamNamedEnvCoexistsWithProtocolKey) {

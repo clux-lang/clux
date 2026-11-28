@@ -320,23 +320,33 @@ typedef struct {
 /* 捕获条目（entry->captures 元素，closure.c 收集期定型）：
    - 标注捕获（|(c: T = e)|）：type_src 借用原树 TYPE 节点（合成时
      克隆），default_src 借用默认值表达式（可 NULL），type NULL；
-   - 裸捕获（|c|）：type 为 §8.5 锚点类型（借用引擎类型表，合成时
-     render_type 重建），type_src/default_src NULL。
+   - 裸捕获（|c|）/隐式发现捕获：type 为 §8.5 锚点类型（借用引擎类型
+     表，合成时 render_type 重建）或借用源形参 TYPE 槽（type_src），
+     type_src/default_src 相应 NULL。
+   via_env=1 表示捕获源为所属容器的捕获（构造点填充值渲染
+   $env.<name>——构造点落在容器体克隆内，$env 在域内）；0 为原名
+   identifier（源形参/块 var 现值快照）。
    ok=0 表示定型失败（整条目不退化）。 */
 typedef struct {
   const char *name;    /* 捕获名（out 分配） */
-  node_t *type_src;    /* 借用：标注捕获的 TYPE 节点，可 NULL */
+  node_t *type_src;    /* 借用：标注捕获/形参源的 TYPE 节点，可 NULL */
   node_t *default_src; /* 借用：标注捕获默认值表达式，可 NULL */
   clux_type_t *type;   /* 借用：裸捕获锚点类型，可 NULL */
-  int ok;              /* 定型成功 */
+  int via_env;         /* 构造点经 $env.<name> 取值（源为容器捕获） */
+  int discovered; /* 隐式发现捕获：锚定仅限源可见集（positional），
+                          显式裸捕获保留定义块后向 var 兜底（旧语义） */
+  int ok;         /* 定型成功 */
 } sema_closure_cap_t;
 
 /* 退化条目（emit 期收集，out allocator 持有，随产物释放）。 */
-typedef struct {
+typedef struct sema_closure_s {
   node_t *stmt;  /* 借用：原树 STMT_FUNC 语句（skip/占位匹配键） */
   node_t *owner; /* 借用：块级=所属顶层函数 stmt；模块级 NULL */
   node_t *block; /* 借用：块级=原树中直接包含 stmt 的块；模块级
                            NULL（块尾构造赋值的落点匹配键） */
+  struct sema_closure_s *container; /* 借用：直接容器（§2.12 P3——AST 包含判定，
+                          嵌套候选递归退化的扫描域根；模块级条目可作
+                          容器；直接嵌套于顶层函数体内为 NULL） */
   const char *name;         /* 原名（out 分配） */
   const char *closure_name; /* $closure$M（out 分配） */
   const char *callee_name;  /* $callee$M（out 分配） */
