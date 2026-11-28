@@ -21,9 +21,13 @@ struct _clux_sema_t {
   clux_module_t *module;      /* 借用：ctx 的 modules 注册表持有 */
   int walked;                 /* 0 未走 / 1 已走（walk 只允许一次） */
   vec_t *hoists;              /* sema_hoist_t*，engine allocator 持有 */
-  vec_t *instants;            /* sema_instant_t*，模块级实例化表（§2.3） */
-  vec_t *generic_defs;        /* sema_generic_def_t*，泛型名→定义（§2.3） */
-  vec_t *instance_bodies;     /* sema_instance_body_t*，实例体表（§2.3） */
+  size_t synth_seq; /* 提升/退化合成名尾段自增 id（§2.11 P3）：函数名只在
+                       定义处作用域唯一，提升到全局须消歧——mangled 尾拼
+                       $N（模块级条目 emit 期取号，块级 walk 期取号，walk
+                       先于 emit 故块级号在前，顺序确定） */
+  vec_t *instants;        /* sema_instant_t*，模块级实例化表（§2.3） */
+  vec_t *generic_defs;    /* sema_generic_def_t*，泛型名→定义（§2.3） */
+  vec_t *instance_bodies; /* sema_instance_body_t*，实例体表（§2.3） */
   program_t *inst_program; /* 物化期 intern 文本池（§2.3 P11）：walk 期
                                  物化实例体新造文本 intern 于此（仅在有实
                                  例体时创建），物化体的新造名 location 借

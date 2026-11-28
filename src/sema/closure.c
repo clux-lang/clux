@@ -657,13 +657,25 @@ sema_closure_collect(clux_sema_t *sema, allocator_t *out, program_t *program) {
     if (!entry) {
       continue;
     }
-    /* 模块级名字 M = 原名（重取 name 文本——entry_make 内部已释放）。 */
+    /* 模块级名字 M = 原名$id（重取 name 文本——entry_make 内部已释放）。
+       id 统一自增（§2.11 P3）：函数名只在定义处作用域唯一，提升到全局
+       须消歧（多模块同名 / 兄弟块同名遮蔽同源问题）。*/
     char *mangled =
         location_get(node_get_location(func_decl_node_get_name(decl)), out);
     if (!mangled) {
       allocator_free(out, (void **)&entry);
       continue;
     }
+    char id_buf[32];
+    snprintf(id_buf, sizeof(id_buf), "$%zu", ++sema->synth_seq);
+    string_t *mangled_joined = create_string(out);
+    string_append_cstr(mangled_joined, mangled);
+    string_append_cstr(mangled_joined, id_buf);
+    allocator_free(out, (void **)&mangled);
+    mangled = allocator_alloc(out, string_get_size(mangled_joined) + 1);
+    memcpy(mangled, string_get_data(mangled_joined),
+           string_get_size(mangled_joined) + 1);
+    delete_string(&mangled_joined);
     entry->closure_name =
         closure_synth_name(out, program, "$closure$", mangled);
     entry->callee_name = closure_synth_name(out, program, "$callee$", mangled);

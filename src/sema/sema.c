@@ -46,6 +46,7 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->module = NULL;
   sema->walked = 0;
   sema->hoists = create_vec(allocator);
+  sema->synth_seq = 0; /* 合成名 id 从 1 起（++seq 先取号再拼名） */
   sema->instants = create_vec(allocator);
   sema->generic_defs = create_vec(allocator);
   sema->instance_bodies = create_vec(allocator);
@@ -310,8 +311,9 @@ static int sema_stmt_is_hoistable(node_t *stmt) {
   return meta ? meta->hoistable : 0;
 }
 
-/* 登记：同函数内同名（作用域遮蔽）Phase 2 不支持，直接 diag；
-   与模块级名冲突沿用 duplicate declaration 语义。 */
+/* 登记：mangled 尾段统一拼自增 id（§2.11 P3）——函数名只在定义处作用域
+   唯一（兄弟块同名遮蔽合法），提升到全局后须消歧；id 走 '$' 中缀（§1.3
+   三分法，与 $defer$N 同构）。与模块级名冲突沿用 duplicate declaration。 */
 static void sema_hoist_register(clux_sema_t *sema,
                                 node_t *stmt,
                                 node_t *owner,
@@ -323,17 +325,9 @@ static void sema_hoist_register(clux_sema_t *sema,
   if (!name) {
     return;
   }
-  /* mangled = prefix$（prefix 为外层 enclosing 链，顶层函数自己不进表）。*/
-  string_t *joined = create_string(allocator);
-  string_append_cstr(joined, prefix);
-  string_append_cstr(joined, "$");
-  string_append_cstr(joined, name);
-  const char *data = string_get_data(joined);
-  size_t len = string_get_size(joined);
-  char *mangled = allocator_alloc(allocator, len + 1);
-  memcpy(mangled, data, len + 1);
-  delete_string(&joined);
-  /* 同函数同名：遮蔽提升不支持（精确作用域随后续分期落地）。*/
+  /* 同函数同名：id 只保证合成名互异，引用改写通道仍按名字文本工作
+     （闭包退化引用收集 + 提升 rename 表 alike），同名遮蔽在 AST 包含
+     判定落地前仍拒绝（§2.12 P3 后续分期）。*/
   for (size_t idx = 0; idx < vec_get_size(sema->hoists); idx++) {
     sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
     if (hoist->owner == owner && strcmp(hoist->name, name) == 0) {
@@ -345,10 +339,24 @@ static void sema_hoist_register(clux_sema_t *sema,
                         name,
                         clux_module_get_name(module));
       allocator_free(allocator, (void **)&name);
-      allocator_free(allocator, (void **)&mangled);
       return;
     }
   }
+  /* mangled = prefix$原名$id（prefix 为外层 enclosing 链，顶层函数自己
+     不进表）。id 拼法与 $defer$N 先例一致（§1.3）。*/
+  char id_buf[32];
+  int written = snprintf(id_buf, sizeof(id_buf), "$%zu", ++sema->synth_seq);
+  string_t *joined = create_string(allocator);
+  string_append_cstr(joined, prefix);
+  string_append_cstr(joined, "$");
+  string_append_cstr(joined, name);
+  string_append_cstr(joined, id_buf);
+  (void)written;
+  const char *data = string_get_data(joined);
+  size_t len = string_get_size(joined);
+  char *mangled = allocator_alloc(allocator, len + 1);
+  memcpy(mangled, data, len + 1);
+  delete_string(&joined);
   /* 合成名进模块符号表参与查重（与用户名冲突即 $ 编码天然隔离）。*/
   if (!clux_module_declare(module, mangled, false)) {
     clux_context_diag(sema->ctx,

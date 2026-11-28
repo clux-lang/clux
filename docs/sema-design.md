@@ -222,6 +222,15 @@ a.print();
 - **P2 已知局限**：函数值传递仅限非条目名位置；捕获定型依赖名字
   匹配（遮蔽场景显式报错）；captured disposable 值不登记析构
   unwind；nested 条目体内嵌套 func 仍走旧提升通道，待 P3 递归退化。
+- **P3-1 合成名统一自增 id**（`sema->synth_seq` 全局单调）：函数名只在
+  定义处作用域唯一，提升到全局须消歧——所有提升/退化合成名
+  （hoist 通道 `Owner$Name$N` 与闭包通道 `$closure$Chain$Name$N`、
+  `$callee$Chain$Name$N`）一律拼尾段 id（§1.3 `$` 中缀、与 `$defer$N`
+  同构），walk 期提升项与 emit 期模块级退化条目共用同一序号流。
+- **P3-1 边界**：id 只保证合成名互异；引用改写通道（闭包退化引用
+  收集、提升 rename 表）仍按名字文本工作，同函数内同 owner 同名
+  遮蔽仍显式报错（`ambiguous local declaration`）——AST 包含判定
+  落地（P3 后续批次）后放开。
 
 ## 3. 名字方案（mangling）
 
