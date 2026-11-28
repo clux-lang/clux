@@ -391,6 +391,13 @@ static int closure_scan_body(allocator_t *out,
   if (kind == CLUX_NODE_STMT_FUNC && closure_stmt_in_vec(cand, node)) {
     return 0; /* 嵌套候选子树放行 */
   }
+  /* §2.12 批次 2：同名提升声明子树放行——兄弟/嵌套遮蔽下该名字词法
+     自指（块级预扫描解析到该声明自身），体内名字由各自的退化/提升
+     通道收口（site 解析表 + 改名），不计入本条目的捕获/敏感域。var
+     不提升，不在放行域（遮蔽闭包 var 保持 bail）。 */
+  if (sema_stmt_hoist_named(node, self_name)) {
+    return 0;
+  }
   if (closure_is_func_boundary(kind) || closure_is_decl_subtree(kind)) {
     return closure_subtree_has_sensitive(out, node, self_name, caps, NULL) ? -1
                                                                            : 0;
@@ -465,6 +472,46 @@ static int closure_scan_entry(allocator_t *out,
       out, func_decl_node_get_body(decl), self_name, caps, cand);
 }
 
+/* §2.12 批次 2：块级同名遮蔽判定——块直接子级含名为 name 的提升声明
+   （排除条目自身）时，块内全部该名字引用词法解析到该声明（块级预扫描
+   语义：块域前向可见），与本条目无关。var 不提升不在判定域。 */
+static int
+closure_block_shadows(node_t *block, const char *name, node_t *entry_stmt) {
+  vec_t *children = node_get_children(block);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    node_t *child = (node_t *)vec_get(children, idx);
+    if (child && child != entry_stmt && sema_stmt_hoist_named(child, name)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* §2.12 批次 2：owner 体根至 target 的路径穿过同名遮蔽块（含 target
+   在其内）→ target 体内 self_name 词法解析到该块声明，非条目引用，
+   Scan-C 放行。纯 AST 位置判定，不进函数/defer 边界语义。 */
+static int closure_path_shadowed(node_t *node,
+                                 node_t *target,
+                                 const char *self_name,
+                                 node_t *entry_stmt) {
+  if (!node || node == target) {
+    return 0;
+  }
+  if (node_get_kind(node) == CLUX_NODE_STMT_BLOCK &&
+      closure_block_shadows(node, self_name, entry_stmt) &&
+      closure_stmt_in_subtree(node, target)) {
+    return 1;
+  }
+  vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    if (closure_path_shadowed(
+            (node_t *)vec_get(children, idx), target, self_name, entry_stmt)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* Scan-B：owner 体（排除条目自身子树）内条目名检查。条目名只允许
    出现在定义块内（in_block）的 EXPR_CALL callee 位——定义块外引用
    改写后指向不可达的块局部 var，bail。包含条目的祖先候选子树递归
@@ -484,6 +531,22 @@ static int closure_scan_owner(allocator_t *out,
     in_block = 1;
   }
   node_kind_t kind = node_get_kind(node);
+  /* §2.12 批次 2：块级同名遮蔽整块放行——块直接子级含非条目的同名
+     提升声明时，块内全部 self_name 引用词法解析到该声明（块级预扫描
+     语义），非"定义块外引用"；含其中的同名声明子树与深层块由同一
+     语义覆盖。entry_block 的同名子级即条目自身，不会被本判定命中。 */
+  if (kind == CLUX_NODE_STMT_BLOCK &&
+      closure_block_shadows(node, self_name, entry_stmt)) {
+    return 0;
+  }
+  /* §2.12 批次 2：同名兄弟提升声明子树放行（非包含条目）——其体内
+     该名字词法自指（块级预扫描解析到该声明自身），自递归/自引用由其
+     自己的扫描与通道收口；不放行会误判为"定义块外引用"双双 bail。
+     包含条目的同名祖先不走此放行（保持 positional 递归语义）。 */
+  if (sema_stmt_hoist_named(node, self_name) &&
+      !closure_stmt_in_subtree(node, entry_stmt)) {
+    return 0;
+  }
   if ((closure_is_func_boundary(kind) || closure_is_decl_subtree(kind)) &&
       !((kind == CLUX_NODE_STMT_FUNC || kind == CLUX_NODE_EXPR_FUNC_DECL) &&
         cand && closure_stmt_in_subtree(node, entry_stmt))) {
@@ -569,6 +632,8 @@ static int closure_scan_sibling_hoists(allocator_t *out,
                                        node_t *entry_stmt,
                                        const char *self_name,
                                        vec_t *cand) {
+  node_t *owner_decl = stmt_func_node_get_func_decl(owner);
+  node_t *owner_body = owner_decl ? func_decl_node_get_body(owner_decl) : NULL;
   for (size_t idx = 0; idx < vec_get_size(sema->hoists); idx++) {
     sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
     if (!hoist || hoist->owner != owner || hoist->stmt == entry_stmt) {
@@ -577,6 +642,18 @@ static int closure_scan_sibling_hoists(allocator_t *out,
     if (closure_stmt_in_vec(cand, hoist->stmt) &&
         closure_stmt_in_subtree(hoist->stmt, entry_stmt)) {
       continue; /* 祖先候选：嵌套条目的定义块内调用合法 */
+    }
+    /* §2.12 批次 2：同名提升项放行——其体内该名字词法自指（解析到
+       该声明自身），非对条目的跨块引用；提升后合成名经 site 解析表
+       指针消歧，不会再按文本撞上条目。 */
+    if (hoist->name && strcmp(hoist->name, self_name) == 0) {
+      continue;
+    }
+    /* §2.12 批次 2：遮蔽域放行——owner 体根至该提升项的路径穿过同名
+       遮蔽块时，其体内 self_name 词法解析到该块声明，非条目跨提升体
+       引用。 */
+    if (closure_path_shadowed(owner_body, hoist->stmt, self_name, entry_stmt)) {
+      continue;
     }
     if (closure_subtree_has_sensitive(
             out, hoist->stmt, self_name, NULL, NULL)) {
@@ -1745,7 +1822,23 @@ node_t *sema_closure_callee_synth(sema_closure_t *entry,
 /* ---- 调用点 / 捕获引用改写（clone.c 接线） ---- */
 
 static sema_closure_t *closure_find_call_target(sema_clone_env_t *env,
+                                                node_t *callee,
                                                 const char *text) {
+  /* §2.12 批次 2：site 命中优先（指针即真相）——callee 叶词法解析到的
+     提升项若为退化条目即调用目标（同名条目按名首条匹配会错引流）；
+     为普通提升项则权威判负（调用的是同名非闭包声明，不得误吃为闭包
+     调用）。未命中（模块级条目等无 site 场景）走按名兜底。 */
+  if (env->sema) {
+    sema_site_resolve_t *site = sema_site_find(env->sema, callee);
+    if (site) {
+      sema_closure_t *hit =
+          sema_closure_find_by_stmt(env->closures, site->hoist->stmt);
+      if (hit && (hit->owner == NULL || hit->owner == env->closure_owner)) {
+        return hit;
+      }
+      return NULL;
+    }
+  }
   for (size_t idx = 0; idx < vec_get_size(env->closures); idx++) {
     sema_closure_t *entry = (sema_closure_t *)vec_get(env->closures, idx);
     if (!entry || strcmp(entry->name, text) != 0) {
@@ -1796,7 +1889,7 @@ node_t *sema_desugar_closure_call(node_t *node, sema_clone_env_t *env) {
     delete_node(&call);
     return NULL;
   }
-  sema_closure_t *entry = closure_find_call_target(env, text);
+  sema_closure_t *entry = closure_find_call_target(env, callee, text);
   allocator_free(env->out, (void **)&text);
   if (!entry) {
     /* call 未挂树即早退——delete_node 连同 children 一并释放。 */

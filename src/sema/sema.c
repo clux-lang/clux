@@ -54,6 +54,8 @@ clux_sema_t *sema_create(clux_context_t *ctx, allocator_t *out_allocator) {
   sema->inst_defer_counter = 0; /* 物化未发生即 0 起点 */
   sema->const_defs = create_vec(allocator);
   sema->const_uses = create_vec(allocator);
+  sema->site_resolves = create_vec(allocator);
+  sema->site_built = 0;
   sema->prunes = create_vec(allocator);
   sema->anons = create_vec(allocator);
   sema->methods = create_vec(allocator);
@@ -130,6 +132,14 @@ void sema_destroy(clux_sema_t **sema) {
     allocator_free(allocator, (void **)&use);
   }
   delete_vec(&self->const_uses);
+  /* §2.12 批次 2：site 表条目全借用（node 原树、hoist 借 hoists 表），
+     只释放条目本体与外壳。 */
+  for (size_t idx = 0; idx < vec_get_size(self->site_resolves); idx++) {
+    sema_site_resolve_t *site =
+        (sema_site_resolve_t *)vec_get(self->site_resolves, idx);
+    allocator_free(allocator, (void **)&site);
+  }
+  delete_vec(&self->site_resolves);
   for (size_t idx = 0; idx < vec_get_size(self->prunes); idx++) {
     sema_prune_t *prune = (sema_prune_t *)vec_get(self->prunes, idx);
     allocator_free(allocator, (void **)&prune);
@@ -311,6 +321,22 @@ static int sema_stmt_is_hoistable(node_t *stmt) {
   return meta ? meta->hoistable : 0;
 }
 
+/* 声明语句是否为名为 name 的提升声明（§2.12 批次 2 同名放行判定）：
+   名字叶文本与 name 全等即命中（closure.c 扫描对同名兄弟候选子树放行
+   ——词法上其体内该名字自指，由各自的退化/提升通道收口）。var 不提升，
+   不在放行域。 */
+int sema_stmt_hoist_named(node_t *stmt, const char *name) {
+  if (!stmt || !name || !sema_stmt_is_hoistable(stmt)) {
+    return 0;
+  }
+  node_t *name_node = sema_stmt_name_node(stmt);
+  if (!name_node) {
+    return 0;
+  }
+  const location_t *loc = node_get_location(name_node);
+  return loc ? location_is(loc, name) : 0;
+}
+
 /* 登记：mangled 尾段统一拼自增 id（§2.11 P3）——函数名只在定义处作用域
    唯一（兄弟块同名遮蔽合法），提升到全局后须消歧；id 走 '$' 中缀（§1.3
    三分法，与 $defer$N 同构）。与模块级名冲突沿用 duplicate declaration。 */
@@ -325,23 +351,11 @@ static void sema_hoist_register(clux_sema_t *sema,
   if (!name) {
     return;
   }
-  /* 同函数同名：id 只保证合成名互异，引用改写通道仍按名字文本工作
-     （闭包退化引用收集 + 提升 rename 表 alike），同名遮蔽在 AST 包含
-     判定落地前仍拒绝（§2.12 P3 后续分期）。*/
-  for (size_t idx = 0; idx < vec_get_size(sema->hoists); idx++) {
-    sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
-    if (hoist->owner == owner && strcmp(hoist->name, name) == 0) {
-      clux_context_diag(sema->ctx,
-                        CLUX_DIAG_ERROR,
-                        node_get_location(name_node),
-                        "ambiguous local declaration '%s' in module '%s': "
-                        "hoisting shadowed names is not supported yet",
-                        name,
-                        clux_module_get_name(module));
-      allocator_free(allocator, (void **)&name);
-      return;
-    }
-  }
+  /* 同函数同名遮蔽放行（§2.12 批次 2）：mangled 尾段 id 保证合成名互异；
+     引用改写不再按名字文本首条匹配——emit 期 per-site 解析表按名字叶
+     指针词法消歧（块级预扫描语义：块内全量收集、栈顶向下最近命中），
+     闭包 Scan 同名兄弟候选子树放行（词法自指域）。与模块级名冲突沿用
+     duplicate declaration。 */
   /* mangled = prefix$原名$id（prefix 为外层 enclosing 链，顶层函数自己
      不进表）。id 拼法与 $defer$N 先例一致（§1.3）。*/
   char id_buf[32];
@@ -1167,6 +1181,140 @@ static int sema_emit_has_hoists_for(clux_sema_t *sema, node_t *owner) {
   return 0;
 }
 
+/* ---- §2.12 批次 2：引用点 per-site 解析表 ----
+   提升 rename 表按名字文本匹配，同 owner 同名提升项（兄弟块遮蔽）首条
+   命中即错改——本表按名字叶指针词法消歧：DFS 整树（块层栈 = 块内全量
+   提升声明收集，非 positional，对齐 check 块级预扫描语义）把每个名字
+   叶解析到最近同名提升项。clone 消费点 site 命中优先、文本匹配兜底；
+   调用点 desugar 亦按它定位退化条目（同名条目按名首条匹配会错引流）。 */
+
+/* 原树声明语句 → 提升条目（未登记返回 NULL）。 */
+static sema_hoist_t *sema_hoist_find_by_stmt(clux_sema_t *sema, node_t *stmt) {
+  for (size_t idx = 0; idx < vec_get_size(sema->hoists); idx++) {
+    sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
+    if (hoist && hoist->stmt == stmt) {
+      return hoist;
+    }
+  }
+  return NULL;
+}
+
+/* site 表查询（clone 消费点），未命中返回 NULL。 */
+sema_site_resolve_t *sema_site_find(clux_sema_t *sema, node_t *node) {
+  if (!sema || !node || !sema->site_resolves) {
+    return NULL;
+  }
+  for (size_t idx = 0; idx < vec_get_size(sema->site_resolves); idx++) {
+    sema_site_resolve_t *site =
+        (sema_site_resolve_t *)vec_get(sema->site_resolves, idx);
+    if (site && site->use == node) {
+      return site;
+    }
+  }
+  return NULL;
+}
+
+static void sema_site_add(clux_sema_t *sema, node_t *use, sema_hoist_t *hoist) {
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  sema_site_resolve_t *site = allocator_alloc(allocator, sizeof(*site));
+  site->use = use;
+  site->hoist = hoist;
+  vec_push(sema->site_resolves, site);
+}
+
+/* 块层压栈：全块收集直接子级提升声明（退化条目也入层——外层引用按它
+   解析，消费点自行分诊：退化条目命中不改名，调用点 desugar 按它定位）。 */
+static void
+sema_site_layer_push(clux_sema_t *sema, node_t *block, vec_t *layers) {
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  vec_t *layer = create_vec(allocator);
+  vec_t *children = node_get_children(block);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    node_t *child = (node_t *)vec_get(children, idx);
+    if (!child || !sema_stmt_is_hoistable(child)) {
+      continue;
+    }
+    sema_hoist_t *hoist = sema_hoist_find_by_stmt(sema, child);
+    if (hoist) {
+      vec_push(layer, hoist);
+    }
+  }
+  vec_push(layers, layer);
+}
+
+/* DFS：块层栈上的名字叶解析——自栈顶向下最近同名命中（内层遮蔽外层）。
+   块级（嵌套）退化条目子树整树跳过：体内自由名已收敛为捕获（cap 改写
+   先于 renames 消费），site 登记无消费点反而添噪。模块级条目不跳过
+   （§2.12 批次 2）：全局不存在闭包——模块级条目零捕获，其 callee 体
+   克隆挂 renames 消费，体内 hoist 引用须 per-site 消歧（兄弟块同名
+   struct 场景文本匹配首条命中会错改）；体内嵌套的块级条目在递归中
+   自行命中跳过。嵌套函数边界不截断：词法链贯通（提升体/容器体内的
+   外层引用同经 owner 提升表整域改写）。 */
+static void sema_site_walk(clux_sema_t *sema,
+                           node_t *node,
+                           vec_t *layers,
+                           vec_t *closures) {
+  if (!node) {
+    return;
+  }
+  sema_closure_t *entry = sema_closure_find_by_stmt(closures, node);
+  if (entry && entry->owner) {
+    return; /* 块级嵌套条目 */
+  }
+  node_kind_t kind = node_get_kind(node);
+  if (kind == CLUX_NODE_STMT_BLOCK) {
+    sema_site_layer_push(sema, node, layers);
+    vec_t *children = node_get_children(node);
+    for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+      sema_site_walk(sema, (node_t *)vec_get(children, idx), layers, closures);
+    }
+    vec_t *layer = (vec_t *)vec_erase(layers, vec_get_size(layers) - 1);
+    delete_vec(&layer);
+    return;
+  }
+  if (kind == CLUX_NODE_SYMBOL || kind == CLUX_NODE_LITERAL_IDENTIFIER) {
+    const location_t *loc = node_get_location(node);
+    for (size_t l = vec_get_size(layers); loc && l-- > 0;) {
+      int hit = 0;
+      vec_t *layer = (vec_t *)vec_get(layers, l);
+      for (size_t idx = 0; idx < vec_get_size(layer); idx++) {
+        sema_hoist_t *hoist = (sema_hoist_t *)vec_get(layer, idx);
+        if (hoist && location_is(loc, hoist->name)) {
+          sema_site_add(sema, node, hoist);
+          hit = 1;
+          break;
+        }
+      }
+      if (hit) {
+        break;
+      }
+    }
+  }
+  vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    sema_site_walk(sema, (node_t *)vec_get(children, idx), layers, closures);
+  }
+}
+
+/* emit 期惰性构建（closures collect 之后：退化条目子树跳过判定依赖
+   条目表）。AST 两 emit 间不可变，重入直接跳过。 */
+static void sema_site_build(clux_sema_t *sema, vec_t *closures) {
+  if (!sema || sema->site_built || !sema->ast) {
+    return;
+  }
+  sema->site_built = 1;
+  if (vec_get_size(sema->hoists) == 0) {
+    return;
+  }
+  allocator_t *allocator = clux_context_get_allocator(sema->ctx);
+  vec_t *layers = create_vec(allocator);
+  vec_t *children = node_get_children(sema->ast);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    sema_site_walk(sema, (node_t *)vec_get(children, idx), layers, closures);
+  }
+  delete_vec(&layers);
+}
+
 /* emit 侧：定义语句已有实例体（§2.3）→ 不进输出（尾部由实例体替代；
    复合实参等不可实例化的定义保持原样）。 */
 static int sema_emit_generic_replaced(clux_sema_t *sema, node_t *stmt) {
@@ -1217,6 +1365,11 @@ vec_t *sema_emit(clux_sema_t *sema) {
     delete_vec(&programs);
     return NULL;
   }
+  /* §2.12 批次 2：引用点 per-site 解析表——emit 期惰性构建（须在
+     closures collect 之后：退化条目子树跳过判定依赖条目表），全 emit
+     期供 clone 消费点（site 命中优先、文本匹配兜底）与调用点 desugar
+     （同名退化条目定位）查询。 */
+  sema_site_build(sema, closures);
   /* §2.3 P11：物化期已消耗若干 $defer$N 编号（物化体闭包 var 固化名），
      emit 主循环从物化已消耗值之后起计数，防模块内撞名。 */
   env.defer_counter = sema->inst_defer_counter;

@@ -1490,10 +1490,30 @@ static void check_local_scan(clux_sema_t *sema, node_t *node) {
   case CLUX_NODE_STMT_COMPTIME_IF:
   case CLUX_NODE_STMT_COMPTIME_FOREACH:
     return; /* comptime 块整树跳过（与 check_stmt 一致） */
+  case CLUX_NODE_STMT_BLOCK:
+    /* §2.12 批次 2：块边界截断——嵌套块声明不再平铺提升进函数帧
+       scope，由 walk 进入该块时（check_stmt 的 STMT_BLOCK 分支压入
+       块 scope 后）自扫登记。兄弟块同名遮蔽由此合法：各块 scope
+       各自可见域，scope 链就近命中。 */
+    return;
   default:
     break;
   }
   vec_t *children = node_get_children(node);
+  for (size_t idx = 0; idx < vec_get_size(children); idx++) {
+    check_local_scan(sema, vec_get(children, idx));
+  }
+}
+
+/* 块级预扫描入口（§2.12 批次 2）：登记块直接子级提升声明进当前
+   scope。函数帧入口调用时登记进帧 scope（形参/返回类型前向引用
+   体内直接子级声明仍成立）；walk 进入块时登记进块 scope（嵌套块
+   声明仅块内可见，与词法作用域一致）。 */
+static void check_local_scan_block(clux_sema_t *sema, node_t *block) {
+  if (!block) {
+    return;
+  }
+  vec_t *children = node_get_children(block);
   for (size_t idx = 0; idx < vec_get_size(children); idx++) {
     check_local_scan(sema, vec_get(children, idx));
   }
@@ -1689,7 +1709,7 @@ static void check_func_decl(clux_sema_t *sema, node_t *decl) {
   clux_context_push_scope(ctx);
   node_t *body = func_decl_node_get_body(decl);
   if (body) {
-    check_local_scan(sema, body);
+    check_local_scan_block(sema, body);
   }
   check_captures(sema, func_decl_node_get_captures(decl));
   node_t *params = func_decl_node_get_params(decl);
@@ -1708,9 +1728,12 @@ static void check_func_decl(clux_sema_t *sema, node_t *decl) {
      出体恢复外层（嵌套函数互不串扰）。 */
   clux_type_t *saved_return = sema->return_type;
   sema->return_type = check_type_eval(sema, func_decl_node_get_return(decl), 1);
+  node_t *saved_body_block = sema->frame_body_block;
+  sema->frame_body_block = body;
   if (body) {
     check_stmt(sema, body);
   }
+  sema->frame_body_block = saved_body_block;
   sema->return_type = saved_return;
   clux_context_pop_scope(ctx);
   /* P10：帧收尾——清空本帧 entries（vec 不持所有权，条目手工释放）
@@ -1794,6 +1817,15 @@ static void check_stmt(clux_sema_t *sema, node_t *stmt) {
   case CLUX_NODE_STMT_BLOCK: {
     clux_context_push_scope(ctx);
     check_dfa_mark_push(sema);
+    /* §2.12 批次 2：块级预扫描——本块提升声明登记进块 scope（兄弟块
+       同名遮蔽各归各 scope，scope 链就近命中）。函数体直下声明在
+       check_func_decl 帧入口已进帧 scope，跳过重复扫描（装饰器求值
+       随扫描走，重复扫描即重复诊断）。 */
+    if (sema->frame_body_block == stmt) {
+      sema->frame_body_block = NULL;
+    } else {
+      check_local_scan_block(sema, stmt);
+    }
     size_t count = stmt_block_node_get_stmt_count(stmt);
     for (size_t idx = 0; idx < count; idx++) {
       check_stmt(sema, stmt_block_node_get_stmt(stmt, idx));

@@ -25,6 +25,11 @@ struct _clux_sema_t {
                        定义处作用域唯一，提升到全局须消歧——mangled 尾拼
                        $N（模块级条目 emit 期取号，块级 walk 期取号，walk
                        先于 emit 故块级号在前，顺序确定） */
+  vec_t *site_resolves; /* sema_site_resolve_t*，引用点解析表（§2.12
+                           批次 2）：名字叶 → 词法解析命中的提升项，
+                           同名提升项消歧（site 命中优先，文本匹配兜底） */
+  int site_built; /* site 表构建标记：emit 期惰性构建一次（AST 两 emit
+                     间不可变，重入跳过） */
   vec_t *instants;        /* sema_instant_t*，模块级实例化表（§2.3） */
   vec_t *generic_defs;    /* sema_generic_def_t*，泛型名→定义（§2.3） */
   vec_t *instance_bodies; /* sema_instance_body_t*，实例体表（§2.3） */
@@ -51,6 +56,12 @@ struct _clux_sema_t {
   size_t dfa_frames; /* 函数体帧嵌套层数：>0 时 DFA 消费点生效（模块级
                           语句与预扫描不启用，§8.6 只管函数体局部 var） */
   vec_t *dfa_marks; /* size_t 水位标记栈：scope 进出配对截断 entries */
+  node_t *frame_body_block; /* 借用：当前函数体块（§2.12 批次 2）——帧入口
+                               check_local_scan_block 已把直接子级登记进帧
+                               scope，walk 进入该块时跳过块级预扫描（装饰
+                               器求值随扫描走，重复扫描即重复诊断）；check_
+                               func_decl 进体前置位、出体恢复，嵌套函数
+                               天然各归各帧 */
 };
 
 /* §8.6 DFA 条目：局部 var 的赋值状态。name 归 ctx allocator（条目
@@ -122,6 +133,23 @@ typedef struct {
   char *name;    /* 原名（ctx allocator），改写匹配键 */
   char *mangled; /* 提升名（ctx allocator），如 f$Foo */
 } sema_hoist_t;
+
+/* 引用点解析条目（§2.12 批次 2，per-site）：原树名字叶 → 词法解析命中
+   的提升项。提升 rename 表按名字文本匹配，同 owner 同名提升项（兄弟块
+   遮蔽）首条命中即错改——本表按 node 指针消歧：clone 消费点 site 命中
+   优先、文本匹配兜底。退化条目也入表（命中时消费点跳过提升改名，调用
+   点 desugar 按它定位条目）。node/hoist 全借用。 */
+typedef struct {
+  node_t *use;         /* 借用：原树名字叶（LITERAL_IDENTIFIER/SYMBOL） */
+  sema_hoist_t *hoist; /* 借用：词法解析命中的提升条目 */
+} sema_site_resolve_t;
+
+/* sema.c：site 表查询（clone 消费点），未命中返回 NULL。 */
+sema_site_resolve_t *sema_site_find(clux_sema_t *sema, node_t *node);
+
+/* sema.c：声明语句是否为名为 name 的提升声明（§2.12 批次 2 同名放行
+   判定，closure.c 扫描用）。非提升声明/名字不符返回 0。 */
+int sema_stmt_hoist_named(node_t *stmt, const char *name);
 
 /* 实例化条目（§2.3 最小版，walk 收集）：泛型类型使用点（EXPR_SUBSCRIPT）
    → 合成实例名。emit 克隆时命中节点折叠为单个名字节点（location 指向
@@ -229,7 +257,9 @@ sema_render_strip_suffix(const char *text, size_t len, size_t *num_len);
 /* 克隆器通道（逆向编排两条通道中的克隆器）：按 children vec 原序逐槽
    复制（NULL 槽保留下标），loc 按值浅拷，parent 由添加顺序重建。
    返回全新子树，分配全部来自 out。变换通道全部经 env 注入：
-   - renames/skip：提升重编排（skip 内原树语句整条不进克隆）；
+   - renames/skip：提升重编排（skip 内原树语句整条不进克隆）；renames
+     名字叶消费 site 命中优先（§2.12 批次 2 per-site 解析表，同名提升项
+     消歧；退化条目命中跳过改名），文本匹配兜底；
    - instants：命中使用点（EXPR_SUBSCRIPT）折叠为实例名节点（§2.3）；
    - consts：命中引用点（LITERAL_IDENTIFIER）折叠为常量字面量（§2.1）；
    - anons（§2.9）：命中匿名构造点（EXPR_CONSTRUCT TYPE 槽 NULL）在

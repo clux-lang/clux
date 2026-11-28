@@ -497,36 +497,9 @@ static node_t *block_nth_of_kind(node_t *block, node_kind_t kind, size_t nth) {
   return NULL;
 }
 
-/* 同函数内同名（作用域遮蔽）仍拒绝：合成名 id 只保证提升名互异，
-   引用改写通道（闭包退化引用收集 + 提升 rename 表）按名字文本工作，
-   AST 包含判定落地前同名遮蔽是显式错误而非静默改错（§2.12 P3 分期）。 */
-TEST(SemaTest, ShadowedLocalDeclIsDiagnosed) {
-  allocator_t *a = create_allocator(malloc, free);
-  clux_context_t *ctx = create_clux_context(a);
-  clux_sema_t *sema = sema_create(ctx, a);
-  parser_t *p;
-  node_t *ast = parse_clux(a,
-                           &p,
-                           "func f(): void {\n"
-                           "  if (true) { struct Foo { a: i32; } }\n"
-                           "  if (false) { struct Foo { a: i32; } }\n"
-                           "}\n");
-  ASSERT_NE(ast, nullptr);
-  EXPECT_EQ(sema_walk(sema, ast), 0);
-  EXPECT_TRUE(sema_has_error(sema));
-  ASSERT_EQ(clux_context_diag_count(ctx), 1u);
-  string_t *text =
-      clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
-  EXPECT_NE(strstr(string_get_data(text), "ambiguous local declaration 'Foo'"),
-            nullptr);
-  delete_string(&text);
-  EXPECT_EQ(sema_emit(sema), nullptr);
-  sema_destroy(&sema);
-  delete_node(&ast);
-  delete_parser(&p);
-  delete_clux_context(&ctx);
-  delete_allocator(&a);
-}
+/* 同函数内同名遮蔽的放行与消歧正向断言在 §2.12 批次 2 区
+   （SiblingBlockSameNameClosuresDegradeIndependently 等，
+    per-site 解析表按名字叶词法消歧）。 */
 
 /* 兄弟块嵌套函数（互易名）：退化 callee 名带全局自增 id 消歧
    （§2.11 P3-1）——$callee$main$aaa$1 与 $callee$main$bbb$2。 */
@@ -2002,9 +1975,23 @@ expect_sema_text(const char *src, const char *expect, bool roundtrip = true) {
   ASSERT_NE(ast, nullptr) << "src=" << src;
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << src;
   EXPECT_EQ(sema_walk(sema, ast), 0);
-  ASSERT_FALSE(sema_has_error(sema)) << "src=" << src;
+  /* emit 只调一次（失败路径附带首条 diag 文本：sema 错误的定位利器）——
+     重复 emit 会重跑闭包收集，synth_seq 对模块级条目二次取号导致 id 漂移。 */
   vec_t *programs = sema_emit(sema);
-  ASSERT_NE(programs, nullptr);
+  if (sema_has_error(sema) || programs == nullptr) {
+    ASSERT_TRUE(sema_has_error(sema)) << "src=" << src;
+    ASSERT_GE(clux_context_diag_count(ctx), 1u) << "src=" << src;
+    string_t *diag =
+        clux_diag_to_string((clux_diag_t *)clux_context_get_diag(ctx, 0), a);
+    ADD_FAILURE() << "sema diag: " << string_get_data(diag) << "\nsrc=" << src;
+    delete_string(&diag);
+    sema_destroy(&sema);
+    delete_node(&ast);
+    delete_parser(&p);
+    delete_clux_context(&ctx);
+    delete_allocator(&a);
+    return;
+  }
   ASSERT_EQ(vec_get_size(programs), 1u) << "src=" << src;
   program_t *program = (program_t *)vec_get(programs, 0);
   string_t *text = program_unparse(program, a, nullptr);
@@ -3794,6 +3781,155 @@ TEST(SemaTest, ClosureParamNamedEnvCoexistsWithProtocolKey) {
       "}\n"
       "func $callee$main$2($env: *$closure$main$2): void {\n"
       "  var r: i32 = add.$callee(add.&, 1, 2);\n"
+      "}\n",
+      /* 退化产物含 '$' → 跳过 round-trip。 */ false);
+}
+
+/* ---- §2.12 批次 2：同名遮蔽放行——per-site 解析表消歧 ---- */
+
+/* 批次 2 场景①：兄弟块同名闭包各自退化互不 bail（旧 Scan-C 兄弟敏感
+   按名首条会误伤同名兄弟）。两个 h 均退化为独立合成名
+   $callee$main$h$1/$callee$main$h$2，调用点各归各（site 命中所在块
+   的条目），不再按名字文本引流到首条。 */
+TEST(SemaTest, SiblingBlockSameNameClosuresDegradeIndependently) {
+  expect_sema_text("func main(): void {\n"
+                   "  { func h(): void { return; } h(); }\n"
+                   "  { func h(): void { return; } h(); }\n"
+                   "}\n",
+                   "var main: $closure$main$3 = .$closure$main$3{$callee = "
+                   "$callee$main$3};\n"
+                   "struct $closure$main$3 {\n"
+                   "  $callee: func (*$closure$main$3) -> void;\n"
+                   "}\n"
+                   "struct $closure$main$h$1 {\n"
+                   "  $callee: func (*$closure$main$h$1) -> void;\n"
+                   "}\n"
+                   "struct $closure$main$h$2 {\n"
+                   "  $callee: func (*$closure$main$h$2) -> void;\n"
+                   "}\n"
+                   "func $callee$main$3($env: *$closure$main$3): void {\n"
+                   "  {\n"
+                   "    var h: $closure$main$h$1 = "
+                   ".$closure$main$h$1{$callee = $callee$main$h$1};\n"
+                   "    h.$callee(h.&);\n"
+                   "  }\n"
+                   "  {\n"
+                   "    var h: $closure$main$h$2 = "
+                   ".$closure$main$h$2{$callee = $callee$main$h$2};\n"
+                   "    h.$callee(h.&);\n"
+                   "  }\n"
+                   "}\n"
+                   "func $callee$main$h$1($env: *$closure$main$h$1): void {\n"
+                   "  return;\n"
+                   "}\n"
+                   "func $callee$main$h$2($env: *$closure$main$h$2): void {\n"
+                   "  return;\n"
+                   "}\n",
+                   /* 退化产物含 '$' → 跳过 round-trip。 */ false);
+}
+
+/* 批次 2 场景②：兄弟块同名局部 struct（原"ambiguous local
+   declaration"守卫场景）——守卫删除后同名遮蔽合法，提升名 id 保证
+   互异；引用点按 site 词法命中所在块的条目（rename 消费 site 命中
+   优先于按名文本首条），x→f$Foo$1、y→f$Foo$2 各归各。 */
+TEST(SemaTest, SiblingBlockShadowedStructsRenamePerScope) {
+  expect_sema_text(
+      "func f(): void {\n"
+      "  if (true) { struct Foo { a: i32; } var x: Foo = .Foo{ .a = 1 }; }\n"
+      "  if (false) { struct Foo { b: i32; } var y: Foo = .Foo{ .b = 2 }; }\n"
+      "}\n",
+      "var f: $closure$f$3 = .$closure$f$3{$callee = $callee$f$3};\n"
+      "struct f$Foo$1 {\n"
+      "  a: i32;\n"
+      "}\n"
+      "struct f$Foo$2 {\n"
+      "  b: i32;\n"
+      "}\n"
+      "struct $closure$f$3 {\n"
+      "  $callee: func (*$closure$f$3) -> void;\n"
+      "}\n"
+      "func $callee$f$3($env: *$closure$f$3): void {\n"
+      "  if (true) {\n"
+      "    var x: f$Foo$1 = .f$Foo$1{a = 1};\n"
+      "  }\n"
+      "  if (false) {\n"
+      "    var y: f$Foo$2 = .f$Foo$2{b = 2};\n"
+      "  }\n"
+      "}\n",
+      /* 退化产物含 '$' → 跳过 round-trip。 */ false);
+}
+
+/* 批次 2 场景③：entry 体内深层同名遮蔽——外层 h 条目体内声明同名内层
+   h（旧 Scan-A 会判自指遮蔽错误），批次 2 放行为词法自指域；内层 h
+   递归退化为链式合成名 $callee$main$h$1$h$2，在 h 条目克隆体内原位
+   构造。 */
+TEST(SemaTest, NestedSameNameShadowingInsideClosureBodyDegrades) {
+  expect_sema_text(
+      "func main(): void {\n"
+      "  func h(): void {\n"
+      "    { func h(): void { return; } }\n"
+      "  }\n"
+      "  h();\n"
+      "}\n",
+      "var main: $closure$main$3 = .$closure$main$3{$callee = "
+      "$callee$main$3};\n"
+      "struct $closure$main$3 {\n"
+      "  $callee: func (*$closure$main$3) -> void;\n"
+      "}\n"
+      "struct $closure$main$h$1 {\n"
+      "  $callee: func (*$closure$main$h$1) -> void;\n"
+      "}\n"
+      "struct $closure$main$h$1$h$2 {\n"
+      "  $callee: func (*$closure$main$h$1$h$2) -> void;\n"
+      "}\n"
+      "func $callee$main$3($env: *$closure$main$3): void {\n"
+      "  var h: $closure$main$h$1 = "
+      ".$closure$main$h$1{$callee = $callee$main$h$1};\n"
+      "  h.$callee(h.&);\n"
+      "}\n"
+      "func $callee$main$h$1($env: *$closure$main$h$1): void {\n"
+      "  {\n"
+      "    var h: $closure$main$h$1$h$2 = .$closure$main$h$1$h$2{$callee = "
+      "$callee$main$h$1$h$2};\n"
+      "  }\n"
+      "}\n"
+      "func $callee$main$h$1$h$2($env: *$closure$main$h$1$h$2): void {\n"
+      "  return;\n"
+      "}\n",
+      /* 退化产物含 '$' → 跳过 round-trip。 */ false);
+}
+
+/* 批次 2 场景④：同名闭包与同名 struct 跨层并存——body 直下的 func S
+   与子块内的 struct S 同名，名字叶 S 按层消歧：子块内 v 的类型叶命中
+   struct（f$S$2），body 层调用点命中闭包（$callee$f$S$1）。同层同名
+   不同种类（同一块内既有 struct S 又有 func S）超出词法消歧能力，
+   属不支持边。 */
+TEST(SemaTest, SameNameClosureAndStructResolveByScopeLayer) {
+  expect_sema_text(
+      "func f(): void {\n"
+      "  func S(): void { return; }\n"
+      "  { struct S { b: i32; } var v: S = .S{ .b = 7 }; }\n"
+      "  S();\n"
+      "}\n",
+      "var f: $closure$f$3 = .$closure$f$3{$callee = $callee$f$3};\n"
+      "struct f$S$2 {\n"
+      "  b: i32;\n"
+      "}\n"
+      "struct $closure$f$3 {\n"
+      "  $callee: func (*$closure$f$3) -> void;\n"
+      "}\n"
+      "struct $closure$f$S$1 {\n"
+      "  $callee: func (*$closure$f$S$1) -> void;\n"
+      "}\n"
+      "func $callee$f$3($env: *$closure$f$3): void {\n"
+      "  var S: $closure$f$S$1 = .$closure$f$S$1{$callee = $callee$f$S$1};\n"
+      "  {\n"
+      "    var v: f$S$2 = .f$S$2{b = 7};\n"
+      "  }\n"
+      "  S.$callee(S.&);\n"
+      "}\n"
+      "func $callee$f$S$1($env: *$closure$f$S$1): void {\n"
+      "  return;\n"
       "}\n",
       /* 退化产物含 '$' → 跳过 round-trip。 */ false);
 }

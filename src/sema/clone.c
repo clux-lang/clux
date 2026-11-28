@@ -1432,23 +1432,39 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
     node_set_location(clone, loc);
   }
   /* 改写目标：LITERAL_IDENTIFIER（名字/类型引用）、SYMBOL（关键字，
-     不会与用户声明名同文本，条件覆盖仅为统一）。 */
+     不会与用户声明名同文本，条件覆盖仅为统一）。§2.12 批次 2：site
+     命中优先（指针即真相，同名提升项词法消歧）——退化条目命中跳过
+     改名（引用归闭包通道：调用点 desugar / 原名 var 直引），普通提升
+     项命中改写其 mangled；未命中走文本匹配兜底（无歧义时等价）。 */
   if ((kind == CLUX_NODE_SYMBOL || kind == CLUX_NODE_LITERAL_IDENTIFIER) &&
       env->renames && env->rename_count > 0) {
-    for (size_t idx = 0; idx < env->rename_count; idx++) {
-      if (!location_is(loc, env->renames[idx].from)) {
-        continue;
+    const char *to = NULL;
+    sema_site_resolve_t *site =
+        env->sema ? sema_site_find(env->sema, node) : NULL;
+    if (site) {
+      if (env->closures &&
+          sema_closure_find_by_stmt(env->closures, site->hoist->stmt)) {
+        to = NULL; /* 退化条目：保留原名 */
+      } else {
+        to = site->hoist->mangled;
       }
+    } else {
+      for (size_t idx = 0; idx < env->rename_count; idx++) {
+        if (location_is(loc, env->renames[idx].from)) {
+          to = env->renames[idx].to;
+          break;
+        }
+      }
+    }
+    if (to) {
       /* 命中：文本区间改指 intern 的提升名（line/col/filename 保留
          原 SYMBOL 的值，to_json 的 text 即提升名，span 无地址）。 */
-      size_t len = strlen(env->renames[idx].to);
-      const char *text =
-          program_intern_string(env->program, env->renames[idx].to, len);
+      size_t len = strlen(to);
+      const char *text = program_intern_string(env->program, to, len);
       location_t renamed = *loc;
       renamed.begin.offset = text;
       renamed.end.offset = text + len;
       node_set_location(clone, &renamed);
-      break;
     }
   }
   /* §4.17 P3 槽位克隆通道（children 级 guard dispatch）：武装上下文下
