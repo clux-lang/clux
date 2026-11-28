@@ -551,15 +551,20 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
       }
       if (dropped) {
         /* §2.11 闭包退化：块级条目定义语句被 skip 摘除时，当前克隆
-           语境归属其 owner → 换 TDZ var 占位（块尾延迟绑定）；模块级
-           条目与非本 owner 语境保持摘除（模块级 var 由 emit 主循环原位
-           替换，其它 owner 语境本就不可见该名字）。 */
+           语境归属其 owner → 零捕获条目定义点原位构造（§2.12 P2——
+           无前向依赖，定义后立即可调用），含捕获条目换 TDZ var 占位
+           （块尾延迟绑定）；模块级条目与非本 owner 语境保持摘除（模块
+           级 var 由 emit 主循环原位替换，其它 owner 语境本就不可见该
+           名字）。 */
         if (env->closures) {
           for (size_t c = 0; c < vec_get_size(env->closures); c++) {
             sema_closure_t *entry = (sema_closure_t *)vec_get(env->closures, c);
             if (entry->stmt == child && entry->owner &&
                 entry->owner == env->closure_owner) {
-              node_add_child(clone, sema_closure_placeholder(entry, env));
+              node_add_child(clone,
+                             vec_get_size(entry->captures) == 0
+                                 ? sema_closure_define_var(entry, env)
+                                 : sema_closure_placeholder(entry, env));
               break;
             }
           }
@@ -723,7 +728,9 @@ static node_t *sema_clone_block(node_t *node, sema_clone_env_t *env) {
   if (env->closures) {
     for (size_t c = 0; c < vec_get_size(env->closures); c++) {
       sema_closure_t *entry = (sema_closure_t *)vec_get(env->closures, c);
-      if (entry->block == node && entry->owner == env->closure_owner) {
+      /* 零捕获条目已定义点原位构造（§2.12 P2），不占块尾。 */
+      if (entry->block == node && entry->owner == env->closure_owner &&
+          vec_get_size(entry->captures) > 0) {
         node_add_child(clone, sema_closure_construct_assign(entry, env));
       }
     }
@@ -1324,11 +1331,10 @@ static node_t *sema_clone_impl(node_t *node, sema_clone_env_t *env) {
       return prune->arm ? sema_clone_impl(prune->arm, env) : NULL;
     }
   }
-  /* §2.11 闭包退化：调用点 N(args) → N.callee(N.&, args)；$callee 体内
-     自递归 → env.callee(env, args)。须先于成员调用改写与通用克隆（callee
+  /* §2.11 闭包退化：调用点 N(args) → N.$callee(N.&, args)；$callee 体内
+     自递归 → $env.$callee($env, args)。须先于成员调用改写与通用克隆（callee
      名字叶由此通道消费，不再落 renames）。 */
-  if (kind == CLUX_NODE_EXPR_CALL &&
-      (env->closures || env->closure_self)) {
+  if (kind == CLUX_NODE_EXPR_CALL && (env->closures || env->closure_self)) {
     node_t *call = sema_desugar_closure_call(node, env);
     if (call) {
       return call;

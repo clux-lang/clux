@@ -1198,6 +1198,17 @@ vec_t *sema_emit(clux_sema_t *sema) {
      sema 存活；合成名 intern 进产物 program 永久借用。 */
   vec_t *closures = sema_closure_collect(sema, out, program);
   env.closures = closures;
+  /* §2.12 P2 收紧：收集期报错（块级条目不可退化：敏感名字/定义位置/
+     捕获定型）→ emit 短路——报错条目不得跌回旧提升通道静默漂移
+     （提升为静态函数丢失闭包值语义）。 */
+  if (sema_has_error(sema)) {
+    sema_closure_entries_free(out, &closures);
+    sema_clone_env_destroy(&env);
+    delete_node(&ast);
+    delete_program(&program);
+    delete_vec(&programs);
+    return NULL;
+  }
   /* §2.3 P11：物化期已消耗若干 $defer$N 编号（物化体闭包 var 固化名），
      emit 主循环从物化已消耗值之后起计数，防模块内撞名。 */
   env.defer_counter = sema->inst_defer_counter;
@@ -1242,7 +1253,7 @@ vec_t *sema_emit(clux_sema_t *sema) {
        级名字不经提升重编排）。 */
     if (stmt && sema_closure_find_by_stmt(closures, stmt)) {
       sema_closure_t *entry = sema_closure_find_by_stmt(closures, stmt);
-      program_node_add_stmt(ast, sema_closure_module_var(entry, &env));
+      program_node_add_stmt(ast, sema_closure_define_var(entry, &env));
       continue;
     }
     /* 提升 owner（§2.2 顶层函数 / §2.10 struct 成员）：rename + skip
@@ -1278,9 +1289,8 @@ vec_t *sema_emit(clux_sema_t *sema) {
     }
     renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
     env.renames = renames;
-    env.rename_count =
-        sema_emit_renames_for(sema, hoist->owner, closures, renames,
-                              hoist_total);
+    env.rename_count = sema_emit_renames_for(
+        sema, hoist->owner, closures, renames, hoist_total);
     skip = sema_emit_skip_for(sema, hoist->owner, out);
     env.skip = skip;
     /* §2.11：提升体克隆语境归属其 owner（体内更深条目按 owner 过滤）。 */
@@ -1389,7 +1399,7 @@ vec_t *sema_emit(clux_sema_t *sema) {
      - callee 轮：$callee$M 纯函数，按条目构建克隆语境——scope_owner
        （块级=owner / 模块级=条目自身，体内更深 hoist 的 rename/skip 与
        调用点退化按它对齐）+ closure_caps/closure_self（env.<cap> 改写 +
-       自递归 env.callee(env,...)），配对恢复。合成体直进产物不经
+       自递归 env.$callee(env,...)），配对恢复。合成体直进产物不经
        check（形态由收集期谓词保证）。 */
   for (size_t idx = 0; idx < vec_get_size(closures); idx++) {
     sema_closure_t *entry = (sema_closure_t *)vec_get(closures, idx);
@@ -1401,9 +1411,8 @@ vec_t *sema_emit(clux_sema_t *sema) {
     if (hoist_total > 0) {
       renames = allocator_alloc(out, sizeof(sema_rename_t) * hoist_total);
       env.renames = renames;
-      env.rename_count =
-          sema_emit_renames_for(sema, scope_owner, closures, renames,
-                                hoist_total);
+      env.rename_count = sema_emit_renames_for(
+          sema, scope_owner, closures, renames, hoist_total);
     }
     skip = sema_emit_skip_for(sema, scope_owner, out);
     env.skip = skip;

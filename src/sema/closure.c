@@ -1,18 +1,20 @@
 /* §2.11 闭包退化 P1：具名非 cfunc 函数 → 「$closure$M struct +
    $callee$M 纯函数」双产物（emit 期脱糖）。
    - 协议（用户示例）：闭包变量平铺进 callee 打头的 struct；callee 首参
-     env: *$closure$M；体内捕获引用改写 env.<name>；调用点
-     N(args) → N.callee(N.&, args)；自递归 env.callee(env, ...)。
+     $env: *$closure$M；体内捕获引用改写 $env.<name>；调用点
+     N(args) → N.$callee(N.&, args)；自递归 $env.$callee($env, ...)。
    - 块级条目（块尾延迟绑定）：定义点换 var N: $closure$M = undefined
      （TDZ 占位），块尾（unwind 之前）追加构造赋值——mid-block 调用读
      TDZ var 报错是有意语义。
    - 模块级条目：定义语句原位换 var N: $closure$N = .$closure$N{...}。
    - 资格（collect 期谓词全集）：具名 func（cfunc/泛型/export/comptime/
-     装饰器/匿名不退化）；模块级全部退化（含零捕获）；块级另需 ≥1 捕获
-     + 定义块在 owner 体直属语句树内（不进嵌套函数/defer 体）+ 敏感名
-     字域检查（env 不可直达 / 名字槽误改写 / 函数值传递回归全部 bail
-     回旧提升通道）。全部机制落 emit 期：check 在原树上照跑（诊断零
-     变化），合成体直进产物不经 check。 */
+     装饰器/匿名不退化）；模块级全部退化（含零捕获）；块级 P2 起含零
+     捕获（定义点原位构造——无前向依赖）+ 含捕获条目块尾延迟绑定；
+     定义块须在 owner 体直属语句树内（不进嵌套函数/defer 体）+ 敏感名
+     字域检查。P2 收紧：块级条目 bail 一律显式报错阻断 emit（不再静默
+     跌回旧提升通道——提升为静态函数丢失闭包值语义）；嵌套条目（定义
+     在已退化条目体内）保留旧通道待 P3 递归退化。全部机制落 emit 期：
+     check 在原树上照跑（诊断零变化），合成体直进产物不经 check。 */
 #include "sema/sema_internal.h"
 #include "core/program.h"
 #include "core/string.h"
@@ -126,8 +128,8 @@ static node_t *closure_capture_params(node_t *decl) {
 /* ---- 收集期资格检查 ---- */
 
 /* 形态谓词（共同）：STMT_FUNC、无 EXPORT/COMPTIME/装饰器、keyword 文本
-   "func"（非 cfunc）、NAME 为名字叶、无泛型、形参全带类型且不占
-   "env" 保留名。返回 FUNC_DECL，不达标返回 NULL。 */
+   "func"（非 cfunc）、NAME 为名字叶、无泛型、形参全带类型。返回
+   FUNC_DECL，不达标返回 NULL。 */
 static node_t *closure_shape_decl(allocator_t *out, node_t *stmt) {
   if (!stmt || node_get_kind(stmt) != CLUX_NODE_STMT_FUNC) {
     return NULL;
@@ -160,9 +162,8 @@ static node_t *closure_shape_decl(allocator_t *out, node_t *stmt) {
           !func_param_node_get_type(param)) {
         return NULL;
       }
-      if (closure_leaf_is(func_param_node_get_name(param), out, "env")) {
-        return NULL;
-      }
+      /* 形参名 env 不再保留——合成首参已迁移 $env（§1.3 '$' 前缀隔离），
+         用户形参 env 与之并存无冲突。 */
     }
   }
   return decl;
@@ -246,12 +247,8 @@ static vec_t *closure_extract_caps(clux_sema_t *sema,
       *ok = 0;
       continue;
     }
-    if (strcmp(name, "callee") == 0) {
-      /* 合成字段名 callee 保留。 */
-      *ok = 0;
-      allocator_free(out, (void **)&name);
-      continue;
-    }
+    /* 捕获名 callee 不再保留——合成协议键已迁移 $callee（§1.3 三分法：
+       '$' 前缀隔离编译器合成名），用户捕获字段 callee 与之并存无冲突。 */
     sema_closure_cap_t *cap = allocator_alloc(out, sizeof(sema_closure_cap_t));
     cap->name = program_intern_string(program, name, strlen(name));
     allocator_free(out, (void **)&name);
@@ -302,13 +299,17 @@ static void closure_free_caps(allocator_t *out, vec_t **caps) {
   delete_vec(caps);
 }
 
-/* 敏感名字集命中：名字叶 == 自身名或任一捕获名。 */
+/* 敏感名字集命中：名字叶 == 自身名或任一捕获名。caps == NULL 表示
+   只查自身名（scan_owner 边界分支：克隆后由 caps 通道处理捕获名）。 */
 static int closure_leaf_is_sensitive(allocator_t *out,
                                      node_t *leaf,
                                      const char *self_name,
                                      vec_t *caps) {
   if (closure_leaf_is(leaf, out, self_name)) {
     return 1;
+  }
+  if (!caps) {
+    return 0;
   }
   for (size_t idx = 0; idx < vec_get_size(caps); idx++) {
     sema_closure_cap_t *cap = (sema_closure_cap_t *)vec_get(caps, idx);
@@ -371,7 +372,7 @@ static int closure_is_decl_subtree(node_kind_t kind) {
 
 /* Scan-A：条目自身子树（PARAMS/RETURN 槽 + BODY）敏感名字域检查。
    返回 0=通过，-1=bail。BODY 内规则：捕获名任意位置可（改写
-   env.<name>）；自身名只允许 EXPR_CALL callee 位（自递归）。 */
+   $env.<name>）；自身名只允许 EXPR_CALL callee 位（自递归）。 */
 static int closure_scan_body(allocator_t *out,
                              node_t *node,
                              const char *self_name,
@@ -402,11 +403,11 @@ static int closure_scan_body(allocator_t *out,
       return -1;
     }
   } else if (kind == CLUX_NODE_EXPR_CALL) {
-    /* 自身名仅限 callee 位（自递归改写 env.callee）；捕获名 callee 位
-       合法（调用捕获的函数值，叶克隆期 env.<name> 改写）。 */
+    /* 自身名仅限 callee 位（自递归改写 $env.$callee）；捕获名 callee 位
+       合法（调用捕获的函数值，叶克隆期 $env.<name> 改写）。 */
     return 0;
   } else if (closure_is_ident_leaf(node)) {
-    /* 普通读位置的捕获名正是 env.<name> 改写目标——放行；仅自身名
+    /* 普通读位置的捕获名正是 $env.<name> 改写目标——放行；仅自身名
        敏感（EXPR_CALL 已在上面整体放行，自递归 callee 位合法）。 */
     return closure_leaf_is(node, out, self_name) ? -1 : 0;
   }
@@ -623,6 +624,20 @@ static sema_closure_t *closure_entry_make(allocator_t *out,
   return entry;
 }
 
+/* §2.12 P2 收紧：块级条目退化失败不再静默跌回旧提升通道（语义漂移——
+   提升为静态函数丢失闭包值语义），改报显式编译错误阻断 emit。 */
+static void closure_diag_bail(clux_sema_t *sema,
+                              node_t *stmt,
+                              const char *name,
+                              const char *reason) {
+  clux_context_diag(sema->ctx,
+                    CLUX_DIAG_ERROR,
+                    node_get_location(stmt),
+                    "closure '%s' cannot be desugared: %s",
+                    name,
+                    reason);
+}
+
 vec_t *
 sema_closure_collect(clux_sema_t *sema, allocator_t *out, program_t *program) {
   vec_t *closures = create_vec(out);
@@ -662,7 +677,8 @@ sema_closure_collect(clux_sema_t *sema, allocator_t *out, program_t *program) {
     }
     vec_push(closures, entry);
   }
-  /* 块级条目：提升项内 ≥1 捕获 + 敏感名字域全套检查。 */
+  /* 块级条目（§2.12 P2 起含零捕获——原位构造）+ 敏感名字域全套检查；
+     bail 一律显式报错，不再跌回旧提升通道。 */
   for (size_t idx = 0; idx < vec_get_size(sema->hoists); idx++) {
     sema_hoist_t *hoist = (sema_hoist_t *)vec_get(sema->hoists, idx);
     if (!hoist || !hoist->owner ||
@@ -693,8 +709,10 @@ sema_closure_collect(clux_sema_t *sema, allocator_t *out, program_t *program) {
       continue;
     }
     int ok = 0;
+    /* §2.12 P2：零捕获块级条目同样纳入退化（定义点原位构造——无捕获
+       即无前向依赖，不引入 TDZ 占位与块尾赋值）。 */
     vec_t *caps = closure_extract_caps(sema, out, program, decl, NULL, &ok);
-    if (!ok || vec_get_size(caps) == 0) {
+    if (!ok) {
       closure_free_caps(out, &caps);
       continue;
     }
@@ -704,12 +722,22 @@ sema_closure_collect(clux_sema_t *sema, allocator_t *out, program_t *program) {
         owner_decl ? func_decl_node_get_body(owner_decl) : NULL;
     node_t *block = closure_find_defining_block(owner_body, hoist->stmt);
     if (!block) {
+      closure_diag_bail(sema,
+                        hoist->stmt,
+                        hoist->name,
+                        "it is defined inside a nested function or defer "
+                        "body, which is not supported yet");
       closure_free_caps(out, &caps);
       continue;
     }
     closure_free_caps(out, &caps);
     caps = closure_extract_caps(sema, out, program, decl, block, &ok);
     if (!ok) {
+      closure_diag_bail(sema,
+                        hoist->stmt,
+                        hoist->name,
+                        "a capture has a type that cannot be stored in the "
+                        "environment struct");
       closure_free_caps(out, &caps);
       continue;
     }
@@ -721,18 +749,32 @@ sema_closure_collect(clux_sema_t *sema, allocator_t *out, program_t *program) {
     }
     entry->captures = caps;
     if (closure_scan_entry(out, decl, entry->name, entry->captures) != 0) {
+      closure_diag_bail(sema,
+                        hoist->stmt,
+                        hoist->name,
+                        "its body uses its own name or a capture name in a "
+                        "position that desugaring cannot rewrite");
       closure_free_caps(out, &entry->captures);
       allocator_free(out, (void **)&entry);
       continue;
     }
     if (closure_scan_owner(
             out, owner_body, entry->name, entry->stmt, entry->block, 0) != 0) {
+      closure_diag_bail(sema,
+                        hoist->stmt,
+                        hoist->name,
+                        "it is referenced outside its defining block");
       closure_free_caps(out, &entry->captures);
       allocator_free(out, (void **)&entry);
       continue;
     }
     if (closure_scan_sibling_hoists(
             out, sema, hoist->owner, entry->stmt, entry->name) != 0) {
+      closure_diag_bail(sema,
+                        hoist->stmt,
+                        hoist->name,
+                        "it is referenced from within a sibling hoisted "
+                        "declaration");
       closure_free_caps(out, &entry->captures);
       allocator_free(out, (void **)&entry);
       continue;
@@ -777,7 +819,7 @@ void sema_closure_entries_free(allocator_t *out, vec_t **closures) {
 
 /* ---- 产物合成 ---- */
 
-/* 构造表达式 .$closure$M{.callee=$callee$M, .<cap>=...}：捕获字段值取
+/* 构造表达式 .$closure$M{.$callee=$callee$M, .<cap>=...}：捕获字段值取
    默认值表达式克隆（标注捕获带默认值），否则为捕获名 identifier
    （块尾现值快照）。 */
 static node_t *closure_construct(sema_closure_t *entry, sema_clone_env_t *env) {
@@ -789,7 +831,7 @@ static node_t *closure_construct(sema_closure_t *entry, sema_clone_env_t *env) {
   node_t *callee_field = create_construct_field_node(env->out);
   node_set_location(callee_field, loc);
   construct_field_node_set_name(callee_field,
-                                closure_ident(env, "callee", loc));
+                                closure_ident(env, "$callee", loc));
   construct_field_node_set_value(callee_field,
                                  closure_ident(env, entry->callee_name, loc));
   construct_node_add_elem(construct, callee_field);
@@ -826,7 +868,7 @@ closure_var_stmt(sema_closure_t *entry, sema_clone_env_t *env, node_t *value) {
   return var;
 }
 
-node_t *sema_closure_module_var(sema_closure_t *entry, sema_clone_env_t *env) {
+node_t *sema_closure_define_var(sema_closure_t *entry, sema_clone_env_t *env) {
   return closure_var_stmt(entry, env, closure_construct(entry, env));
 }
 
@@ -853,7 +895,7 @@ node_t *sema_closure_construct_assign(sema_closure_t *entry,
   return stmt;
 }
 
-/* func(*$closure$M, 参数类型...) -> ret：callee 字段类型。形参用裸类型
+/* func(*$closure$M, 参数类型...) -> ret：$callee 字段类型。形参用裸类型
    形态（TYPE 槽），env 首参经前缀一元 * 包裹。 */
 static node_t *closure_callee_field_type(sema_closure_t *entry,
                                          sema_clone_env_t *env) {
@@ -903,7 +945,7 @@ node_t *sema_closure_struct_synth(sema_closure_t *entry,
   node_set_location(members, loc);
   node_t *callee_field = create_field_node(env->out);
   node_set_location(callee_field, loc);
-  field_node_set_name(callee_field, closure_ident(env, "callee", loc));
+  field_node_set_name(callee_field, closure_ident(env, "$callee", loc));
   field_node_set_type(callee_field, closure_callee_field_type(entry, env));
   struct_members_node_add_member(members, callee_field);
   for (size_t idx = 0; idx < vec_get_size(entry->captures); idx++) {
@@ -949,7 +991,7 @@ node_t *sema_closure_callee_synth(sema_closure_t *entry,
   node_t *params = create_func_params_node(env->out);
   node_t *env_param = create_func_param_node(env->out);
   node_set_location(env_param, loc);
-  func_param_node_set_name(env_param, closure_ident(env, "env", loc));
+  func_param_node_set_name(env_param, closure_ident(env, "$env", loc));
   func_param_node_set_type(
       env_param,
       closure_prefix(
@@ -1023,17 +1065,17 @@ node_t *sema_desugar_closure_call(node_t *node, sema_clone_env_t *env) {
   const location_t *loc = node_get_location(node);
   node_t *call = create_call_node(env->out);
   node_set_location(call, loc);
-  /* 自递归优先：env.callee(env, args)——env 已是 *$closure$M 指针，
+  /* 自递归优先：$env.$callee($env, args)——$env 已是 *$closure$M 指针，
      直传不取址。 */
   if (env->closure_self && strcmp(text, env->closure_self) == 0) {
     allocator_free(env->out, (void **)&text);
     call_node_set_callee(call,
                          closure_binary(env,
-                                        closure_ident(env, "env", loc),
+                                        closure_ident(env, "$env", loc),
                                         ".",
-                                        closure_ident(env, "callee", loc),
+                                        closure_ident(env, "$callee", loc),
                                         loc));
-    call_node_add_arg(call, closure_ident(env, "env", loc));
+    call_node_add_arg(call, closure_ident(env, "$env", loc));
     for (size_t idx = 1; idx < vec_get_size(children); idx++) {
       call_node_add_arg(
           call, sema_clone_lift_guard((node_t *)vec_get(children, idx), env));
@@ -1056,7 +1098,7 @@ node_t *sema_desugar_closure_call(node_t *node, sema_clone_env_t *env) {
                        closure_binary(env,
                                       closure_ident(env, entry->name, loc),
                                       ".",
-                                      closure_ident(env, "callee", loc),
+                                      closure_ident(env, "$callee", loc),
                                       loc));
   call_node_add_arg(
       call,
@@ -1091,7 +1133,7 @@ node_t *sema_closure_cap_rewrite(node_t *node, sema_clone_env_t *env) {
   }
   const location_t *loc = node_get_location(node);
   return closure_binary(env,
-                        closure_ident(env, "env", loc),
+                        closure_ident(env, "$env", loc),
                         ".",
                         closure_ident(env, hit->name, loc),
                         loc);

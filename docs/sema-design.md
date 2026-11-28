@@ -191,27 +191,37 @@ a.print();
 元信息）不回填——它们是 sema 的消费品。装饰器中属于后端提示类的
 （如 [[inline]]）随声明保留，其余在 sema 消费后摘除。
 
-### 2.12 闭包退化（P1，双轨过渡）
+### 2.12 闭包退化（P2——零捕获纳入 + bail 收紧）
 
 具名函数退化为一等函数值结构：`func f(...)` → `struct $closure$f`
-（callee 字段打头 + 逐捕获字段）+ `func $callee$f(env: *$closure$f, ...)`
-纯函数（env 首参自指）。调用点 `f(x)` 改写 `f.callee(f.&, x)`；体内
-捕获引用改写 `env.<name>`；自递归 `env.callee(env, x)`。合成名走
-§1.3 三分法的 `$` 中缀连接。
+（`$callee` 字段打头 + 逐捕获字段）+ `func $callee$f($env: *$closure$f, ...)`
+纯函数（$env 首参自指）。调用点 `f(x)` 改写 `f.$callee(f.&, x)`；体内
+捕获引用改写 `$env.<name>`；自递归 `$env.$callee($env, x)`。合成名走
+§1.3 三分法：`$closure$M`/`$callee$M` 用 `$` 中缀连接，协议键
+`$callee`/`$env` 用 `$` 前缀与用户捕获名/形参名隔离（捕获名 `callee`、
+形参/捕获名 `env` 均放行并存）。
 
 - **模块级条目**（含零捕获）：原位换 `var f: $closure$f = $closure$f`
-  构造，声明与 callee 集中双轮合成（先全部 struct 后全部 callee）。
-- **块级条目**（定义在函数体块内，需 ≥1 捕获）：定义点换 TDZ 占位
-  `var N: $closure$M = undefined`，定义块块尾追加构造赋值。
+  构造，声明与 callee 集中双轮合成（先全部 struct 后全部 callee，
+  收集序）。
+- **块级零捕获条目**（P2 纳入）：零捕获即无前向依赖，定义点**原位
+  构造** `var N: $closure$M = .$closure$M{$callee = ...}`，不走 TDZ
+  占位/块尾赋值，定义后立即可调用。
+- **块级含捕获条目**：定义点换 TDZ 占位 `var N: $closure$M =
+  undefined`，定义块块尾追加构造赋值。
   **var 捕获恒为块尾快照**——定义点不绑定现值；mid-block 调用读
   TDZ var 报错是**有意语义**（与 §4.17 析构登记的时序约定一致）。
 - **退化资格**：具名 func（cfunc/generic/export/comptime/装饰器/
-  匿名不退化）；块级另需 Scan-A/B/C 敏感名字域检查通过，任一失败
-  bail 回旧提升通道（§2.2 形态）。
-- **P1 已知局限**：函数值传递仅限非条目名位置；捕获定型依赖名字
-  匹配（遮蔽场景保守 bail）；captured disposable 值不登记析构
-  unwind；条目体内引用同 owner 其它退化条目经 Scan-C 互斥走旧
-  通道；块级零捕获条目走旧通道。旧提升通道本批保留，下批删除。
+  匿名不退化）；块级另需 Scan-A/B/C 敏感名字域检查通过。
+- **bail 收紧**（P2）：块级条目退化失败（定义位置不支持/二遍定型
+  失败/Scan-A/B/C）不再静默跌回旧提升通道（提升为静态函数丢失
+  闭包值语义——语义漂移），改报显式编译错误，emit 短路不产出
+  Program。shape 不达标（cfunc/export/comptime/装饰器/泛型等）、
+  nested（嵌套在已退化条目体内，待 P3 递归退化）、
+  struct 方法体内条目（§2.10 后续批次）保持旧通道。
+- **P2 已知局限**：函数值传递仅限非条目名位置；捕获定型依赖名字
+  匹配（遮蔽场景显式报错）；captured disposable 值不登记析构
+  unwind；nested 条目体内嵌套 func 仍走旧提升通道，待 P3 递归退化。
 
 ## 3. 名字方案（mangling）
 
